@@ -1,0 +1,664 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SIH wMbus Reader</title>
+<style>
+  :root {
+    --bg:       #0f1117;
+    --surface:  #1a1d27;
+    --surface2: #22263a;
+    --border:   #2e3352;
+    --accent:   #4f8ef7;
+    --accent2:  #7c3aed;
+    --green:    #22c55e;
+    --yellow:   #f59e0b;
+    --red:      #ef4444;
+    --text:     #e2e8f0;
+    --muted:    #64748b;
+    --radius:   12px;
+    --font:     'Inter', system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: var(--font); min-height: 100vh;
+  }
+
+  /* NAV */
+  nav {
+    background: var(--surface); border-bottom: 1px solid var(--border);
+    padding: 0 24px; display: flex; align-items: center;
+    height: 60px; position: sticky; top: 0; z-index: 100;
+  }
+  .nav-logo {
+    font-size: 1.1rem; font-weight: 700; color: var(--accent);
+    letter-spacing: 0.5px; display: flex; align-items: center; gap: 10px;
+  }
+  .nav-logo svg { width: 28px; height: 28px; }
+  .nav-tabs {
+    display: flex; gap: 4px; margin-left: 32px;
+  }
+  .nav-tab {
+    padding: 6px 16px; border-radius: 8px; cursor: pointer;
+    font-size: 0.875rem; color: var(--muted); border: none;
+    background: transparent; transition: all .15s;
+  }
+  .nav-tab:hover { color: var(--text); background: var(--surface2); }
+  .nav-tab.active { color: var(--accent); background: var(--surface2); }
+  .nav-right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+  .badge {
+    padding: 4px 10px; border-radius: 20px; font-size: 0.75rem;
+    font-weight: 600; display: flex; align-items: center; gap: 6px;
+  }
+  .badge.green { background: #16301f; color: var(--green); }
+  .badge.yellow { background: #2d2408; color: var(--yellow); }
+  .badge.red { background: #2d0f0f; color: var(--red); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+
+  /* LAYOUT */
+  main { padding: 28px 24px; max-width: 1200px; margin: 0 auto; }
+  .page { display: none; }
+  .page.active { display: block; }
+  h2 { font-size: 1.25rem; font-weight: 600; margin-bottom: 20px; color: var(--text); }
+
+  /* GRID */
+  .grid { display: grid; gap: 16px; }
+  .grid-2 { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+  .grid-3 { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+
+  /* CARD */
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 20px;
+  }
+  .card-title {
+    font-size: 0.75rem; font-weight: 600; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px;
+  }
+  .card-value {
+    font-size: 2rem; font-weight: 700; color: var(--text);
+    line-height: 1.1;
+  }
+  .card-unit { font-size: 1rem; color: var(--muted); font-weight: 400; }
+  .card-sub { font-size: 0.8rem; color: var(--muted); margin-top: 6px; }
+
+  /* METER CARD */
+  .meter-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 20px; margin-bottom: 12px;
+  }
+  .meter-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 16px;
+  }
+  .meter-name { font-size: 1rem; font-weight: 600; }
+  .meter-id { font-size: 0.75rem; color: var(--muted); font-family: monospace; }
+  .meter-type {
+    padding: 3px 10px; border-radius: 20px; font-size: 0.72rem;
+    font-weight: 600; text-transform: uppercase;
+  }
+  .type-electricity { background: #1a2a4a; color: #60a5fa; }
+  .type-water       { background: #0f2a2a; color: #34d399; }
+  .type-gas         { background: #2a1f0f; color: #fbbf24; }
+  .type-unknown     { background: var(--surface2); color: var(--muted); }
+  .fields-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 10px;
+  }
+  .field-item {
+    background: var(--surface2); border-radius: 8px;
+    padding: 10px 12px;
+  }
+  .field-name { font-size: 0.7rem; color: var(--muted); margin-bottom: 4px; }
+  .field-val { font-size: 1.1rem; font-weight: 600; }
+  .rssi-bar {
+    height: 4px; border-radius: 2px; background: var(--surface2);
+    margin-top: 12px; overflow: hidden;
+  }
+  .rssi-fill {
+    height: 100%; border-radius: 2px;
+    background: linear-gradient(90deg, var(--red), var(--yellow), var(--green));
+    transition: width .3s;
+  }
+  .rssi-label { font-size: 0.72rem; color: var(--muted); margin-top: 4px; }
+
+  /* FORM */
+  .form-group { margin-bottom: 16px; }
+  label { display: block; font-size: 0.82rem; color: var(--muted);
+          margin-bottom: 6px; font-weight: 500; }
+  input, select {
+    width: 100%; padding: 10px 14px; background: var(--surface2);
+    border: 1px solid var(--border); border-radius: 8px;
+    color: var(--text); font-size: 0.9rem; outline: none;
+    transition: border-color .15s;
+  }
+  input:focus, select:focus { border-color: var(--accent); }
+  .btn {
+    padding: 10px 20px; border-radius: 8px; border: none;
+    font-size: 0.875rem; font-weight: 600; cursor: pointer;
+    transition: all .15s;
+  }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover { background: #3b7de8; }
+  .btn-danger { background: var(--red); color: #fff; }
+  .btn-danger:hover { background: #dc2626; }
+  .btn-secondary {
+    background: var(--surface2); color: var(--text);
+    border: 1px solid var(--border);
+  }
+  .btn-secondary:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* OTA */
+  .progress-wrap {
+    background: var(--surface2); border-radius: 8px;
+    height: 12px; overflow: hidden; margin: 12px 0;
+  }
+  .progress-bar {
+    height: 100%; background: var(--accent);
+    border-radius: 8px; transition: width .3s;
+    width: 0%;
+  }
+  .upload-zone {
+    border: 2px dashed var(--border); border-radius: var(--radius);
+    padding: 36px; text-align: center; cursor: pointer;
+    transition: border-color .15s;
+  }
+  .upload-zone:hover, .upload-zone.drag { border-color: var(--accent); }
+  .upload-zone p { color: var(--muted); font-size: 0.875rem; }
+
+  /* TABLE */
+  table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+  th { text-align: left; padding: 10px 12px; color: var(--muted);
+       border-bottom: 1px solid var(--border); font-size: 0.75rem;
+       text-transform: uppercase; letter-spacing: 0.5px; }
+  td { padding: 10px 12px; border-bottom: 1px solid var(--border); }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: var(--surface2); }
+
+  /* STATUS BAR */
+  .status-bar {
+    background: var(--surface2); border-top: 1px solid var(--border);
+    padding: 8px 24px; display: flex; align-items: center; gap: 20px;
+    font-size: 0.75rem; color: var(--muted); position: fixed;
+    bottom: 0; left: 0; right: 0;
+  }
+  .status-bar span b { color: var(--text); }
+  @media (max-width: 600px) {
+    nav { padding: 0 12px; }
+    main { padding: 16px 12px; }
+    .nav-tabs { gap: 2px; }
+    .nav-tab { padding: 6px 10px; font-size: 0.8rem; }
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="nav-logo">
+    <svg viewBox="0 0 32 32" fill="none">
+      <rect width="32" height="32" rx="8" fill="#4f8ef7" opacity=".15"/>
+      <path d="M8 24 L16 8 L24 24" stroke="#4f8ef7" stroke-width="2.5"
+            stroke-linecap="round" stroke-linejoin="round"/>
+      <circle cx="16" cy="19" r="2.5" fill="#4f8ef7"/>
+    </svg>
+    SIH wMbus
+  </div>
+  <div class="nav-tabs">
+    <button class="nav-tab active" onclick="showPage('dashboard')">Dashboard</button>
+    <button class="nav-tab" onclick="showPage('meters')">Liczniki</button>
+    <button class="nav-tab" onclick="showPage('config')">Konfiguracja</button>
+    <button class="nav-tab" onclick="showPage('ota')">Aktualizacja</button>
+  </div>
+  <div class="nav-right">
+    <span id="wifi-badge" class="badge green">
+      <span class="dot"></span> WiFi
+    </span>
+  </div>
+</nav>
+
+<main>
+
+<!-- DASHBOARD -->
+<div id="page-dashboard" class="page active">
+  <h2>Dashboard</h2>
+  <div class="grid grid-3" style="margin-bottom:20px">
+    <div class="card">
+      <div class="card-title">Aktywne liczniki</div>
+      <div class="card-value" id="stat-meters">–</div>
+      <div class="card-sub">wykrytych w eterze</div>
+    </div>
+    <div class="card">
+      <div class="card-title">WiFi RSSI</div>
+      <div class="card-value" id="stat-rssi">–<span class="card-unit"> dBm</span></div>
+      <div class="card-sub" id="stat-ip">–</div>
+    </div>
+    <div class="card">
+      <div class="card-title">Uptime</div>
+      <div class="card-value" id="stat-uptime">–</div>
+      <div class="card-sub">od ostatniego restartu</div>
+    </div>
+  </div>
+  <h2>Ostatnie odczyty</h2>
+  <div id="dashboard-meters">
+    <div style="color:var(--muted);text-align:center;padding:40px">
+      Oczekiwanie na ramki wMbus…
+    </div>
+  </div>
+</div>
+
+<!-- METERS -->
+<div id="page-meters" class="page">
+  <h2>Wszystkie liczniki</h2>
+  <div id="meters-list"></div>
+</div>
+
+<!-- CONFIG -->
+<div id="page-config" class="page">
+  <h2>Konfiguracja</h2>
+  <div class="grid grid-2">
+    <div class="card">
+      <div class="card-title">Sieć WiFi</div>
+      <div class="form-group" style="margin-top:12px">
+        <label>SSID</label>
+        <input type="text" id="cfg-ssid" placeholder="Nazwa sieci">
+      </div>
+      <div class="form-group">
+        <label>Hasło</label>
+        <input type="password" id="cfg-pass" placeholder="••••••••">
+      </div>
+      <button class="btn btn-primary" onclick="saveWifi()">Zapisz i połącz</button>
+    </div>
+    <div class="card">
+      <div class="card-title">Radio wMbus</div>
+      <div class="form-group" style="margin-top:12px">
+        <label>Częstotliwość (MHz)</label>
+        <input type="number" id="cfg-freq" step="0.001" value="868.950">
+      </div>
+      <div class="form-group">
+        <label>Tryb odbioru</label>
+        <select id="cfg-mode">
+          <option value="T1C1">T1 + C1 (auto)</option>
+          <option value="T1">T1 only</option>
+          <option value="C1">C1 only</option>
+        </select>
+      </div>
+      <button class="btn btn-primary" onclick="saveRadio()">Zapisz</button>
+    </div>
+  </div>
+  <div class="card" style="margin-top:16px">
+    <div class="card-title">Skonfigurowane liczniki</div>
+    <div id="cfg-meters-list" style="margin-top:12px"></div>
+    <button class="btn btn-secondary" style="margin-top:12px"
+            onclick="showAddMeter()">+ Dodaj licznik</button>
+  </div>
+  <div class="card" style="margin-top:16px">
+    <div class="card-title">System</div>
+    <div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap">
+      <button class="btn btn-secondary" onclick="doRestart()">Restart urządzenia</button>
+      <button class="btn btn-danger" onclick="doFactoryReset()">Reset do ustawień fabrycznych</button>
+    </div>
+  </div>
+</div>
+
+<!-- OTA -->
+<div id="page-ota" class="page">
+  <h2>Aktualizacja firmware</h2>
+  <div class="grid grid-2">
+    <div class="card">
+      <div class="card-title">Wersja bieżąca</div>
+      <div class="card-value" id="ota-version" style="font-size:1.4rem;margin:12px 0">–</div>
+      <div class="card-sub">ESP32-C6 · SIH wMbus Reader</div>
+    </div>
+    <div class="card">
+      <div class="card-title">Aktualizacja z GitHub</div>
+      <div class="form-group" style="margin-top:12px">
+        <label>URL pliku .bin (GitHub Releases)</label>
+        <input type="text" id="ota-url"
+          placeholder="https://github.com/…/releases/latest/download/firmware.bin">
+      </div>
+      <button class="btn btn-primary" onclick="otaFromUrl()">Aktualizuj z URL</button>
+    </div>
+  </div>
+  <div class="card" style="margin-top:16px">
+    <div class="card-title">Upload pliku firmware</div>
+    <div class="upload-zone" id="upload-zone"
+         onclick="document.getElementById('ota-file').click()"
+         ondragover="event.preventDefault();this.classList.add('drag')"
+         ondragleave="this.classList.remove('drag')"
+         ondrop="handleDrop(event)">
+      <svg width="40" height="40" viewBox="0 0 24 24" fill="none"
+           stroke="currentColor" stroke-width="1.5" style="color:var(--muted);margin-bottom:8px">
+        <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+        <polyline points="17 8 12 3 7 8"/>
+        <line x1="12" y1="3" x2="12" y2="15"/>
+      </svg>
+      <p>Przeciągnij plik <b>.bin</b> tutaj lub kliknij aby wybrać</p>
+      <p id="ota-filename" style="margin-top:6px;color:var(--accent)"></p>
+    </div>
+    <input type="file" id="ota-file" accept=".bin" style="display:none"
+           onchange="fileSelected(this)">
+    <div id="ota-progress-wrap" style="display:none;margin-top:12px">
+      <div style="display:flex;justify-content:space-between;font-size:0.8rem;color:var(--muted)">
+        <span id="ota-status-text">Przesyłanie…</span>
+        <span id="ota-pct">0%</span>
+      </div>
+      <div class="progress-wrap"><div class="progress-bar" id="ota-bar"></div></div>
+    </div>
+    <button class="btn btn-primary" id="ota-upload-btn"
+            onclick="otaUpload()" style="margin-top:12px;display:none">
+      Wgraj firmware
+    </button>
+  </div>
+</div>
+
+</main>
+
+<div class="status-bar">
+  <span>IP: <b id="sb-ip">–</b></span>
+  <span>Wersja: <b id="sb-ver">–</b></span>
+  <span>Uptime: <b id="sb-uptime">–</b></span>
+  <span style="margin-left:auto;color:var(--accent)">SIH wMbus Reader © smartinhome.pl</span>
+</div>
+
+<script>
+const API = '';  // pusty = ten sam host
+let refreshTimer = null;
+let selectedFile = null;
+
+// ── Nawigacja ──────────────────────────────────────────────
+function showPage(name) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('page-' + name).classList.add('active');
+  event.target.classList.add('active');
+  if (name === 'dashboard' || name === 'meters') fetchMeters();
+  if (name === 'config') fetchConfig();
+  if (name === 'ota') fetchOtaStatus();
+}
+
+// ── Fetch helpers ──────────────────────────────────────────
+async function apiFetch(path, opts = {}) {
+  try {
+    const r = await fetch(API + path, opts);
+    return await r.json();
+  } catch(e) {
+    console.error('API error', path, e);
+    return null;
+  }
+}
+
+// ── Status ─────────────────────────────────────────────────
+async function fetchStatus() {
+  const d = await apiFetch('/api/status');
+  if (!d) return;
+
+  document.getElementById('stat-meters').textContent = d.meter_count;
+  document.getElementById('stat-rssi').innerHTML =
+    d.wifi_rssi + '<span class="card-unit"> dBm</span>';
+  document.getElementById('stat-ip').textContent = d.ip;
+  document.getElementById('stat-uptime').textContent = formatUptime(d.uptime_ms);
+  document.getElementById('sb-ip').textContent = d.ip;
+  document.getElementById('sb-ver').textContent = d.version;
+  document.getElementById('sb-uptime').textContent = formatUptime(d.uptime_ms);
+  document.getElementById('ota-version').textContent = d.version;
+
+  const badge = document.getElementById('wifi-badge');
+  if (d.wifi_state === 'connected') {
+    badge.className = 'badge green';
+    badge.innerHTML = '<span class="dot"></span> ' + d.ip;
+  } else if (d.wifi_state === 'ap_mode') {
+    badge.className = 'badge yellow';
+    badge.innerHTML = '<span class="dot"></span> Tryb AP';
+  } else {
+    badge.className = 'badge red';
+    badge.innerHTML = '<span class="dot"></span> Brak WiFi';
+  }
+}
+
+function formatUptime(ms) {
+  let s = Math.floor(ms / 1000);
+  const d = Math.floor(s / 86400); s %= 86400;
+  const h = Math.floor(s / 3600);  s %= 3600;
+  const m = Math.floor(s / 60);    s %= 60;
+  if (d > 0) return d + 'd ' + h + 'h ' + m + 'm';
+  if (h > 0) return h + 'h ' + m + 'm ' + s + 's';
+  return m + 'm ' + s + 's';
+}
+
+// ── Liczniki ───────────────────────────────────────────────
+async function fetchMeters() {
+  const meters = await apiFetch('/api/meters');
+  if (!meters) return;
+
+  renderDashboard(meters);
+  renderMetersList(meters);
+}
+
+function meterTypeClass(type) {
+  if (type.includes('elect') || type === 'amiplus') return 'type-electricity';
+  if (type.includes('water') || type === 'izar' || type === 'apator162') return 'type-water';
+  if (type.includes('gas')  || type === 'unismart') return 'type-gas';
+  return 'type-unknown';
+}
+
+function meterTypeLabel(type) {
+  const map = {
+    amiplus:'Elektryczność', izar:'Woda', apator162:'Woda',
+    unismart:'Gaz', electricity:'Elektryczność',
+    water:'Woda', gas:'Gaz'
+  };
+  return map[type] || type;
+}
+
+function rssiWidth(rssi) {
+  // -40 = 100%, -100 = 0%
+  return Math.max(0, Math.min(100, ((rssi + 100) / 60) * 100));
+}
+
+function renderMeterCard(m) {
+  const typeClass = meterTypeClass(m.type);
+  const typeLabel = meterTypeLabel(m.type);
+  const rssiW    = rssiWidth(m.rssi);
+  const lastSeen = m.last_seen > 0
+    ? new Date(m.last_seen).toLocaleTimeString('pl') : '–';
+
+  const fields = m.fields.map(f => `
+    <div class="field-item">
+      <div class="field-name">${f.field.replace(/_/g,' ')}</div>
+      <div class="field-val">${f.value.toFixed(3)} <small style="color:var(--muted)">${f.unit}</small></div>
+    </div>`).join('');
+
+  return `
+  <div class="meter-card">
+    <div class="meter-header">
+      <div>
+        <div class="meter-name">${m.name || m.id}</div>
+        <div class="meter-id">${m.id}</div>
+      </div>
+      <span class="meter-type ${typeClass}">${typeLabel}</span>
+    </div>
+    <div class="fields-grid">${fields || '<div style="color:var(--muted);font-size:.85rem">Brak zdekodowanych pól</div>'}</div>
+    <div class="rssi-bar"><div class="rssi-fill" style="width:${rssiW}%"></div></div>
+    <div class="rssi-label">Sygnał: ${m.rssi} dBm · ostatni odczyt: ${lastSeen}</div>
+  </div>`;
+}
+
+function renderDashboard(meters) {
+  const el = document.getElementById('dashboard-meters');
+  if (!meters.length) {
+    el.innerHTML = '<div style="color:var(--muted);text-align:center;padding:40px">Oczekiwanie na ramki wMbus…</div>';
+    return;
+  }
+  el.innerHTML = meters.map(renderMeterCard).join('');
+}
+
+function renderMetersList(meters) {
+  const el = document.getElementById('meters-list');
+  el.innerHTML = meters.length
+    ? meters.map(renderMeterCard).join('')
+    : '<div style="color:var(--muted);text-align:center;padding:40px">Brak wykrytych liczników</div>';
+}
+
+// ── Konfiguracja ───────────────────────────────────────────
+async function fetchConfig() {
+  const cfg = await apiFetch('/api/config');
+  if (!cfg) return;
+  document.getElementById('cfg-ssid').value  = cfg.wifi_ssid || '';
+  document.getElementById('cfg-freq').value  = cfg.freq_mhz  || 868.95;
+
+  const ml = document.getElementById('cfg-meters-list');
+  if (!cfg.meters || !cfg.meters.length) {
+    ml.innerHTML = '<div style="color:var(--muted);font-size:.85rem">Brak skonfigurowanych liczników</div>';
+    return;
+  }
+  ml.innerHTML = `
+  <table>
+    <tr><th>ID</th><th>Typ</th><th>Nazwa</th><th>Status</th></tr>
+    ${cfg.meters.map(m => `
+    <tr>
+      <td><code>${m.id}</code></td>
+      <td>${m.type}</td>
+      <td>${m.name}</td>
+      <td><span class="badge ${m.enabled?'green':'red'}">
+        <span class="dot"></span>${m.enabled?'Aktywny':'Wyłączony'}
+      </span></td>
+    </tr>`).join('')}
+  </table>`;
+}
+
+async function saveWifi() {
+  const ssid = document.getElementById('cfg-ssid').value.trim();
+  const pass = document.getElementById('cfg-pass').value;
+  if (!ssid) { alert('Podaj SSID'); return; }
+  if (!confirm('Urządzenie połączy się z nową siecią i uruchomi ponownie. Kontynuować?')) return;
+  await apiFetch('/api/config/wifi', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ssid, password: pass})
+  });
+}
+
+async function saveRadio() {
+  alert('Zapisano (wymaga implementacji endpointu /api/config/radio)');
+}
+
+function showAddMeter() {
+  alert('Formularz dodawania licznika — w budowie');
+}
+
+async function doRestart() {
+  if (!confirm('Uruchomić urządzenie ponownie?')) return;
+  await apiFetch('/api/restart', {method:'POST'});
+}
+
+async function doFactoryReset() {
+  if (!confirm('UWAGA: Usunie całą konfigurację. Kontynuować?')) return;
+  alert('Factory reset — w budowie');
+}
+
+// ── OTA ────────────────────────────────────────────────────
+async function otaFromUrl() {
+  const url = document.getElementById('ota-url').value.trim();
+  if (!url) { alert('Podaj URL'); return; }
+  if (!confirm('Rozpocząć aktualizację z:\n' + url)) return;
+  await apiFetch('/api/ota/url', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({url})
+  });
+  pollOta();
+}
+
+function fileSelected(input) {
+  selectedFile = input.files[0];
+  if (selectedFile) {
+    document.getElementById('ota-filename').textContent = selectedFile.name;
+    document.getElementById('ota-upload-btn').style.display = 'inline-block';
+  }
+}
+
+function handleDrop(e) {
+  e.preventDefault();
+  document.getElementById('upload-zone').classList.remove('drag');
+  const file = e.dataTransfer.files[0];
+  if (file && file.name.endsWith('.bin')) {
+    selectedFile = file;
+    document.getElementById('ota-filename').textContent = file.name;
+    document.getElementById('ota-upload-btn').style.display = 'inline-block';
+  }
+}
+
+async function otaUpload() {
+  if (!selectedFile) return;
+  if (!confirm('Wgrać firmware ' + selectedFile.name + '?')) return;
+
+  const wrap = document.getElementById('ota-progress-wrap');
+  wrap.style.display = 'block';
+  document.getElementById('ota-upload-btn').disabled = true;
+
+  const buf = await selectedFile.arrayBuffer();
+  const r = await fetch(API + '/api/ota/upload', {
+    method: 'POST',
+    headers: {'Content-Type':'application/octet-stream'},
+    body: buf
+  });
+
+  if (r.ok) {
+    document.getElementById('ota-status-text').textContent = 'Zapisywanie…';
+    pollOta();
+  } else {
+    document.getElementById('ota-status-text').textContent = 'Błąd przesyłania';
+  }
+}
+
+let otaPoller = null;
+function pollOta() {
+  if (otaPoller) clearInterval(otaPoller);
+  otaPoller = setInterval(fetchOtaStatus, 1000);
+}
+
+async function fetchOtaStatus() {
+  const st = await apiFetch('/api/ota/status');
+  if (!st) return;
+
+  const wrap = document.getElementById('ota-progress-wrap');
+  const bar  = document.getElementById('ota-bar');
+  const txt  = document.getElementById('ota-status-text');
+  const pct  = document.getElementById('ota-pct');
+
+  if (st.state !== 'idle') wrap.style.display = 'block';
+
+  bar.style.width = st.progress + '%';
+  pct.textContent = st.progress + '%';
+
+  const labels = {
+    idle:'',downloading:'Pobieranie…',
+    writing:'Zapisywanie…',success:'Aktualizacja OK — restart…',
+    failed:'Błąd: ' + st.error
+  };
+  txt.textContent = labels[st.state] || st.state;
+
+  if (st.state === 'success' || st.state === 'failed') {
+    if (otaPoller) { clearInterval(otaPoller); otaPoller = null; }
+    document.getElementById('ota-upload-btn').disabled = false;
+  }
+}
+
+// ── Auto-refresh ───────────────────────────────────────────
+function startRefresh() {
+  fetchStatus();
+  fetchMeters();
+  refreshTimer = setInterval(() => {
+    fetchStatus();
+    const activePage = document.querySelector('.page.active').id;
+    if (activePage === 'page-dashboard' || activePage === 'page-meters')
+      fetchMeters();
+  }, 5000);
+}
+
+startRefresh();
+</script>
+</body>
+</html>

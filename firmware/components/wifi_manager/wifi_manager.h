@@ -1,5 +1,6 @@
 #pragma once
 #include <stdbool.h>
+#include <stddef.h>
 
 typedef enum {
     WIFI_STATE_DISCONNECTED,

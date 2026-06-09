@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "main.c" "app_main.c"
+    SRCS "main.c"
     INCLUDE_DIRS "."
     REQUIRES
         wifi_manager

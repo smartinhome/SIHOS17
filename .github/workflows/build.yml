@@ -20,6 +20,9 @@ jobs:
           target: esp32c6
           path: firmware
 
+      - name: List build artifacts
+        run: find firmware/build -name "*.bin" | head -20
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -28,6 +31,7 @@ jobs:
             firmware/build/sih-wmbus-reader.bin
             firmware/build/bootloader/bootloader.bin
             firmware/build/partition_table/partition-table.bin
+          if-no-files-found: warn
           retention-days: 30
 
   release:
@@ -46,6 +50,9 @@ jobs:
           name: firmware-${{ github.ref_name }}
           path: dist/
 
+      - name: List downloaded files
+        run: find dist/ -type f
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
@@ -54,8 +61,5 @@ jobs:
             ## SIH wMbus Reader ${{ github.ref_name }}
             ### OTA URL
             https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/sih-wmbus-reader.bin
-          files: |
-            dist/firmware/build/sih-wmbus-reader.bin
-            dist/firmware/build/bootloader/bootloader.bin
-            dist/firmware/build/partition_table/partition-table.bin
+          files: dist/**/*.bin
           prerelease: ${{ contains(github.ref_name, 'beta') }}

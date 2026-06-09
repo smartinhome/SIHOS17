@@ -1,6 +1,7 @@
 #include "ota_manager.h"
 #include "esp_ota_ops.h"
 #include "esp_https_ota.h"
+#include "esp_crt_bundle.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -17,9 +18,11 @@ static void ota_url_task(void *arg) {
     s_status.progress_pct = 0;
 
     esp_http_client_config_t http_cfg = {
-        .url            = url,
-        .timeout_ms     = 30000,
-        .keep_alive_enable = true,
+        .url                       = url,
+        .timeout_ms                = 30000,
+        .keep_alive_enable         = true,
+        .skip_cert_common_name_check = true,
+        .crt_bundle_attach         = esp_crt_bundle_attach,
     };
     esp_https_ota_config_t ota_cfg = {
         .http_config = &http_cfg,

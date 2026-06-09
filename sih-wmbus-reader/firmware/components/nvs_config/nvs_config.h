@@ -1,0 +1,29 @@
+#pragma once
+#include <stdint.h>
+#include <stdbool.h>
+
+#define NVS_NAMESPACE "sih_cfg"
+#define MAX_METERS    8
+
+typedef struct {
+    char     id_hex[12];   // np. "56989134"
+    char     type[16];     // "amiplus", "izar", "apator162", "unismart"
+    char     key[33];      // klucz AES 32 hex + null
+    char     name[32];     // nazwa przyjazna
+    bool     enabled;
+} meter_config_t;
+
+typedef struct {
+    char           wifi_ssid[64];
+    char           wifi_pass[64];
+    char           ap_ssid[32];
+    char           ap_pass[32];
+    float          freq_mhz;
+    uint8_t        meter_count;
+    meter_config_t meters[MAX_METERS];
+} sih_config_t;
+
+void         nvs_config_init(void);
+sih_config_t nvs_config_get(void);
+void         nvs_config_save(const sih_config_t *cfg);
+void         nvs_config_reset(void);

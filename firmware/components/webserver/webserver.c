@@ -64,7 +64,7 @@ static const char *ROOT_HTML =
 "<span class='logo'>SIH wMbus</span>"
 "<button class='tab active' onclick='showPage(\"dashboard\",this)'>Dashboard</button>"
 "<button class='tab' onclick='showPage(\"wifi\",this)'>WiFi</button>"
-"<button class='tab' onclick='showPage(\"update\",this)'>Aktualizacja</button>"
+"<button class='tab' onclick='showPage(\"update\",this);fetchStatus()'>Aktualizacja</button>"
 "<span id='wifi-badge' class='badge ap'>AP</span>"
 "</nav>"
 "<main>"

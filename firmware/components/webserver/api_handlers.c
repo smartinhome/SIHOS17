@@ -235,14 +235,14 @@ static esp_err_t handle_restart(httpd_req_t *req) {
 // ── Rejestracja wszystkich handlerów ──────────────────────
 void api_register_handlers(httpd_handle_t server) {
     const httpd_uri_t handlers[] = {
-        { "/api/status",     HTTP_GET,  handle_status,      NULL },
-        { "/api/meters",     HTTP_GET,  handle_meters,      NULL },
-        { "/api/config",     HTTP_GET,  handle_config_get,  NULL },
-        { "/api/config/wifi",HTTP_POST, handle_config_wifi, NULL },
-        { "/api/ota/url",    HTTP_POST, handle_ota_url,     NULL },
-        { "/api/ota/upload", HTTP_POST, handle_ota_upload,  NULL },
-        { "/api/ota/status", HTTP_GET,  handle_ota_status,  NULL },
-        { "/api/restart",    HTTP_POST, handle_restart,     NULL },
+        { .uri="/api/status",      .method=HTTP_GET,  .handler=handle_status,      .user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/meters",      .method=HTTP_GET,  .handler=handle_meters,      .user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/config",      .method=HTTP_GET,  .handler=handle_config_get,  .user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/config/wifi", .method=HTTP_POST, .handler=handle_config_wifi, .user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/ota/url",     .method=HTTP_POST, .handler=handle_ota_url,     .user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/ota/upload",  .method=HTTP_POST, .handler=handle_ota_upload,  .user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/ota/status",  .method=HTTP_GET,  .handler=handle_ota_status,  .user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/restart",     .method=HTTP_POST, .handler=handle_restart,     .user_ctx=NULL, .is_websocket=false },
     };
     for (int i = 0; i < sizeof(handlers)/sizeof(handlers[0]); i++)
         httpd_register_uri_handler(server, &handlers[i]);

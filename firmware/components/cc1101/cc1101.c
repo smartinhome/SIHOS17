@@ -57,7 +57,6 @@ static const char *TAG = "CC1101";
 static spi_device_handle_t s_spi = NULL;
 static cc1101_config_t     s_cfg = {0};
 static wmbus_frame_cb_t    s_callback = NULL;
-static QueueHandle_t       s_frame_queue = NULL;
 static TaskHandle_t        s_rx_task = NULL;
 
 static uint8_t spi_transfer(uint8_t addr, uint8_t val) {

@@ -18,28 +18,16 @@ jobs:
         with:
           esp_idf_version: v5.2.1
           target: esp32c6
-
-      - name: Build firmware
-        working-directory: firmware
-        run: |
-          idf.py set-target esp32c6
-          idf.py build
-
-      - name: Rename artifacts
-        working-directory: firmware/build
-        run: |
-          cp sih-wmbus-reader.bin firmware.bin
-          cp bootloader/bootloader.bin bootloader.bin
-          cp partition_table/partition-table.bin partition-table.bin
+          path: firmware
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: firmware-${{ github.ref_name }}
           path: |
-            firmware/build/firmware.bin
-            firmware/build/bootloader.bin
-            firmware/build/partition-table.bin
+            firmware/build/sih-wmbus-reader.bin
+            firmware/build/bootloader/bootloader.bin
+            firmware/build/partition_table/partition-table.bin
           retention-days: 30
 
   release:
@@ -64,11 +52,10 @@ jobs:
           name: SIH wMbus Reader ${{ github.ref_name }}
           body: |
             ## SIH wMbus Reader ${{ github.ref_name }}
-            ### Instalacja OTA
-            URL do aktualizacji:
-            https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/firmware.bin
+            ### OTA URL
+            https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/sih-wmbus-reader.bin
           files: |
-            dist/firmware.bin
-            dist/bootloader.bin
-            dist/partition-table.bin
+            dist/firmware/build/sih-wmbus-reader.bin
+            dist/firmware/build/bootloader/bootloader.bin
+            dist/firmware/build/partition_table/partition-table.bin
           prerelease: ${{ contains(github.ref_name, 'beta') }}

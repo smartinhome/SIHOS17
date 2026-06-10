@@ -79,6 +79,7 @@ void wifi_manager_init(void) {
     }
 
     s_sta_netif = esp_netif_create_default_wifi_sta();
+    esp_netif_set_hostname(s_sta_netif, "sih-wmbus");
     wifi_config_t sta_cfg = {0};
     strlcpy((char *)sta_cfg.sta.ssid,     cfg.wifi_ssid, sizeof(sta_cfg.sta.ssid));
     strlcpy((char *)sta_cfg.sta.password, cfg.wifi_pass,  sizeof(sta_cfg.sta.password));

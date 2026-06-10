@@ -1,7 +1,10 @@
 #include "ota_manager.h"
+#include <stdlib.h>
 #include "esp_ota_ops.h"
 #include "esp_https_ota.h"
 #include "esp_http_client.h"
+#include "esp_crt_bundle.h"
+#include "esp_app_desc.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -17,9 +20,12 @@ static void ota_url_task(void *arg) {
     s_status.progress_pct = 0;
 
     esp_http_client_config_t http_cfg = {
-        .url            = url,
-        .timeout_ms     = 30000,
-        .keep_alive_enable = true,
+        .url                         = url,
+        .timeout_ms                  = 30000,
+        .keep_alive_enable           = true,
+        .crt_bundle_attach           = esp_crt_bundle_attach,
+        .skip_cert_common_name_check = true,
+        .max_redirection_count       = 10,
     };
     esp_https_ota_config_t ota_cfg = {
         .http_config = &http_cfg,
@@ -77,7 +83,6 @@ static void ota_url_task(void *arg) {
 
 // OTA z bufora (upload przez przeglądarkę)
 static void ota_buffer_task(void *arg) {
-    // arg = {data, len} — zaalokowane przez wywołującego
     typedef struct { uint8_t *data; size_t len; } buf_arg_t;
     buf_arg_t *ba = (buf_arg_t *)arg;
 
@@ -132,13 +137,13 @@ cleanup:
 
 void ota_manager_init(void) {
     const esp_partition_t *running = esp_ota_get_running_partition();
-    ESP_LOGI(TAG, "Bieżąca partycja: %s", running->label);
+    ESP_LOGI(TAG, "Biezaca partycja: %s", running->label);
 }
 
 void ota_start_from_url(const char *url) {
     if (s_status.state == OTA_STATE_DOWNLOADING ||
         s_status.state == OTA_STATE_WRITING) {
-        ESP_LOGW(TAG, "OTA już w toku");
+        ESP_LOGW(TAG, "OTA juz w toku");
         return;
     }
     char *url_copy = strdup(url);

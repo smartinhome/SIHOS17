@@ -5,6 +5,7 @@
 #include "cc1101.h"
 #include "wmbus_decoder.h"
 #include "ota_manager.h"
+#include "log_buffer.h"
 
 #include "nvs_flash.h"
 #include "esp_log.h"
@@ -16,6 +17,7 @@
 static const char *TAG = "MAIN";
 
 void app_main(void) {
+    log_buffer_init();
     ESP_LOGI(TAG, "SIH wMbus Reader v%s — start", FW_VERSION_STR);
 
     // NVS

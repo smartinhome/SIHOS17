@@ -8,6 +8,7 @@ idf_component_register(
         wmbus_decoder
         ota_manager
         nvs_config
+        log_buffer
         nvs_flash
         esp_wifi
         esp_netif

@@ -4,32 +4,6 @@ Własny firmware ESP32-C6 dla modułu SIH wMbus Reader 868MHz.
 Odbiera ramki wMbus (T1/C1) przez CC1101, dekoduje liczniki i udostępnia
 dane przez Web UI oraz REST API.
 
-## Sprzęt
-
-| Komponent | Opis |
-|-----------|------|
-| ESP32-C6 | esp32-c6-devkitc-1, 8MB flash |
-| CC1101 | Radio 868 MHz, SPI |
-| Waveshare 2.13" v3 | E-ink, SPI (Faza 2) |
-| WS2812 | LED RGB status |
-
-## Pinout
-
-| Sygnał | GPIO |
-|--------|------|
-| CC1101 CLK | 6 |
-| CC1101 MOSI | 7 |
-| CC1101 MISO | 2 |
-| CC1101 CS | 10 |
-| CC1101 GDO0 | 5 |
-| CC1101 GDO2 | 3 |
-| E-ink CS | 11 |
-| E-ink DC | 21 |
-| E-ink BUSY | 20 |
-| E-ink RST | 22 |
-| LED RGB | 8 |
-| Przycisk BOOT | 9 |
-| LED wMbus | 19 |
 
 ## Pierwsze uruchomienie
 

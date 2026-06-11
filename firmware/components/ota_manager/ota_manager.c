@@ -22,16 +22,16 @@ static void ota_url_task(void *arg) {
     esp_http_client_config_t http_cfg = {
         .url                         = url,
         .timeout_ms                  = 60000,
-        .keep_alive_enable           = true,
         .crt_bundle_attach           = esp_crt_bundle_attach,
         .skip_cert_common_name_check = true,
         .max_redirection_count       = 10,
         .buffer_size                 = 4096,
-        .buffer_size_tx              = 1024,
     };
     esp_https_ota_config_t ota_cfg = {
-        .http_config      = &http_cfg,
-        .bulk_flash_erase = true,
+        .http_config          = &http_cfg,
+        .bulk_flash_erase     = false,
+        .partial_http_download = true,
+        .max_http_request_size = 4096,
     };
 
     esp_https_ota_handle_t handle = NULL;

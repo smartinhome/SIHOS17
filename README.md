@@ -56,6 +56,7 @@ Skonfiguruj WiFi w Web UI → Konfiguracja → Sieć WiFi.
 |----------|------|
 | Dashboard | Aktualne odczyty wszystkich liczników |
 | Liczniki | Szczegółowy widok każdego licznika |
+| **Złap licznik** | Podgląd surowych ramek z eteru na żywo, dekodowanie w przeglądarce, wpisanie klucza AES gdy wymagany, zapis licznika |
 | Konfiguracja | WiFi, radio, lista liczników z kluczami |
 | Aktualizacja | OTA z pliku lub GitHub Releases |
 
@@ -65,8 +66,10 @@ Skonfiguruj WiFi w Web UI → Konfiguracja → Sieć WiFi.
 |----------|--------|------|
 | `/api/status` | GET | Status urządzenia |
 | `/api/meters` | GET | Odczyty wszystkich liczników |
+| `/api/frames` | GET | Ostatnie surowe ramki wMbus (hex) — do dekodowania w Web UI |
 | `/api/config` | GET | Bieżąca konfiguracja |
 | `/api/config/wifi` | POST | Zmień WiFi |
+| `/api/config/meter` | POST | Dodaj/zaktualizuj licznik z kluczem AES (`{id,type,key,name}`) |
 | `/api/ota/url` | POST | OTA z URL |
 | `/api/ota/upload` | POST | OTA upload .bin |
 | `/api/ota/status` | GET | Postęp OTA |
@@ -86,14 +89,29 @@ https://github.com/TWOJ_NICK/sih-wmbus-reader/releases/latest/download/firmware.
 
 ## Dekoder wMbus
 
-Używa komponentu `bodek85/esphome-components` (warstwy dekodowania)
-portowanego jako natywny komponent ESP-IDF.
+Firmware odbiera ramki przez CC1101 i **buforuje je w surowej postaci**
+(`/api/frames`). Samo **dekodowanie odbywa się w Web UI** (`webui/wmbus-decoder.js`),
+gdzie logika z `bodek85/esphome-components` (oparta o `wmbusmeters`) została
+przeniesiona do czystego JavaScript:
+
+- parsowanie warstwy łącza (producent, ID, wersja, medium, CI),
+- wykrywanie trybu zabezpieczeń (otwarty / AES-128 tryb 5 / Diehl PRIOS),
+- **AES-128 CBC w czystym JS** (ESP32 serwuje po HTTP, więc WebCrypto nie jest
+  dostępne) — weryfikowane testem FIPS-197,
+- **deobfuskacja Diehl LFSR** dla liczników `izar`/PRIOS (NIE wymaga klucza),
+- generyczny parser rekordów DIF/VIF (EN 13757-3).
+
+Poprawność jest weryfikowana na realnych wektorach z `wmbusmeters`:
+
+```bash
+node webui/test-decoder.js   # izar ×6, iperl (DIF/VIF), AES KAT — 25/25 pass
+```
 
 Obsługiwane typy liczników:
-- `amiplus` — elektryczność (OTUS3)
-- `izar` — woda
-- `apator162` — woda
-- `unismart` — gaz
+- `izar` — woda (Diehl PRIOS, LFSR, bez klucza) — **zweryfikowane**
+- liczniki otwarte (tryb 0) i AES-128 tryb 5 — generyczny DIF/VIF
+- `amiplus` — elektryczność (OTUS3), `apator162` — woda, `unismart` — gaz
+  (mapowanie typu + ścieżka generyczna/AES; sterowniki specyficzne w planach)
 
 ## Struktura projektu
 
@@ -108,7 +126,9 @@ firmware/
 │   ├── ota_manager/    # OTA z URL i z bufora
 │   └── nvs_config/     # Konfiguracja w NVS flash
 webui/
-└── index.html          # Single-page Web UI
+├── index.html          # Single-page Web UI (zakładka "Złap licznik")
+├── wmbus-decoder.js    # Dekoder wMbus w JS (link-layer + AES + Diehl-LFSR + DIF/VIF)
+└── test-decoder.js     # Testy dekodera na realnych wektorach (node)
 .github/workflows/
 └── build.yml           # CI/CD: build + release
 ```

@@ -24,8 +24,26 @@ typedef struct {
 
 #define MAX_ACTIVE_METERS 8
 
+// ── Bufor surowych ramek (do "łapania" liczników w Web UI) ──────────
+// Przechowujemy ostatnie N ramek w postaci hex, niezależnie od tego czy
+// udało się je zdekodować. Web UI pobiera je przez /api/frames i dekoduje
+// po stronie przeglądarki (parsowanie wMbus + AES/Diehl-LFSR + DIF/VIF).
+#define MAX_RAW_FRAMES 16
+#define MAX_RAW_HEX    300   // maks. długość hex (=> 150 bajtów ramki)
+
+typedef struct {
+    char     hex[MAX_RAW_HEX + 1];
+    int8_t   rssi;
+    uint8_t  lqi;
+    uint32_t ts_ms;
+} raw_frame_t;
+
 void          wmbus_decoder_init(void);
 void          wmbus_decoder_on_frame(const wmbus_frame_t *frame);
 int           wmbus_decoder_get_count(void);
 meter_data_t *wmbus_decoder_get_meter(int index);
 meter_data_t *wmbus_decoder_find_by_id(const char *id_hex);
+
+// Surowe ramki — indeks 0 = najnowsza
+int                wmbus_decoder_raw_count(void);
+const raw_frame_t *wmbus_decoder_raw_get(int newest_index);

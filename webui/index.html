@@ -177,6 +177,34 @@
   tr:last-child td { border-bottom: none; }
   tr:hover td { background: var(--surface2); }
 
+  /* CAPTURE / SNIFFER */
+  .sec { padding:3px 9px; border-radius:20px; font-size:0.7rem; font-weight:600;
+         white-space:nowrap; }
+  .sec-plain { background:#0f2a2a; color:#34d399; }
+  .sec-key   { background:#2a1f0f; color:#fbbf24; }
+  .sec-prios { background:#1a2a4a; color:#60a5fa; }
+  .sec-bad   { background:#2d0f0f; color:#ef4444; }
+  .mono { font-family:monospace; }
+  .hint { color:var(--muted); font-size:0.82rem; line-height:1.5; }
+  .row-actions { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .divider { display:flex; align-items:center; gap:12px; color:var(--muted);
+             font-size:0.8rem; margin:16px 0; }
+  .divider::before, .divider::after { content:''; flex:1; height:1px; background:var(--border); }
+  textarea { width:100%; padding:10px 14px; background:var(--surface2);
+             border:1px solid var(--border); border-radius:8px; color:var(--text);
+             font-size:0.85rem; font-family:monospace; outline:none; resize:vertical;
+             min-height:64px; }
+  textarea:focus { border-color:var(--accent); }
+  .live-dot { width:8px; height:8px; border-radius:50%; background:var(--red);
+              display:inline-block; }
+  .live-dot.on { background:var(--green); animation:pulse 1.4s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+  .msg { margin-top:12px; padding:10px 14px; border-radius:8px;
+         font-size:0.85rem; display:none; }
+  .msg.ok  { background:#16301f; color:var(--green); display:block; }
+  .msg.err { background:#2d0f0f; color:var(--red);   display:block; }
+  .frame-tbl td { font-size:0.82rem; }
+
   /* STATUS BAR */
   .status-bar {
     background: var(--surface2); border-top: 1px solid var(--border);
@@ -208,6 +236,7 @@
   <div class="nav-tabs">
     <button class="nav-tab active" onclick="showPage('dashboard')">Dashboard</button>
     <button class="nav-tab" onclick="showPage('meters')">Liczniki</button>
+    <button class="nav-tab" onclick="showPage('capture')">Złap licznik</button>
     <button class="nav-tab" onclick="showPage('config')">Konfiguracja</button>
     <button class="nav-tab" onclick="showPage('ota')">Aktualizacja</button>
   </div>
@@ -252,6 +281,48 @@
 <div id="page-meters" class="page">
   <h2>Wszystkie liczniki</h2>
   <div id="meters-list"></div>
+</div>
+
+<!-- CAPTURE / ZŁAP LICZNIK -->
+<div id="page-capture" class="page">
+  <h2>Złap licznik</h2>
+  <div class="card">
+    <div class="card-title">Źródło ramek</div>
+    <div class="form-group" style="margin-top:12px">
+      <label>Adres urządzenia (puste = ten sam host)</label>
+      <input type="text" id="cap-host" placeholder="http://192.168.4.1">
+    </div>
+    <div class="row-actions">
+      <button class="btn btn-primary" id="cap-listen-btn" onclick="toggleLive()">
+        ▶ Nasłuchuj na żywo
+      </button>
+      <span class="hint"><span class="live-dot" id="cap-live-dot"></span>
+        <span id="cap-live-status">zatrzymane</span></span>
+    </div>
+    <div class="divider">lub wklej ramkę ręcznie</div>
+    <textarea id="cap-manual" placeholder="np. 1944304C72242421D401A2013D4013DD8B46A4999C1293E582CC"></textarea>
+    <button class="btn btn-secondary" style="margin-top:10px" onclick="decodeManual()">
+      Dekoduj wklejoną ramkę
+    </button>
+    <p class="hint" style="margin-top:10px">
+      Urządzenie buforuje ostatnie ramki z eteru (endpoint <span class="mono">/api/frames</span>).
+      Wybierz ramkę z listy aby ją zdekodować — jeśli licznik jest szyfrowany, podaj klucz AES-128.
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Złapane ramki</div>
+    <div id="cap-frames" style="margin-top:12px">
+      <div class="hint" style="text-align:center;padding:24px">
+        Brak ramek. Włącz nasłuch lub wklej ramkę ręcznie.
+      </div>
+    </div>
+  </div>
+
+  <div class="card" id="cap-result-card" style="display:none">
+    <div class="card-title">Wynik dekodowania</div>
+    <div id="cap-result" style="margin-top:12px"></div>
+  </div>
 </div>
 
 <!-- CONFIG -->
@@ -362,6 +433,7 @@
   <span style="margin-left:auto;color:var(--accent)">SIH wMbus Reader © smartinhome.pl</span>
 </div>
 
+<script src="wmbus-decoder.js"></script>
 <script>
 const API = '';  // pusty = ten sam host
 let refreshTimer = null;
@@ -376,6 +448,7 @@ function showPage(name) {
   if (name === 'dashboard' || name === 'meters') fetchMeters();
   if (name === 'config') fetchConfig();
   if (name === 'ota') fetchOtaStatus();
+  if (name !== 'capture') stopLive();   // wstrzymaj nasłuch poza zakładką
 }
 
 // ── Fetch helpers ──────────────────────────────────────────
@@ -643,6 +716,216 @@ async function fetchOtaStatus() {
   if (st.state === 'success' || st.state === 'failed') {
     if (otaPoller) { clearInterval(otaPoller); otaPoller = null; }
     document.getElementById('ota-upload-btn').disabled = false;
+  }
+}
+
+// ── Złap licznik (capture / sniffer) ───────────────────────
+const capture = { live:false, timer:null, frames:[], selectedHex:null, key:'' };
+
+function capBase() {
+  return document.getElementById('cap-host').value.trim().replace(/\/+$/, '');
+}
+
+function stopLive() {
+  if (capture.timer) { clearInterval(capture.timer); capture.timer = null; }
+  capture.live = false;
+  const dot = document.getElementById('cap-live-dot');
+  const st  = document.getElementById('cap-live-status');
+  const btn = document.getElementById('cap-listen-btn');
+  if (dot) dot.classList.remove('on');
+  if (st)  st.textContent = 'zatrzymane';
+  if (btn) btn.textContent = '▶ Nasłuchuj na żywo';
+}
+
+function toggleLive() {
+  if (capture.live) { stopLive(); return; }
+  capture.live = true;
+  document.getElementById('cap-live-dot').classList.add('on');
+  document.getElementById('cap-live-status').textContent = 'nasłuch…';
+  document.getElementById('cap-listen-btn').textContent = '⏸ Zatrzymaj';
+  pollFrames();
+  capture.timer = setInterval(pollFrames, 2000);
+}
+
+async function pollFrames() {
+  try {
+    const r = await fetch(capBase() + '/api/frames');
+    const list = await r.json();
+    let added = 0;
+    for (const f of list) {
+      if (!capture.frames.some(x => x.hex === f.hex && x.ts === f.ts)) {
+        capture.frames.unshift(f); added++;
+      }
+    }
+    if (capture.frames.length > 50) capture.frames.length = 50;
+    if (capture.live)
+      document.getElementById('cap-live-status').textContent =
+        'nasłuch… (' + capture.frames.length + ' ramek)';
+    if (added) renderFrames();
+  } catch (e) {
+    if (capture.live)
+      document.getElementById('cap-live-status').textContent = 'błąd połączenia';
+  }
+}
+
+function secBadge(res) {
+  if (!res.security) return '<span class="sec sec-bad">?</span>';
+  const s = res.security.scheme;
+  if (s === 'plain') return '<span class="sec sec-plain">Otwarta</span>';
+  if (s === 'prios') return '<span class="sec sec-prios">PRIOS/izar</span>';
+  if (s === 'aes5')  return '<span class="sec sec-key">AES klucz</span>';
+  return '<span class="sec sec-bad">' + (res.security.label || s) + '</span>';
+}
+
+function renderFrames() {
+  const el = document.getElementById('cap-frames');
+  if (!capture.frames.length) {
+    el.innerHTML = '<div class="hint" style="text-align:center;padding:24px">Brak ramek.</div>';
+    return;
+  }
+  const rows = capture.frames.map((f, idx) => {
+    let res;
+    try { res = WMBus.decodeFrame(f.hex); } catch (e) { res = { link:{}, security:null }; }
+    const lk = res.link || {};
+    return `<tr>
+      <td>${lk.manufacturer || '—'}</td>
+      <td class="mono">${lk.id || '—'}</td>
+      <td>${lk.medium || '—'}</td>
+      <td>${f.rssi != null ? f.rssi + ' dBm' : ''}</td>
+      <td>${secBadge(res)}</td>
+      <td><button class="btn btn-secondary" style="padding:5px 12px"
+            onclick="selectFrame(${idx})">Dekoduj</button></td>
+    </tr>`;
+  }).join('');
+  el.innerHTML = `<table class="frame-tbl">
+    <tr><th>Producent</th><th>ID</th><th>Medium</th><th>RSSI</th><th>Zabezp.</th><th></th></tr>
+    ${rows}</table>`;
+}
+
+function selectFrame(idx) {
+  const f = capture.frames[idx];
+  if (!f) return;
+  capture.selectedHex = f.hex;
+  decodeAndShow(f.hex, '');
+}
+
+function decodeManual() {
+  let hex = document.getElementById('cap-manual').value.trim().replace(/[^0-9a-fA-F]/g, '');
+  if (!hex) { alert('Wklej ramkę HEX'); return; }
+  capture.selectedHex = hex;
+  if (!capture.frames.some(x => x.hex === hex)) {
+    capture.frames.unshift({ hex: hex, rssi: null, ts: Date.now() });
+    renderFrames();
+  }
+  decodeAndShow(hex, '');
+}
+
+function decodeWithKey() {
+  const k = document.getElementById('cap-key').value.trim();
+  decodeAndShow(capture.selectedHex, k);
+}
+
+function decodeAndShow(hex, keyHex) {
+  capture.key = keyHex || '';
+  let res;
+  try { res = WMBus.decodeFrame(hex, { key: keyHex }); }
+  catch (e) { res = { ok:false, error:'Wyjątek dekodera: ' + e.message, link:{}, fields:[] }; }
+  renderResult(res, hex);
+}
+
+function infoItem(label, val) {
+  return `<div class="field-item"><div class="field-name">${label}</div>
+    <div class="field-val" style="font-size:.95rem">${val || '—'}</div></div>`;
+}
+function fmtVal(v) {
+  if (typeof v === 'number')
+    return Number.isInteger(v) ? v : (Math.round(v * 1000) / 1000);
+  return v == null ? '—' : v;
+}
+function escAttr(s) { return (s == null ? '' : String(s)).replace(/"/g, '&quot;'); }
+function driverToType(res) {
+  if (res.driver === 'izar') return 'izar';
+  return (res.link && res.link.typeName) || 'unknown';
+}
+
+function renderResult(res, hex) {
+  document.getElementById('cap-result-card').style.display = 'block';
+  const lk = res.link || {};
+  const el = document.getElementById('cap-result');
+
+  const head = `<div class="fields-grid" style="margin-bottom:16px">
+    ${infoItem('Producent', lk.manufacturer)}
+    ${infoItem('ID', lk.id)}
+    ${infoItem('Wersja', lk.version != null ? '0x' + lk.version.toString(16) : '')}
+    ${infoItem('Medium', lk.medium)}
+    ${infoItem('CI', lk.ci != null ? '0x' + lk.ci.toString(16) : '')}
+    ${infoItem('Zabezpieczenie', res.security ? res.security.label : '?')}
+  </div>`;
+
+  let body = '';
+
+  if (res.security && res.security.scheme === 'aes5' && (res.needKey || !res.ok)) {
+    body += `<div class="form-group">
+      <label>Klucz AES-128 (32 znaki hex)</label>
+      <input type="text" id="cap-key" class="mono" maxlength="40"
+        placeholder="0102030405060708090A0B0C0D0E0F10" value="${escAttr(capture.key)}">
+    </div>
+    <button class="btn btn-primary" onclick="decodeWithKey()">Dekoduj z kluczem</button>`;
+  }
+
+  if (res.warnings && res.warnings.length)
+    body += res.warnings.map(w => `<div class="msg err">⚠ ${w}</div>`).join('');
+
+  if (res.error && !(res.fields && res.fields.length))
+    body += `<div class="msg err">${res.error}</div>`;
+
+  if (res.fields && res.fields.length) {
+    body += `<div class="fields-grid" style="margin-top:6px">
+      ${res.fields.map(f => `<div class="field-item">
+        <div class="field-name">${f.name.replace(/_/g, ' ')}</div>
+        <div class="field-val">${fmtVal(f.value)} <small style="color:var(--muted)">${f.unit || ''}</small></div>
+      </div>`).join('')}
+    </div>`;
+
+    body += `<div style="margin-top:18px;border-top:1px solid var(--border);padding-top:16px">
+      <div class="card-title">Zapisz licznik na urządzeniu</div>
+      <div class="grid grid-2" style="margin-top:10px">
+        <div class="form-group"><label>Nazwa</label>
+          <input type="text" id="cap-save-name" placeholder="np. Woda kuchnia"
+            value="${escAttr((lk.manufacturer || '') + ' ' + (lk.id || ''))}"></div>
+        <div class="form-group"><label>Typ</label>
+          <input type="text" id="cap-save-type" value="${escAttr(driverToType(res))}"></div>
+      </div>
+      <button class="btn btn-primary" onclick="saveMeter('${escAttr(lk.id)}')">Zapisz licznik + klucz</button>
+      <div id="cap-save-msg" class="msg"></div>
+    </div>`;
+  }
+
+  if (res.decryptedHex)
+    body += `<p class="hint mono" style="margin-top:14px;word-break:break-all">payload: ${res.decryptedHex}</p>`;
+
+  el.innerHTML = head + body;
+  document.getElementById('cap-result-card').scrollIntoView({ behavior:'smooth', block:'nearest' });
+}
+
+async function saveMeter(id) {
+  const name = document.getElementById('cap-save-name').value.trim();
+  const type = document.getElementById('cap-save-type').value.trim();
+  const keyEl = document.getElementById('cap-key');
+  const key = (keyEl ? keyEl.value.trim() : capture.key) || '';
+  const msg = document.getElementById('cap-save-msg');
+  try {
+    // text/plain => "simple request", bez preflight CORS gdy UI nie jest na urządzeniu
+    await fetch(capBase() + '/api/config/meter', {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: JSON.stringify({ id, type, key, name })
+    });
+    msg.className = 'msg ok';
+    msg.textContent = 'Zapisano licznik ' + id + (key ? ' z kluczem' : '');
+  } catch (e) {
+    msg.className = 'msg err';
+    msg.textContent = 'Błąd zapisu: ' + e;
   }
 }
 

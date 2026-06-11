@@ -1,4 +1,3 @@
-#include <stdlib.h>
 #include "wmbus_decoder.h"
 #include "nvs_config.h"
 #include "esp_log.h"
@@ -10,51 +9,47 @@
 
 static const char *TAG = "WMBUS";
 
-// ETAP 1: poprawny odbior + logi (ID licznika + hex ramki).
-// Dekodowanie wartosci pol (wmbusmeters) bedzie etapem 2.
+// UWAGA: Ten moduł zawiera stub dekodera.
+// Docelowo zastąpić wywołaniami biblioteki wmbusmeters
+// (portowanej jako komponent IDF z repozytorium wmbusmeters/wmbusmeters).
+// Interfejs wmbus_decode_frame() pozostaje taki sam.
 
 static meter_data_t  s_meters[MAX_ACTIVE_METERS] = {0};
 static int           s_meter_count = 0;
 static SemaphoreHandle_t s_mutex = NULL;
 
-// Parsuj ID licznika z ramki wMbus.
-// Struktura ramki (po dekodowaniu): L C M M A A A A ...
-//   [0] L-field (dlugosc)
-//   [1] C-field
-//   [2..3] M-field (manufacturer, little-endian)
-//   [4..7] A-field (adres/ID, little-endian BCD)
-//   [8] wersja, [9] typ medium
-static void parse_meter_id(const uint8_t *d, size_t len, char *out, size_t out_len) {
-    if (len < 8) { out[0] = 0; return; }
-    snprintf(out, out_len, "%02x%02x%02x%02x", d[7], d[6], d[5], d[4]);
+// Bufor pierścieniowy surowych ramek
+static raw_frame_t   s_raw[MAX_RAW_FRAMES] = {0};
+static int           s_raw_head  = 0;   // następny indeks do zapisu
+static int           s_raw_count = 0;   // ile ramek w buforze (max MAX_RAW_FRAMES)
+
+static void store_raw_frame(const wmbus_frame_t *frame) {
+    raw_frame_t *r = &s_raw[s_raw_head];
+    size_t n = frame->len;
+    if (n > MAX_RAW_HEX / 2) n = MAX_RAW_HEX / 2;   // przytnij do pojemności hex
+    for (size_t i = 0; i < n; i++)
+        snprintf(r->hex + i * 2, 3, "%02X", frame->data[i]);
+    r->hex[n * 2] = 0;
+    r->rssi  = frame->rssi;
+    r->lqi   = frame->lqi;
+    r->ts_ms = (uint32_t)(esp_timer_get_time() / 1000);
+
+    s_raw_head = (s_raw_head + 1) % MAX_RAW_FRAMES;
+    if (s_raw_count < MAX_RAW_FRAMES) s_raw_count++;
 }
 
-static void parse_manufacturer(const uint8_t *d, size_t len, char *out, size_t out_len) {
-    if (len < 4) { out[0] = 0; return; }
-    // M-field: 2 bajty, kazda litera 5 bitow + 0x40
-    uint16_t m = d[2] | (d[3] << 8);
-    char c1 = ((m >> 10) & 0x1F) + 64;
-    char c2 = ((m >>  5) & 0x1F) + 64;
-    char c3 = ((m      ) & 0x1F) + 64;
-    snprintf(out, out_len, "%c%c%c", c1, c2, c3);
-}
-
-static const char *medium_name(uint8_t medium) {
-    switch (medium) {
-        case 0x02: return "electricity";
-        case 0x03: return "gas";
-        case 0x06: return "warm_water";
-        case 0x07: return "water";
-        case 0x16: return "cold_water";
-        case 0x0D: return "heat_cost";
-        default:   return "unknown";
-    }
+// Parsuj ID licznika z ramki wMbus (bajty 4-7, little-endian BCD)
+static void parse_meter_id(const uint8_t *data, char *out, size_t out_len) {
+    if (data[0] < 0x0C) return; // za krótka ramka
+    snprintf(out, out_len, "%02x%02x%02x%02x",
+             data[7], data[6], data[5], data[4]);
 }
 
 static meter_data_t *find_or_create(const char *id_hex) {
-    for (int i = 0; i < s_meter_count; i++)
+    for (int i = 0; i < s_meter_count; i++) {
         if (strcmp(s_meters[i].id_hex, id_hex) == 0)
             return &s_meters[i];
+    }
     if (s_meter_count >= MAX_ACTIVE_METERS) return NULL;
     meter_data_t *m = &s_meters[s_meter_count++];
     memset(m, 0, sizeof(meter_data_t));
@@ -64,6 +59,7 @@ static meter_data_t *find_or_create(const char *id_hex) {
 
 static void add_field(meter_data_t *m, const char *field,
                       float value, const char *unit) {
+    // Znajdź istniejące pole lub dodaj nowe
     for (int i = 0; i < m->field_count; i++) {
         if (strcmp(m->fields[i].field, field) == 0) {
             m->fields[i].value = value;
@@ -77,60 +73,91 @@ static void add_field(meter_data_t *m, const char *field,
     f->value = value;
 }
 
+// Mapuj typ z konfiguracji na nazwę
+static void apply_config(meter_data_t *m) {
+    sih_config_t cfg = nvs_config_get();
+    for (int i = 0; i < cfg.meter_count; i++) {
+        if (strcasecmp(cfg.meters[i].id_hex, m->id_hex) == 0) {
+            strlcpy(m->type, cfg.meters[i].type, sizeof(m->type));
+            strlcpy(m->name, cfg.meters[i].name, sizeof(m->name));
+            return;
+        }
+    }
+    // Nieznany licznik — ustaw ID jako nazwę
+    if (strlen(m->name) == 0) strlcpy(m->name, m->id_hex, sizeof(m->name));
+}
+
+// STUB — docelowo zastąpić wmbusmeters
+// Zwraca true jeśli ramka została zdekodowana
+static bool decode_frame_stub(const uint8_t *data, size_t len,
+                               meter_data_t *out) {
+    if (len < 12) return false;
+
+    char id[12];
+    parse_meter_id(data, id, sizeof(id));
+    if (strlen(id) == 0) return false;
+
+    strlcpy(out->id_hex, id, sizeof(out->id_hex));
+    out->valid = true;
+
+    // Odczytaj typ medium z bajtu 3
+    uint8_t medium = data[3];
+    switch (medium) {
+        case 0x02: strlcpy(out->type, "electricity", sizeof(out->type)); break;
+        case 0x07: strlcpy(out->type, "water",       sizeof(out->type)); break;
+        case 0x03: strlcpy(out->type, "gas",         sizeof(out->type)); break;
+        case 0x06: strlcpy(out->type, "heat",        sizeof(out->type)); break;
+        default:   strlcpy(out->type, "unknown",     sizeof(out->type)); break;
+    }
+
+    // STUB: dane testowe — zastąpić prawdziwym dekoderem
+    // W docelowej implementacji tutaj wywołujemy wmbusmeters:
+    // wmb_meter_t *meter = wmb_decode(data, len, key);
+    // wmb_get_field(meter, "total_energy_consumption_kwh", &val);
+    add_field(out, "rssi_dbm", (float)out->rssi, "dBm");
+
+    return true;
+}
+
 void wmbus_decoder_init(void) {
     s_mutex = xSemaphoreCreateMutex();
-    ESP_LOGI(TAG, "Dekoder wMbus gotowy (etap 1: odbior + logi)");
+    ESP_LOGI(TAG, "Dekoder wMbus gotowy (stub — wymaga wmbusmeters)");
 }
 
 void wmbus_decoder_on_frame(const wmbus_frame_t *frame) {
-    if (!frame || frame->len < 10) return;
+    if (!frame || frame->len < 12) return;
 
-    // Hex calej ramki (jak ESPHome)
-    char hex[3 * 64 + 8] = {0};
-    size_t show = frame->len > 64 ? 64 : frame->len;
-    for (size_t i = 0; i < show; i++)
-        snprintf(hex + i * 3, sizeof(hex) - i * 3, "%02X ", frame->data[i]);
+    char hex_log[64] = {0};
+    for (int i = 0; i < (int)frame->len && i < 16; i++)
+        snprintf(hex_log + i*3, sizeof(hex_log) - i*3, "%02X ", frame->data[i]);
+    ESP_LOGI(TAG, "Ramka [%d B] RSSI:%ddBm: %s...",
+             (int)frame->len, frame->rssi, hex_log);
 
-    char id[12]  = {0};
-    char man[8]  = {0};
-    parse_meter_id(frame->data, frame->len, id, sizeof(id));
-    parse_manufacturer(frame->data, frame->len, man, sizeof(man));
+    // Zachowaj surową ramkę do bufora (nawet jeśli dekoder jej nie rozpozna)
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    store_raw_frame(frame);
+    xSemaphoreGive(s_mutex);
 
-    uint8_t medium  = frame->len > 9 ? frame->data[9] : 0;
-    uint8_t version = frame->len > 8 ? frame->data[8] : 0;
+    meter_data_t tmp = {0};
+    tmp.rssi = frame->rssi;
+    tmp.last_seen = (uint32_t)(esp_timer_get_time() / 1000);
 
-    // LOG jak w ESPHome: RSSI, hex, dlugosc, ID, producent
-    ESP_LOGI(TAG, "RSSI:%ddBm L:%d ID:%s MAN:%s VER:0x%02X MEDIUM:%s(0x%02X)",
-             frame->rssi, (int)frame->len, id, man, version,
-             medium_name(medium), medium);
-    ESP_LOGI(TAG, "  T: %s", hex);
-
-    if (strlen(id) == 0) return;
+    if (!decode_frame_stub(frame->data, frame->len, &tmp)) {
+        ESP_LOGW(TAG, "Nie można zdekodować ramki");
+        return;
+    }
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
-    meter_data_t *m = find_or_create(id);
+    meter_data_t *m = find_or_create(tmp.id_hex);
     if (m) {
-        m->rssi      = frame->rssi;
-        m->last_seen = (uint32_t)(esp_timer_get_time() / 1000);
+        m->rssi      = tmp.rssi;
+        m->last_seen = tmp.last_seen;
         m->valid     = true;
-        strlcpy(m->type, medium_name(medium), sizeof(m->type));
-
-        // Nadpisz nazwa/typ z konfiguracji jesli licznik znany
-        sih_config_t cfg = nvs_config_get();
-        bool known = false;
-        for (int i = 0; i < cfg.meter_count; i++) {
-            if (strcasecmp(cfg.meters[i].id_hex, id) == 0) {
-                strlcpy(m->type, cfg.meters[i].type, sizeof(m->type));
-                strlcpy(m->name, cfg.meters[i].name, sizeof(m->name));
-                known = true;
-                break;
-            }
-        }
-        if (!known && strlen(m->name) == 0)
-            snprintf(m->name, sizeof(m->name), "%s-%s", man, id);
-
-        add_field(m, "rssi_dbm", (float)frame->rssi, "dBm");
-        add_field(m, "frame_len", (float)frame->len, "B");
+        // Kopiuj pola z tmp
+        for (int i = 0; i < tmp.field_count; i++)
+            add_field(m, tmp.fields[i].field,
+                      tmp.fields[i].value, tmp.fields[i].unit);
+        apply_config(m);
     }
     xSemaphoreGive(s_mutex);
 }
@@ -147,4 +174,14 @@ meter_data_t *wmbus_decoder_find_by_id(const char *id_hex) {
         if (strcmp(s_meters[i].id_hex, id_hex) == 0)
             return &s_meters[i];
     return NULL;
+}
+
+int wmbus_decoder_raw_count(void) { return s_raw_count; }
+
+// newest_index 0 = najnowsza ramka, 1 = poprzednia, ...
+const raw_frame_t *wmbus_decoder_raw_get(int newest_index) {
+    if (newest_index < 0 || newest_index >= s_raw_count) return NULL;
+    // s_raw_head wskazuje na następne wolne miejsce, więc najnowsza jest head-1
+    int idx = (s_raw_head - 1 - newest_index + 2 * MAX_RAW_FRAMES) % MAX_RAW_FRAMES;
+    return &s_raw[idx];
 }

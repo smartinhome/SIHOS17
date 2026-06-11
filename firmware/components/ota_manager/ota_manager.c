@@ -21,14 +21,17 @@ static void ota_url_task(void *arg) {
 
     esp_http_client_config_t http_cfg = {
         .url                         = url,
-        .timeout_ms                  = 30000,
+        .timeout_ms                  = 60000,
         .keep_alive_enable           = true,
         .crt_bundle_attach           = esp_crt_bundle_attach,
         .skip_cert_common_name_check = true,
         .max_redirection_count       = 10,
+        .buffer_size                 = 4096,
+        .buffer_size_tx              = 1024,
     };
     esp_https_ota_config_t ota_cfg = {
-        .http_config = &http_cfg,
+        .http_config      = &http_cfg,
+        .bulk_flash_erase = true,
     };
 
     esp_https_ota_handle_t handle = NULL;
@@ -149,7 +152,7 @@ void ota_start_from_url(const char *url) {
     char *url_copy = strdup(url);
     s_status.state = OTA_STATE_IDLE;
     s_status.error[0] = 0;
-    xTaskCreate(ota_url_task, "ota_url", 8192, url_copy, 5, NULL);
+    xTaskCreate(ota_url_task, "ota_url", 16384, url_copy, 5, NULL);
 }
 
 void ota_start_from_buffer(const uint8_t *data, size_t len) {

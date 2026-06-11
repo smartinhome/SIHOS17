@@ -34,6 +34,9 @@ static void ota_url_task(void *arg) {
         .max_http_request_size = 4096,
     };
 
+    ESP_LOGI(TAG, "OTA: rozpoczynam pobieranie firmware z URL");
+    ESP_LOGI(TAG, "OTA: %s", url);
+
     esp_https_ota_handle_t handle = NULL;
     esp_err_t err = esp_https_ota_begin(&ota_cfg, &handle);
     if (err != ESP_OK) {
@@ -51,14 +54,24 @@ static void ota_url_task(void *arg) {
 
     s_status.state = OTA_STATE_WRITING;
     int image_size = esp_https_ota_get_image_size(handle);
+    ESP_LOGI(TAG, "OTA: rozmiar obrazu = %d B (%.1f KB)", image_size, image_size/1024.0);
 
+    int last_logged = -1;
     while (1) {
         err = esp_https_ota_perform(handle);
         if (err != ESP_ERR_HTTPS_OTA_IN_PROGRESS) break;
         int written = esp_https_ota_get_image_len_read(handle);
-        if (image_size > 0)
+        if (image_size > 0) {
             s_status.progress_pct = (written * 100) / image_size;
+            int decile = s_status.progress_pct / 10;
+            if (decile != last_logged) {
+                last_logged = decile;
+                ESP_LOGI(TAG, "OTA: postep %d%% (%d/%d B)",
+                         s_status.progress_pct, written, image_size);
+            }
+        }
     }
+    ESP_LOGI(TAG, "OTA: petla zakonczona, err=%s", esp_err_to_name(err));
 
     if (err == ESP_OK && esp_https_ota_is_complete_data_received(handle)) {
         esp_err_t finish = esp_https_ota_finish(handle);
@@ -145,70 +158,107 @@ cleanup:
 #define GITHUB_API_URL "https://api.github.com/repos/smartinhome/SIHOS17/releases?per_page=1"
 
 static bool github_get_latest_bin_url(char *out_url, size_t out_max) {
+    ESP_LOGI(TAG, "GitHub: laczenie z %s", GITHUB_API_URL);
+
     esp_http_client_config_t cfg = {
         .url                         = GITHUB_API_URL,
-        .timeout_ms                  = 15000,
+        .timeout_ms                  = 20000,
         .crt_bundle_attach           = esp_crt_bundle_attach,
         .skip_cert_common_name_check = true,
         .max_redirection_count       = 10,
-        .buffer_size                 = 2048,
+        .buffer_size                 = 4096,
+        .buffer_size_tx              = 1024,
         .user_agent                  = "SIH-wMbus-Reader",
     };
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
-    if (!client) return false;
+    if (!client) {
+        ESP_LOGE(TAG, "GitHub: esp_http_client_init zwrocil NULL");
+        return false;
+    }
 
+    // Naglowek Accept dla GitHub API
+    esp_http_client_set_header(client, "Accept", "application/vnd.github+json");
+
+    ESP_LOGI(TAG, "GitHub: otwieranie polaczenia...");
     esp_err_t err = esp_http_client_open(client, 0);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "GitHub API open failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "GitHub: open failed: %s", esp_err_to_name(err));
         esp_http_client_cleanup(client);
         return false;
     }
 
+    ESP_LOGI(TAG, "GitHub: pobieranie naglowkow...");
     int content_len = esp_http_client_fetch_headers(client);
-    (void)content_len;
+    int status = esp_http_client_get_status_code(client);
+    ESP_LOGI(TAG, "GitHub: HTTP status=%d, content_len=%d", status, content_len);
 
-    // Czytaj odpowiedz w kawalkach, szukaj browser_download_url konczacego sie .bin
-    // JSON moze byc duzy — czytamy strumieniowo do bufora obrotowego
-    static char buf[8192];
+    if (status != 200) {
+        ESP_LOGE(TAG, "GitHub: zly status HTTP %d (403=rate limit, 404=brak repo)", status);
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        return false;
+    }
+
+    // Wiekszy bufor — odpowiedz GitHub API bywa >16KB
+    const size_t BUFSZ = 24576;
+    char *buf = malloc(BUFSZ);
+    if (!buf) {
+        ESP_LOGE(TAG, "GitHub: brak pamieci na bufor %d B", (int)BUFSZ);
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        return false;
+    }
+
     int total = 0, r;
     while ((r = esp_http_client_read(client, buf + total,
-                                     sizeof(buf) - 1 - total)) > 0) {
+                                     BUFSZ - 1 - total)) > 0) {
         total += r;
-        if (total >= (int)sizeof(buf) - 1) break;
+        if (total >= (int)BUFSZ - 1) {
+            ESP_LOGW(TAG, "GitHub: odpowiedz obcieta do %d B", (int)BUFSZ);
+            break;
+        }
     }
     buf[total > 0 ? total : 0] = 0;
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
 
+    ESP_LOGI(TAG, "GitHub: odebrano %d B JSON", total);
     if (total <= 0) {
-        ESP_LOGE(TAG, "GitHub API: pusta odpowiedz");
+        ESP_LOGE(TAG, "GitHub: pusta odpowiedz");
+        free(buf);
         return false;
     }
 
-    // Znajdz "browser_download_url":"...sih-wmbus-reader.bin"
+    // Znajdz wszystkie browser_download_url, zaloguj kazdy
     const char *key = "\"browser_download_url\":\"";
     char *p = buf;
+    int found_count = 0;
+    bool result = false;
     while ((p = strstr(p, key)) != NULL) {
         p += strlen(key);
         char *end = strchr(p, '"');
         if (!end) break;
         size_t ulen = end - p;
-        if (ulen < out_max && ulen > 4 &&
-            strncmp(end - 4, ".bin", 4) == 0) {
-            // Sprawdz czy to nasz plik
+        if (ulen > 0 && ulen < 470) {
             char tmp[480];
             strncpy(tmp, p, ulen);
             tmp[ulen] = 0;
-            if (strstr(tmp, "sih-wmbus-reader.bin")) {
+            found_count++;
+            ESP_LOGI(TAG, "GitHub: asset[%d]: %s", found_count, tmp);
+            if (strstr(tmp, "sih-wmbus-reader.bin") && ulen < out_max) {
                 strlcpy(out_url, tmp, out_max);
-                ESP_LOGI(TAG, "GitHub: znaleziono %s", out_url);
-                return true;
+                ESP_LOGI(TAG, "GitHub: WYBRANO %s", out_url);
+                result = true;
+                // nie przerywamy — chcemy zalogowac wszystkie assety
             }
         }
         p = end;
     }
-    ESP_LOGE(TAG, "GitHub API: nie znaleziono sih-wmbus-reader.bin w odpowiedzi");
-    return false;
+
+    ESP_LOGI(TAG, "GitHub: znaleziono %d assetow, firmware %s",
+             found_count, result ? "OK" : "NIE ZNALEZIONO");
+    free(buf);
+    return result;
 }
 
 static void ota_github_task(void *arg) {

@@ -20,5 +20,6 @@ typedef struct {
 void          ota_manager_init(void);
 void          ota_start_from_url(const char *url);
 void          ota_start_from_buffer(const uint8_t *data, size_t len);
+void          ota_start_from_github(void);
 ota_status_t  ota_get_status(void);
 const char   *ota_get_running_version(void);

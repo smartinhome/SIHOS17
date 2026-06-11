@@ -138,6 +138,111 @@ cleanup:
     vTaskDelete(NULL);
 }
 
+
+// ── Pobierz URL najnowszego firmware z GitHub API (na module) ──
+// Odpytuje api.github.com, parsuje JSON, znajduje browser_download_url
+// dla sih-wmbus-reader.bin. Zwraca true + wypelnia out_url.
+#define GITHUB_API_URL "https://api.github.com/repos/smartinhome/SIHOS17/releases?per_page=1"
+
+static bool github_get_latest_bin_url(char *out_url, size_t out_max) {
+    esp_http_client_config_t cfg = {
+        .url                         = GITHUB_API_URL,
+        .timeout_ms                  = 15000,
+        .crt_bundle_attach           = esp_crt_bundle_attach,
+        .skip_cert_common_name_check = true,
+        .max_redirection_count       = 10,
+        .buffer_size                 = 2048,
+        .user_agent                  = "SIH-wMbus-Reader",
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (!client) return false;
+
+    esp_err_t err = esp_http_client_open(client, 0);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "GitHub API open failed: %s", esp_err_to_name(err));
+        esp_http_client_cleanup(client);
+        return false;
+    }
+
+    int content_len = esp_http_client_fetch_headers(client);
+    (void)content_len;
+
+    // Czytaj odpowiedz w kawalkach, szukaj browser_download_url konczacego sie .bin
+    // JSON moze byc duzy — czytamy strumieniowo do bufora obrotowego
+    static char buf[8192];
+    int total = 0, r;
+    while ((r = esp_http_client_read(client, buf + total,
+                                     sizeof(buf) - 1 - total)) > 0) {
+        total += r;
+        if (total >= (int)sizeof(buf) - 1) break;
+    }
+    buf[total > 0 ? total : 0] = 0;
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+
+    if (total <= 0) {
+        ESP_LOGE(TAG, "GitHub API: pusta odpowiedz");
+        return false;
+    }
+
+    // Znajdz "browser_download_url":"...sih-wmbus-reader.bin"
+    const char *key = "\"browser_download_url\":\"";
+    char *p = buf;
+    while ((p = strstr(p, key)) != NULL) {
+        p += strlen(key);
+        char *end = strchr(p, '"');
+        if (!end) break;
+        size_t ulen = end - p;
+        if (ulen < out_max && ulen > 4 &&
+            strncmp(end - 4, ".bin", 4) == 0) {
+            // Sprawdz czy to nasz plik
+            char tmp[480];
+            strncpy(tmp, p, ulen);
+            tmp[ulen] = 0;
+            if (strstr(tmp, "sih-wmbus-reader.bin")) {
+                strlcpy(out_url, tmp, out_max);
+                ESP_LOGI(TAG, "GitHub: znaleziono %s", out_url);
+                return true;
+            }
+        }
+        p = end;
+    }
+    ESP_LOGE(TAG, "GitHub API: nie znaleziono sih-wmbus-reader.bin w odpowiedzi");
+    return false;
+}
+
+static void ota_github_task(void *arg) {
+    (void)arg;
+    s_status.state        = OTA_STATE_DOWNLOADING;
+    s_status.progress_pct = 0;
+    s_status.error[0]     = 0;
+
+    char url[480] = {0};
+    if (!github_get_latest_bin_url(url, sizeof(url))) {
+        strlcpy(s_status.error, "Nie znaleziono firmware na GitHub",
+                sizeof(s_status.error));
+        s_status.state = OTA_STATE_FAILED;
+        vTaskDelete(NULL);
+        return;
+    }
+
+    // Mamy URL — uruchom standardowy OTA z URL
+    char *url_copy = strdup(url);
+    ota_url_task(url_copy);  // wykona sie w tym samym tasku
+    vTaskDelete(NULL);
+}
+
+void ota_start_from_github(void) {
+    if (s_status.state == OTA_STATE_DOWNLOADING ||
+        s_status.state == OTA_STATE_WRITING) {
+        ESP_LOGW(TAG, "OTA juz w toku");
+        return;
+    }
+    s_status.state    = OTA_STATE_IDLE;
+    s_status.error[0] = 0;
+    xTaskCreate(ota_github_task, "ota_github", 16384, NULL, 5, NULL);
+}
+
 void ota_manager_init(void) {
     const esp_partition_t *running = esp_ota_get_running_partition();
     ESP_LOGI(TAG, "Biezaca partycja: %s", running->label);

@@ -219,6 +219,12 @@ static esp_err_t handle_ota_upload(httpd_req_t *req) {
     return ESP_OK;
 }
 
+static esp_err_t handle_ota_github(httpd_req_t *req) {
+    resp_ok(req);
+    ota_start_from_github();
+    return ESP_OK;
+}
+
 static esp_err_t handle_ota_status(httpd_req_t *req) {
     ota_status_t st = ota_get_status();
     const char *states[] = {"idle","downloading","writing","success","failed"};
@@ -247,6 +253,7 @@ void api_register_handlers(httpd_handle_t server) {
         { .uri="/api/config/meter",.method=HTTP_POST, .handler=handle_config_meter,.user_ctx=NULL, .is_websocket=false },
         { .uri="/api/config/wifi", .method=HTTP_POST, .handler=handle_config_wifi, .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/ota/url",     .method=HTTP_POST, .handler=handle_ota_url,     .user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/ota/github",  .method=HTTP_POST, .handler=handle_ota_github,  .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/ota/upload",  .method=HTTP_POST, .handler=handle_ota_upload,  .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/ota/status",  .method=HTTP_GET,  .handler=handle_ota_status,  .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/restart",     .method=HTTP_POST, .handler=handle_restart,     .user_ctx=NULL, .is_websocket=false },

@@ -34,7 +34,11 @@ static void ota_url_task(void *arg) {
         .buffer_size                 = 8192,
         .buffer_size_tx              = 4096,
         .user_agent                  = "SIH-wMbus-Reader",
+        .keep_alive_enable           = true,
     };
+
+    // Wylacz logi walidacji certyfikatu przy kazdym chunku (zasmiecaja logi)
+    esp_log_level_set("esp-x509-crt-bundle", ESP_LOG_WARN);
     esp_https_ota_config_t ota_cfg = {
         .http_config          = &http_cfg,
         .bulk_flash_erase     = false,

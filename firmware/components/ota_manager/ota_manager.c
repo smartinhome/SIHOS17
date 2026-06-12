@@ -316,6 +316,22 @@ void ota_start_from_github(void) {
 void ota_manager_init(void) {
     const esp_partition_t *running = esp_ota_get_running_partition();
     ESP_LOGI(TAG, "Biezaca partycja: %s", running->label);
+
+    // Potwierdz ze firmware dziala (anuluj rollback).
+    // Bez tego kolejny OTA zwroci ESP_ERR_OTA_ROLLBACK_INVALID_STATE.
+    esp_ota_img_states_t state;
+    if (esp_ota_get_state_partition(running, &state) == ESP_OK) {
+        if (state == ESP_OTA_IMG_PENDING_VERIFY) {
+            ESP_LOGI(TAG, "OTA: firmware w stanie PENDING_VERIFY - potwierdzam jako sprawny");
+            esp_err_t e = esp_ota_mark_app_valid_cancel_rollback();
+            if (e == ESP_OK)
+                ESP_LOGI(TAG, "OTA: firmware potwierdzony, rollback anulowany");
+            else
+                ESP_LOGW(TAG, "OTA: mark_app_valid blad: %s", esp_err_to_name(e));
+        } else {
+            ESP_LOGI(TAG, "OTA: stan partycji = %d (juz potwierdzony)", state);
+        }
+    }
 }
 
 void ota_start_from_url(const char *url) {

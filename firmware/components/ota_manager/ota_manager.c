@@ -1,4 +1,5 @@
 #include "ota_manager.h"
+#include "cc1101.h"
 #include <stdlib.h>
 #include "esp_ota_ops.h"
 #include "esp_https_ota.h"
@@ -6,6 +7,8 @@
 #include "esp_crt_bundle.h"
 #include "esp_app_desc.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <string.h>
@@ -18,6 +21,9 @@ static void ota_url_task(void *arg) {
     char *url = (char *)arg;
     s_status.state        = OTA_STATE_DOWNLOADING;
     s_status.progress_pct = 0;
+
+    // Zatrzymaj radio jesli jeszcze dziala (gdy wolane bezposrednio z URL)
+    cc1101_stop();
 
     esp_http_client_config_t http_cfg = {
         .url                         = url,
@@ -158,11 +164,14 @@ cleanup:
 #define GITHUB_API_URL "https://api.github.com/repos/smartinhome/SIHOS17/releases?per_page=1"
 
 static bool github_get_latest_bin_url(char *out_url, size_t out_max) {
+    ESP_LOGI(TAG, "GitHub: wolny heap = %lu B, najwiekszy blok = %lu B",
+             (unsigned long)esp_get_free_heap_size(),
+             (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     ESP_LOGI(TAG, "GitHub: laczenie z %s", GITHUB_API_URL);
 
     esp_http_client_config_t cfg = {
         .url                         = GITHUB_API_URL,
-        .timeout_ms                  = 20000,
+        .timeout_ms                  = 10000,
         .crt_bundle_attach           = esp_crt_bundle_attach,
         .skip_cert_common_name_check = true,
         .max_redirection_count       = 10,
@@ -179,8 +188,9 @@ static bool github_get_latest_bin_url(char *out_url, size_t out_max) {
     // Naglowek Accept dla GitHub API
     esp_http_client_set_header(client, "Accept", "application/vnd.github+json");
 
-    ESP_LOGI(TAG, "GitHub: otwieranie polaczenia...");
+    ESP_LOGI(TAG, "GitHub: otwieranie polaczenia (TLS handshake)...");
     esp_err_t err = esp_http_client_open(client, 0);
+    ESP_LOGI(TAG, "GitHub: open zwrocil %s", esp_err_to_name(err));
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "GitHub: open failed: %s", esp_err_to_name(err));
         esp_http_client_cleanup(client);
@@ -267,6 +277,11 @@ static void ota_github_task(void *arg) {
     s_status.progress_pct = 0;
     s_status.error[0]     = 0;
 
+    // Zatrzymaj radio — task RX glodzi siec (wyzszy priorytet, ciagly SPI)
+    ESP_LOGI(TAG, "OTA: zatrzymuje radio CC1101 na czas aktualizacji");
+    cc1101_stop();
+    vTaskDelay(pdMS_TO_TICKS(100));
+
     char url[480] = {0};
     if (!github_get_latest_bin_url(url, sizeof(url))) {
         strlcpy(s_status.error, "Nie znaleziono firmware na GitHub",
@@ -290,7 +305,7 @@ void ota_start_from_github(void) {
     }
     s_status.state    = OTA_STATE_IDLE;
     s_status.error[0] = 0;
-    xTaskCreate(ota_github_task, "ota_github", 16384, NULL, 5, NULL);
+    xTaskCreate(ota_github_task, "ota_github", 24576, NULL, 6, NULL);
 }
 
 void ota_manager_init(void) {

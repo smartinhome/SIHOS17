@@ -31,7 +31,9 @@ static void ota_url_task(void *arg) {
         .crt_bundle_attach           = esp_crt_bundle_attach,
         .skip_cert_common_name_check = true,
         .max_redirection_count       = 10,
-        .buffer_size                 = 4096,
+        .buffer_size                 = 8192,
+        .buffer_size_tx              = 4096,
+        .user_agent                  = "SIH-wMbus-Reader",
     };
     esp_https_ota_config_t ota_cfg = {
         .http_config          = &http_cfg,

@@ -31,7 +31,7 @@ static void ota_url_task(void *arg) {
         .crt_bundle_attach           = esp_crt_bundle_attach,
         .skip_cert_common_name_check = true,
         .max_redirection_count       = 10,
-        .buffer_size                 = 8192,
+        .buffer_size                 = 16384,
         .buffer_size_tx              = 4096,
         .user_agent                  = "SIH-wMbus-Reader",
         .keep_alive_enable           = true,
@@ -40,10 +40,9 @@ static void ota_url_task(void *arg) {
     // Wylacz logi walidacji certyfikatu przy kazdym chunku (zasmiecaja logi)
     esp_log_level_set("esp-x509-crt-bundle", ESP_LOG_WARN);
     esp_https_ota_config_t ota_cfg = {
-        .http_config          = &http_cfg,
-        .bulk_flash_erase     = false,
-        .partial_http_download = true,
-        .max_http_request_size = 4096,
+        .http_config           = &http_cfg,
+        .bulk_flash_erase      = false,
+        .partial_http_download = false,
     };
 
     ESP_LOGI(TAG, "OTA: rozpoczynam pobieranie firmware z URL");

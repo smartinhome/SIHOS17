@@ -216,6 +216,20 @@ static void configure_wmbus(void) {
 
 // ── Dekodowanie 3-of-6 (tryb T1) ───────────────────────────
 // Zwraca liczbę zdekodowanych bajtów lub 0 przy błędzie
+// Rozmiar zakodowany 3of6 dla N bajtow zdekodowanych:
+// kazde 2 bajty danych = 3 bajty zakodowane (4 nibble x 6 bitow = 24b)
+static size_t encoded_size_3of6(size_t decoded_size) {
+    return (3 * decoded_size + 1) / 2;
+}
+
+// Oblicz pelna dlugosc ramki wMbus (z CRC) na podstawie L-field
+static size_t wmbus_frame_size(uint8_t l_field) {
+    // 2 pierwsze bloki = 25 bajtow (bez CRC i L), kolejne po 16
+    size_t nrBlocks = (l_field < 26) ? 2 : ((l_field - 26) / 16 + 3);
+    // L-field + 1 (samo L) + 2 bajty CRC na kazdy blok
+    return l_field + 1 + 2 * nrBlocks;
+}
+
 static int decode_3of6(const uint8_t *coded, size_t coded_len,
                        uint8_t *out, size_t out_max) {
     static const int8_t lut[64] = {
@@ -315,16 +329,40 @@ static void rx_task(void *arg) {
             memcpy(frame.data, raw + 2, copy);
             frame.len = copy;
         } else {
-            // Tryb T1 — dekoduj 3-of-6
-            int dlen = decode_3of6(raw, rxbytes, decoded, sizeof(decoded));
-            if (dlen <= 0) {
-                ESP_LOGW(TAG, "T1: blad dekodowania 3of6 (rxbytes=%d rssi=%d)",
+            // Tryb T1 — dekodowanie dwufazowe (jak bodek85/wmbusmeters):
+            // Faza 1: zdekoduj poczatek by odczytac L-field (pierwszy bajt)
+            uint8_t head[4];
+            int hlen = decode_3of6(raw, 3, head, sizeof(head));
+            if (hlen < 1) {
+                ESP_LOGW(TAG, "T1: nie odczytano L-field (rxbytes=%d rssi=%d)",
                          rxbytes, rssi);
                 continue;
             }
-            size_t copy = dlen > (int)sizeof(frame.data) ? sizeof(frame.data) : dlen;
+            uint8_t l_field = head[0];
+
+            // Faza 2: oblicz ile bajtow ramki realnie potrzeba
+            size_t frame_bytes   = wmbus_frame_size(l_field);
+            size_t encoded_bytes = encoded_size_3of6(frame_bytes);
+
+            // Zabezpieczenie: nie wiecej niz odebrano i niz bufor
+            if (encoded_bytes > rxbytes) encoded_bytes = rxbytes;
+            if (encoded_bytes > sizeof(raw)) encoded_bytes = sizeof(raw);
+
+            // Dekoduj tylko wlasciwa czesc ramki (bez ogona/szumu)
+            int dlen = decode_3of6(raw, encoded_bytes, decoded, sizeof(decoded));
+            if (dlen <= 0) {
+                ESP_LOGW(TAG, "T1: blad 3of6 L=%d enc=%d (rxbytes=%d rssi=%d)",
+                         l_field, (int)encoded_bytes, rxbytes, rssi);
+                continue;
+            }
+            // Przytnij do realnej dlugosci ramki
+            size_t copy = (size_t)dlen;
+            if (copy > frame_bytes) copy = frame_bytes;
+            if (copy > sizeof(frame.data)) copy = sizeof(frame.data);
             memcpy(frame.data, decoded, copy);
             frame.len = copy;
+            ESP_LOGD(TAG, "T1 OK: L=%d frame=%dB decoded=%dB rssi=%d",
+                     l_field, (int)frame_bytes, dlen, rssi);
         }
 
         if (frame.len >= 10 && s_callback)

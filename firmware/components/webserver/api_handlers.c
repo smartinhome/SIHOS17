@@ -156,10 +156,11 @@ static esp_err_t handle_config_get(httpd_req_t *req) {
     );
     for (int i = 0; i < cfg.meter_count; i++) {
         n += snprintf(buf + n, sizeof(buf) - n,
-            "%s{\"id\":\"%s\",\"type\":\"%s\",\"name\":\"%s\",\"enabled\":%s}",
+            "%s{\"id\":\"%s\",\"type\":\"%s\",\"name\":\"%s\",\"key\":\"%s\",\"enabled\":%s}",
             i > 0 ? "," : "",
             cfg.meters[i].id_hex, cfg.meters[i].type,
-            cfg.meters[i].name, cfg.meters[i].enabled ? "true" : "false"
+            cfg.meters[i].name, cfg.meters[i].key,
+            cfg.meters[i].enabled ? "true" : "false"
         );
     }
     snprintf(buf + n, sizeof(buf) - n, "]}");

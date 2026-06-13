@@ -366,7 +366,7 @@ static void rx_task(void *arg) {
         int8_t rssi = convert_rssi(read_status(ST_RSSI));
         int guard = 0;
         bool complete = false;
-        while (guard++ < 2000) {
+        while (guard++ < 300) {
             uint8_t st = read_status(ST_RXBYTES);
             if (st == 0xFF) break;
             if (st & 0x80) { strobe(S_SFRX); break; } // overflow -> porzuc
@@ -405,7 +405,7 @@ static void rx_task(void *arg) {
                 if (rxlen >= expected) complete = true;
                 break;
             }
-            esp_rom_delay_us(300);
+            vTaskDelay(1);  // oddaj CPU - bez tego watchdog ubija task
         }
         strobe(S_SFRX);
 

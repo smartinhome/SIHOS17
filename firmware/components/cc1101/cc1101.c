@@ -339,7 +339,7 @@ static void rx_task(void *arg) {
             if (st == 0xFF) break;
             if (st & 0x80) { strobe(S_SFRX); break; } // overflow
             if ((st & 0x7F) >= 4) { got_header = true; break; }
-            vTaskDelay(pdMS_TO_TICKS(2));
+            vTaskDelay(pdMS_TO_TICKS(5));
             waited++;
         }
         if (!got_header) continue;
@@ -481,7 +481,7 @@ void cc1101_init(const cc1101_config_t *cfg) {
 void cc1101_start_receive(wmbus_frame_cb_t callback) {
     s_callback = callback;
     s_rx_stop = false;
-    xTaskCreate(rx_task, "cc1101_rx", 8192, NULL, 10, &s_rx_task);
+    xTaskCreate(rx_task, "cc1101_rx", 8192, NULL, 4, &s_rx_task);
     ESP_LOGI(TAG, "Odbior wMbus uruchomiony");
 }
 

@@ -92,6 +92,7 @@ static spi_device_handle_t s_spi = NULL;
 static cc1101_config_t     s_cfg = {0};
 static wmbus_frame_cb_t    s_callback = NULL;
 static TaskHandle_t        s_rx_task = NULL;
+static volatile bool       s_rx_stop = false;
 
 // ── Konfiguracja wMbus T1/C1 (z bodek85, sprawdzona) ───────
 // SYNC word 0x543D — to klucz do wykrywania ramek zamiast szumu
@@ -314,6 +315,12 @@ static void rx_task(void *arg) {
     uint8_t  decoded[MAX_FRAME_SIZE];
 
     while (1) {
+        if (s_rx_stop) {           // bezpieczne zatrzymanie (np. przed OTA)
+            strobe(S_SIDLE);
+            s_rx_task = NULL;
+            vTaskDelete(NULL);
+            return;
+        }
         // ---- INIT_RX: reset, czyszczenie FIFO, wejscie w RX, infinite length ----
         strobe(S_SIDLE);
         strobe(S_SFTX);
@@ -473,12 +480,21 @@ void cc1101_init(const cc1101_config_t *cfg) {
 
 void cc1101_start_receive(wmbus_frame_cb_t callback) {
     s_callback = callback;
+    s_rx_stop = false;
     xTaskCreate(rx_task, "cc1101_rx", 8192, NULL, 10, &s_rx_task);
     ESP_LOGI(TAG, "Odbior wMbus uruchomiony");
 }
 
 void cc1101_stop(void) {
+    if (!s_rx_task) { strobe(S_SIDLE); return; }
+    // Popros task by sam wyszedl w bezpiecznym miejscu (nie w trakcie SPI)
+    s_rx_stop = true;
+    // Czekaj do 2s az task sie zakonczy
+    for (int i = 0; i < 200 && s_rx_task != NULL; i++)
+        vTaskDelay(pdMS_TO_TICKS(10));
+    // Gdyby utknal — wymus
     if (s_rx_task) { vTaskDelete(s_rx_task); s_rx_task = NULL; }
+    s_rx_stop = false;
     strobe(S_SIDLE);
 }
 

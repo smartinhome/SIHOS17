@@ -373,7 +373,7 @@ static void rx_task(void *arg) {
         int8_t rssi = convert_rssi(read_status(ST_RSSI));
         int guard = 0;
         bool complete = false;
-        while (guard++ < 300) {
+        while (guard++ < 2000) {
             uint8_t st = read_status(ST_RXBYTES);
             if (st == 0xFF) break;
             if (st & 0x80) { strobe(S_SFRX); break; } // overflow -> porzuc
@@ -412,7 +412,14 @@ static void rx_task(void *arg) {
                 if (rxlen >= expected) complete = true;
                 break;
             }
-            vTaskDelay(1);  // oddaj CPU - bez tego watchdog ubija task
+            // Podczas aktywnego odbioru czytaj FIFO czesto (krotkie us, nie 10ms),
+            // bo FIFO 64B zapelnia sie szybko. Co 25 iteracji oddaj CPU (watchdog + serwer).
+            if (rxlen > 4) {
+                esp_rom_delay_us(500);            // ~0.5ms - FIFO nie zdazy przepelnic
+                if ((guard % 25) == 0) vTaskDelay(1);
+            } else {
+                vTaskDelay(1);                    // przed startem ramki - oddaj CPU normalnie
+            }
         }
         strobe(S_SFRX);
 
@@ -481,7 +488,7 @@ void cc1101_init(const cc1101_config_t *cfg) {
 void cc1101_start_receive(wmbus_frame_cb_t callback) {
     s_callback = callback;
     s_rx_stop = false;
-    xTaskCreate(rx_task, "cc1101_rx", 8192, NULL, 4, &s_rx_task);
+    xTaskCreate(rx_task, "cc1101_rx", 8192, NULL, 6, &s_rx_task);
     ESP_LOGI(TAG, "Odbior wMbus uruchomiony");
 }
 

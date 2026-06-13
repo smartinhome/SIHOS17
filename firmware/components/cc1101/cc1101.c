@@ -3,6 +3,7 @@
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <string.h>
@@ -62,7 +63,9 @@ static const char *TAG = "CC1101";
 #define S_SRES      0x30
 #define S_SRX       0x34
 #define S_SIDLE     0x36
+#define S_SFTX      0x3B
 #define S_SFRX      0x3A
+#define S_SCAL      0x33
 #define S_SNOP      0x3D
 
 // ── Status (burst read 0xC0) ───────────────────────────────
@@ -71,6 +74,14 @@ static const char *TAG = "CC1101";
 #define ST_RSSI       0x34
 #define ST_MARCSTATE  0x35
 #define ST_RXBYTES    0x3B
+
+#define ST_TXBYTES    0x3A
+#define ST_PKTSTATUS  0x38
+
+// Stale strumieniowego odbioru
+#define RX_FIFO_THRESHOLD 10
+#define MAX_FRAME_SIZE    290
+#define MARC_RETRY        5
 
 #define RXFIFO        0x3F
 #define WRITE_BURST   0x40
@@ -282,95 +293,151 @@ static int decode_3of6(const uint8_t *coded, size_t coded_len,
 }
 
 // ── Task odbioru ───────────────────────────────────────────
+// ─────────── Strumieniowy odbior wMbus (wzor: bodek85/SzczepanLeon) ───────────
+// Oblicz dlugosc zdekodowanej ramki mode A z L-field
+static size_t mode_a_decoded_size(uint8_t l){
+    size_t nb = (l < 26) ? 2 : ((l - 26)/16 + 3);
+    return l + 1 + 2*nb;
+}
+// Ile bajtow zakodowanych 3of6 dla mode T
+static size_t mode_t_packet_size(uint8_t l){
+    return encoded_size_3of6(mode_a_decoded_size(l));
+}
+
+// Odczyt N bajtow z RX FIFO (burst) do bufora
+static void rx_fifo_read(uint8_t *dst, size_t n){
+    if(n) read_fifo_burst(dst, n);
+}
+
 static void rx_task(void *arg) {
-    uint8_t raw[256];
-    uint8_t decoded[256];
+    uint8_t  rxbuf[MAX_FRAME_SIZE];
+    uint8_t  decoded[MAX_FRAME_SIZE];
 
     while (1) {
-        // Wejdź w tryb RX
+        // ---- INIT_RX: reset, czyszczenie FIFO, wejscie w RX, infinite length ----
         strobe(S_SIDLE);
+        strobe(S_SFTX);
         strobe(S_SFRX);
+        write_reg(R_FIFOTHR, 0x0A);
+        write_reg(R_PKTCTRL0, 0x02);   // infinite length na start
+        size_t  rxlen = 0, expected = 0;
+        uint8_t l_field = 0;
         strobe(S_SRX);
 
-        // Czekaj aż w FIFO pojawią się dane (GDO0 wysoki = próg FIFO)
-        // Polling — prostsze niż przerwania, wystarcza dla wMbus
-        int wait = 0;
-        while (wait < 500) {
-            uint8_t rxbytes = read_status(ST_RXBYTES) & 0x7F;
-            if (rxbytes >= 10) break; // mamy nagłówek
+        // ---- WAIT_FOR_SYNC: czekaj na naglowek (>=4 bajty w FIFO) ----
+        int waited = 0;
+        bool got_header = false;
+        while (waited < 400) {
+            uint8_t st = read_status(ST_RXBYTES);
+            if (st == 0xFF) break;
+            if (st & 0x80) { strobe(S_SFRX); break; } // overflow
+            if ((st & 0x7F) >= 4) { got_header = true; break; }
             vTaskDelay(pdMS_TO_TICKS(2));
-            wait++;
+            waited++;
         }
+        if (!got_header) continue;
 
-        uint8_t rxbytes = read_status(ST_RXBYTES) & 0x7F;
-        if (rxbytes < 10) continue; // nic nie przyszło, restart RX
+        // ---- Naglowek: odczytaj 3 bajty, zdekoduj 3of6 by poznac L-field ----
+        uint8_t header[4];
+        rx_fifo_read(header, 4);
+        uint8_t hdec[4];
+        int hn = decode_3of6(header, 3, hdec, sizeof(hdec));
+        if (hn < 1) {
+            // moze tryb C (0x54 preamble) — nie obslugujemy tu, restart
+            continue;
+        }
+        l_field = hdec[0];
+        if (l_field < 10 || l_field > 250) continue;  // nieprawidlowa dlugosc
+        expected = mode_t_packet_size(l_field);
+        if (expected > MAX_FRAME_SIZE) expected = MAX_FRAME_SIZE;
 
-        // Poczekaj chwilę aż reszta ramki dotrze do FIFO
-        vTaskDelay(pdMS_TO_TICKS(30));
+        // Naglowek (4 zakodowane bajty) trafiaja do bufora
+        memcpy(rxbuf, header, 4);
+        rxlen = 4;
 
-        rxbytes = read_status(ST_RXBYTES) & 0x7F;
-        if (rxbytes == 0 || rxbytes > 200) {
-            strobe(S_SFRX);
+        // ---- Przelacz na FIXED length gdy znamy dlugosc ----
+        if (expected < 256) {
+            write_reg(R_PKTLEN, (uint8_t)expected);
+            write_reg(R_PKTCTRL0, 0x00); // fixed
+        }
+        write_reg(R_FIFOTHR, RX_FIFO_THRESHOLD);
+
+        // ---- READ_DATA: opróżniaj FIFO porcjami az do expected ----
+        int8_t rssi = convert_rssi(read_status(ST_RSSI));
+        int guard = 0;
+        bool complete = false;
+        while (guard++ < 2000) {
+            uint8_t st = read_status(ST_RXBYTES);
+            if (st == 0xFF) break;
+            if (st & 0x80) { strobe(S_SFRX); break; } // overflow -> porzuc
+            uint8_t nfifo = st & 0x7F;
+            uint8_t marc  = read_status(ST_MARCSTATE) & 0x1F;
+
+            size_t remaining = expected - rxlen;
+
+            if (nfifo > 0) {
+                // Zostaw 1 bajt w FIFO podczas odbioru (errata), chyba ze to koniec
+                size_t to_read;
+                if (remaining <= nfifo) to_read = remaining;
+                else to_read = (nfifo > 1) ? (nfifo - 1) : 0;
+                if (to_read > 0 && rxlen + to_read <= MAX_FRAME_SIZE) {
+                    rx_fifo_read(rxbuf + rxlen, to_read);
+                    rxlen += to_read;
+                }
+            }
+
+            if (rxlen >= expected) { complete = true; break; }
+
+            // Fallback: chip wrocil do IDLE/RX_END a my mamy juz dane -> dociagnij reszte
+            if ((marc == 0x01 || marc == 0x0E) && rxlen > 4) {
+                for (int r = 0; r < MARC_RETRY && rxlen < expected; r++) {
+                    uint8_t rem = read_status(ST_RXBYTES) & 0x7F;
+                    if (rem > 0) {
+                        size_t td = (expected - rxlen < rem) ? (expected - rxlen) : rem;
+                        if (rxlen + td <= MAX_FRAME_SIZE) {
+                            rx_fifo_read(rxbuf + rxlen, td);
+                            rxlen += td;
+                        }
+                    } else {
+                        esp_rom_delay_us(200);
+                    }
+                }
+                if (rxlen >= expected) complete = true;
+                break;
+            }
+            esp_rom_delay_us(300);
+        }
+        strobe(S_SFRX);
+
+        if (!complete || rxlen < expected) {
+            ESP_LOGW(TAG, "T1: ramka niepelna %d/%d (L=%d rssi=%d)",
+                     (int)rxlen, (int)expected, l_field, rssi);
             continue;
         }
 
-        int8_t rssi = convert_rssi(read_status(ST_RSSI));
-        read_fifo_burst(raw, rxbytes);
-        strobe(S_SFRX);
+        // ---- Dekoduj cala ramke 3of6 ----
+        int dlen = decode_3of6(rxbuf, rxlen, decoded, sizeof(decoded));
+        if (dlen <= 0) {
+            ESP_LOGW(TAG, "T1: blad 3of6 po odbiorze (L=%d rxlen=%d)", l_field, (int)rxlen);
+            continue;
+        }
 
-        // Określ tryb: pierwszy bajt 0x54 = C1, inaczej T1
         wmbus_frame_t frame = {0};
         frame.rssi = rssi;
+        size_t flen = mode_a_decoded_size(l_field);
+        if ((size_t)dlen < flen) flen = dlen;
+        if (flen > sizeof(frame.data)) flen = sizeof(frame.data);
+        memcpy(frame.data, decoded, flen);
+        frame.len = flen;
 
-        if (raw[0] == 0x54) {
-            // Tryb C1 — dane już zdekodowane, pomiń preambułę
-            size_t copy = rxbytes > 2 ? rxbytes - 2 : 0;
-            if (copy > sizeof(frame.data)) copy = sizeof(frame.data);
-            memcpy(frame.data, raw + 2, copy);
-            frame.len = copy;
-        } else {
-            // Tryb T1 — dekodowanie dwufazowe (jak bodek85/wmbusmeters):
-            // Faza 1: zdekoduj poczatek by odczytac L-field (pierwszy bajt)
-            uint8_t head[4];
-            int hlen = decode_3of6(raw, 3, head, sizeof(head));
-            if (hlen < 1) {
-                ESP_LOGW(TAG, "T1: nie odczytano L-field (rxbytes=%d rssi=%d)",
-                         rxbytes, rssi);
-                continue;
-            }
-            uint8_t l_field = head[0];
-
-            // Faza 2: oblicz ile bajtow ramki realnie potrzeba
-            size_t frame_bytes   = wmbus_frame_size(l_field);
-            size_t encoded_bytes = encoded_size_3of6(frame_bytes);
-
-            // Zabezpieczenie: nie wiecej niz odebrano i niz bufor
-            if (encoded_bytes > rxbytes) encoded_bytes = rxbytes;
-            if (encoded_bytes > sizeof(raw)) encoded_bytes = sizeof(raw);
-
-            // Dekoduj tylko wlasciwa czesc ramki (bez ogona/szumu)
-            int dlen = decode_3of6(raw, encoded_bytes, decoded, sizeof(decoded));
-            if (dlen <= 0) {
-                ESP_LOGW(TAG, "T1: blad 3of6 L=%d enc=%d (rxbytes=%d rssi=%d)",
-                         l_field, (int)encoded_bytes, rxbytes, rssi);
-                continue;
-            }
-            // Przytnij do realnej dlugosci ramki
-            size_t copy = (size_t)dlen;
-            if (copy > frame_bytes) copy = frame_bytes;
-            if (copy > sizeof(frame.data)) copy = sizeof(frame.data);
-            memcpy(frame.data, decoded, copy);
-            frame.len = copy;
-            ESP_LOGD(TAG, "T1 OK: L=%d frame=%dB decoded=%dB rssi=%d",
-                     l_field, (int)frame_bytes, dlen, rssi);
-        }
+        ESP_LOGD(TAG, "T1 OK: L=%d frame=%dB decoded=%dB rssi=%d",
+                 l_field, (int)flen, dlen, rssi);
 
         if (frame.len >= 10 && s_callback)
             s_callback(&frame);
     }
 }
 
-// ── API ────────────────────────────────────────────────────
 void cc1101_init(const cc1101_config_t *cfg) {
     memcpy(&s_cfg, cfg, sizeof(cc1101_config_t));
 

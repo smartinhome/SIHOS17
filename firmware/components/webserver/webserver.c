@@ -172,6 +172,12 @@ static esp_err_t root_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+static esp_err_t favicon_handler(httpd_req_t *req) {
+    httpd_resp_set_status(req, "204 No Content");
+    httpd_resp_send(req, NULL, 0);
+    return ESP_OK;
+}
+
 void webserver_init(void) {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.max_uri_handlers = 24;
@@ -186,6 +192,11 @@ void webserver_init(void) {
         .is_websocket = false,
     };
     httpd_register_uri_handler(s_server, &root);
+    httpd_uri_t favicon = {
+        .uri = "/favicon.ico", .method = HTTP_GET,
+        .handler = favicon_handler, .user_ctx = NULL, .is_websocket = false,
+    };
+    httpd_register_uri_handler(s_server, &favicon);
     api_register_handlers(s_server);
     ESP_LOGI(TAG, "Serwer HTTP uruchomiony na porcie 80");
 }

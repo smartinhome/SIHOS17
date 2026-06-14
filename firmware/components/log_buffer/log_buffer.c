@@ -12,6 +12,8 @@ static char              s_buf[LOG_BUF_SIZE];
 static size_t            s_head = 0;     // pozycja zapisu
 static bool              s_wrapped = false;
 static SemaphoreHandle_t s_mutex = NULL;
+#include <time.h>
+
 static vprintf_like_t    s_orig_vprintf = NULL;
 
 // Dopisz tekst do bufora kolowego
@@ -36,6 +38,16 @@ static int log_vprintf(const char *fmt, va_list args) {
     if (n > 0) {
         size_t len = (n < (int)sizeof(line)) ? (size_t)n : sizeof(line) - 1;
         if (s_mutex && xSemaphoreTake(s_mutex, 0) == pdTRUE) {
+            // Prefix [HH:MM:SS] gdy czas zsynchronizowany (SNTP, rok>2020)
+            time_t now = time(NULL);
+            struct tm ti;
+            localtime_r(&now, &ti);
+            if (ti.tm_year > 120) {   // rok > 2020 = czas ustawiony
+                char ts[12];
+                int tn = snprintf(ts, sizeof(ts), "[%02d:%02d:%02d] ",
+                                  ti.tm_hour, ti.tm_min, ti.tm_sec);
+                append_to_buf(ts, tn);
+            }
             append_to_buf(line, len);
             xSemaphoreGive(s_mutex);
         }

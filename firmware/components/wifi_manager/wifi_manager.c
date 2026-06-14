@@ -4,6 +4,8 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_sntp.h"
+#include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include <string.h>
@@ -42,6 +44,15 @@ static void event_handler(void *arg, esp_event_base_t base,
         s_state = WIFI_STATE_CONNECTED;
         xEventGroupSetBits(s_wifi_eg, WIFI_CONNECTED_BIT);
         ESP_LOGI(TAG, "Połączono: %s", s_ip);
+        // Synchronizacja czasu (SNTP) - dla timestampow HH:MM:SS w logach
+        if (esp_sntp_enabled() == false) {
+            setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3", 1);  // strefa Polska
+            tzset();
+            esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
+            esp_sntp_setservername(0, "pool.ntp.org");
+            esp_sntp_init();
+            ESP_LOGI(TAG, "SNTP: synchronizacja czasu uruchomiona");
+        }
     }
 }
 

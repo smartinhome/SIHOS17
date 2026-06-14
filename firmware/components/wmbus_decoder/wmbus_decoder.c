@@ -124,6 +124,42 @@ void wmbus_decoder_init(void) {
     ESP_LOGI(TAG, "Dekoder wMbus gotowy (stub — wymaga wmbusmeters)");
 }
 
+
+// Sprawdza czy ramka jest zaszyfrowana (na podstawie CI-field i tpl-cfg)
+// oraz czy dla danego ID jest zapisany klucz w konfiguracji.
+static void check_encryption_key(const uint8_t *data, size_t len, const char *id) {
+    if (len < 16) return;
+    // Znajdz CI-field: po naglowku DLL (10 bajtow) - bajt [10]
+    uint8_t ci = data[10];
+    bool encrypted = false;
+    // 0x7A = short tpl header: [11]=ACC [12]=STS [13..14]=CFG
+    if (ci == 0x7A && len >= 15) {
+        uint8_t cfg_hi = data[14];  // gorny bajt konfiguracji
+        // tryb szyfrowania w bitach: !=0 oznacza szyfrowanie (AES_CBC=5, AES_CTR itp)
+        uint8_t mode = (cfg_hi >> 4) & 0x0F;
+        if (mode != 0) encrypted = true;
+    } else if (ci == 0x72 && len >= 19) {
+        // long tpl header - cfg dalej
+        uint8_t cfg_hi = data[18];
+        uint8_t mode = (cfg_hi >> 4) & 0x0F;
+        if (mode != 0) encrypted = true;
+    }
+    if (!encrypted) return;
+
+    // Sprawdz czy jest klucz w konfiguracji dla tego ID
+    sih_config_t cfg = nvs_config_get();
+    bool has_key = false;
+    for (int i = 0; i < cfg.meter_count; i++) {
+        if (strcasecmp(cfg.meters[i].id_hex, id) == 0) {
+            if (strlen(cfg.meters[i].key) >= 32) has_key = true;
+            break;
+        }
+    }
+    if (!has_key) {
+        ESP_LOGW(TAG, "Licznik %s jest ZASZYFROWANY (AES) - podaj klucz w zakladce Liczniki", id);
+    }
+}
+
 void wmbus_decoder_on_frame(const wmbus_frame_t *frame) {
     if (!frame || frame->len < 12) return;
 
@@ -146,6 +182,9 @@ void wmbus_decoder_on_frame(const wmbus_frame_t *frame) {
         ESP_LOGW(TAG, "Nie można zdekodować ramki");
         return;
     }
+
+    // Sygnalizuj w logach jesli licznik zaszyfrowany a brak klucza
+    check_encryption_key(frame->data, frame->len, tmp.id_hex);
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     meter_data_t *m = find_or_create(tmp.id_hex);

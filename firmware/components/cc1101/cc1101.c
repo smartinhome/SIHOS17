@@ -373,7 +373,7 @@ static void rx_task(void *arg) {
         int8_t rssi = convert_rssi(read_status(ST_RSSI));
         int guard = 0;
         bool complete = false;
-        while (guard++ < 500) {
+        while (guard++ < 200) {
             uint8_t st = read_status(ST_RXBYTES);
             if (st == 0xFF) break;
             if (st & 0x80) { strobe(S_SFRX); break; } // overflow -> porzuc
@@ -412,15 +412,11 @@ static void rx_task(void *arg) {
                 if (rxlen >= expected) complete = true;
                 break;
             }
-            // Kluczowe dla stabilnosci: oddawaj CPU regularnie.
-            // Gdy FIFO ma malo danych (czekamy na transmisje) - vTaskDelay (oddaj CPU).
-            // Gdy FIFO szybko sie zapelnia (>=32B, aktywny transfer) - krotka pauza us
-            // by zdazyc opronznic przed przepelnieniem, ale i tak co iteracje maly delay.
-            if (nfifo >= 32) {
-                esp_rom_delay_us(800);   // FIFO pelne w polowie - czytaj szybko (bez oddania CPU raz)
-            } else {
-                vTaskDelay(1);           // FIFO ma zapas LUB czekamy - oddaj CPU (watchdog OK)
-            }
+            // Przy FreeRTOS 1000Hz tick=1ms: oddajemy CPU co 1ms.
+            // W 1ms przychodzi ~12B (przy 100kbps), FIFO 64B ma duzy zapas.
+            // Czytamy co iteracje (powyzej), tu tylko oddajemy CPU - bez busy-wait,
+            // bez ryzyka overflow, serwer HTTP pozostaje responsywny.
+            vTaskDelay(1);
         }
         strobe(S_SFRX);
 

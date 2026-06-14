@@ -373,7 +373,7 @@ static void rx_task(void *arg) {
         int8_t rssi = convert_rssi(read_status(ST_RSSI));
         int guard = 0;
         bool complete = false;
-        while (guard++ < 2000) {
+        while (guard++ < 500) {
             uint8_t st = read_status(ST_RXBYTES);
             if (st == 0xFF) break;
             if (st & 0x80) { strobe(S_SFRX); break; } // overflow -> porzuc
@@ -412,13 +412,14 @@ static void rx_task(void *arg) {
                 if (rxlen >= expected) complete = true;
                 break;
             }
-            // Podczas aktywnego odbioru czytaj FIFO czesto (krotkie us, nie 10ms),
-            // bo FIFO 64B zapelnia sie szybko. Co 25 iteracji oddaj CPU (watchdog + serwer).
-            if (rxlen > 4) {
-                esp_rom_delay_us(500);            // ~0.5ms - FIFO nie zdazy przepelnic
-                if ((guard % 25) == 0) vTaskDelay(1);
+            // Kluczowe dla stabilnosci: oddawaj CPU regularnie.
+            // Gdy FIFO ma malo danych (czekamy na transmisje) - vTaskDelay (oddaj CPU).
+            // Gdy FIFO szybko sie zapelnia (>=32B, aktywny transfer) - krotka pauza us
+            // by zdazyc opronznic przed przepelnieniem, ale i tak co iteracje maly delay.
+            if (nfifo >= 32) {
+                esp_rom_delay_us(800);   // FIFO pelne w polowie - czytaj szybko (bez oddania CPU raz)
             } else {
-                vTaskDelay(1);                    // przed startem ramki - oddaj CPU normalnie
+                vTaskDelay(1);           // FIFO ma zapas LUB czekamy - oddaj CPU (watchdog OK)
             }
         }
         strobe(S_SFRX);

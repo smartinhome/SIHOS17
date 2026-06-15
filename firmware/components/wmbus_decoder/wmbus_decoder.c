@@ -163,13 +163,22 @@ static void check_encryption_key(const uint8_t *data, size_t len, const char *id
 void wmbus_decoder_on_frame(const wmbus_frame_t *frame) {
     if (!frame || frame->len < 12) return;
 
-    char hex_log[900] = {0};
     int maxb = (int)frame->len;
     if (maxb > 290) maxb = 290;  // zabezpieczenie bufora
+
+    // Wersja ze spacjami - czytelna w logach
+    char hex_log[900] = {0};
     for (int i = 0; i < maxb; i++)
         snprintf(hex_log + i*3, sizeof(hex_log) - i*3, "%02X ", frame->data[i]);
     ESP_LOGI(TAG, "Ramka [%d B] RSSI:%ddBm: %s",
              (int)frame->len, frame->rssi, hex_log);
+
+    // Wersja bez spacji + gotowy link do analizatora wmbusmeters.org
+    // (wmbusmeters sam usuwa CRC blokow, wiec podajemy surowa ramke z CRC)
+    char hex_raw[600] = {0};
+    for (int i = 0; i < maxb; i++)
+        snprintf(hex_raw + i*2, sizeof(hex_raw) - i*2, "%02x", frame->data[i]);
+    ESP_LOGI(TAG, "  -> https://wmbusmeters.org/analyze/%s", hex_raw);
 
     // Zachowaj surową ramkę do bufora (nawet jeśli dekoder jej nie rozpozna)
     xSemaphoreTake(s_mutex, portMAX_DELAY);

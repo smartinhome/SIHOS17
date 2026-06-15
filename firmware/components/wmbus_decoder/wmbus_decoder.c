@@ -163,10 +163,12 @@ static void check_encryption_key(const uint8_t *data, size_t len, const char *id
 void wmbus_decoder_on_frame(const wmbus_frame_t *frame) {
     if (!frame || frame->len < 12) return;
 
-    char hex_log[64] = {0};
-    for (int i = 0; i < (int)frame->len && i < 16; i++)
+    char hex_log[900] = {0};
+    int maxb = (int)frame->len;
+    if (maxb > 290) maxb = 290;  // zabezpieczenie bufora
+    for (int i = 0; i < maxb; i++)
         snprintf(hex_log + i*3, sizeof(hex_log) - i*3, "%02X ", frame->data[i]);
-    ESP_LOGI(TAG, "Ramka [%d B] RSSI:%ddBm: %s...",
+    ESP_LOGI(TAG, "Ramka [%d B] RSSI:%ddBm: %s",
              (int)frame->len, frame->rssi, hex_log);
 
     // Zachowaj surową ramkę do bufora (nawet jeśli dekoder jej nie rozpozna)

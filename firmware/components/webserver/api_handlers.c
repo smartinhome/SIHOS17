@@ -50,13 +50,14 @@ static esp_err_t handle_status(httpd_req_t *req) {
     snprintf(buf, sizeof(buf),
         "{\"version\":\"%s\",\"uptime_ms\":%" PRId64 ","
         "\"wifi_state\":\"%s\",\"wifi_rssi\":%d,"
-        "\"ip\":\"%s\",\"meter_count\":%d}",
+        "\"ip\":\"%s\",\"meter_count\":%d,\"partition\":\"%s\"}",
         ota_get_running_version(),
         esp_timer_get_time() / 1000,
         wifi_str[ws],
         wifi_manager_get_rssi(),
         ip,
-        wmbus_decoder_get_count()
+        wmbus_decoder_get_count(),
+        ota_get_partition_label()
     );
     resp_json(req, buf);
     return ESP_OK;

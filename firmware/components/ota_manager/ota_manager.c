@@ -63,6 +63,20 @@ static void ota_url_task(void *arg) {
     esp_https_ota_get_img_desc(handle, &desc);
     ESP_LOGI(TAG, "Aktualizacja do wersji: %s", desc.version);
 
+    // Diagnostyka partycji: z ktorej bootujemy, do ktorej zapiszemy
+    const esp_partition_t *run_p = esp_ota_get_running_partition();
+    const esp_partition_t *next_p = esp_ota_get_next_update_partition(NULL);
+    ESP_LOGI(TAG, "OTA: biezaca partycja=%s @0x%lx, zapis do=%s @0x%lx",
+             run_p ? run_p->label : "?", (unsigned long)(run_p ? run_p->address : 0),
+             next_p ? next_p->label : "?", (unsigned long)(next_p ? next_p->address : 0));
+
+    // Ostrzezenie gdy pobierana wersja == biezaca (np. zepsuty build na CI)
+    const esp_app_desc_t *cur = esp_app_get_description();
+    if (cur && strcmp(cur->version, desc.version) == 0) {
+        ESP_LOGW(TAG, "OTA: UWAGA pobierana wersja (%s) == biezaca! "
+                      "Build na CI moze byc nieaktualny.", desc.version);
+    }
+
     s_status.state = OTA_STATE_WRITING;
     int image_size = esp_https_ota_get_image_size(handle);
     ESP_LOGI(TAG, "OTA: rozmiar obrazu = %d B (%.1f KB)", image_size, image_size/1024.0);
@@ -362,4 +376,9 @@ ota_status_t ota_get_status(void) { return s_status; }
 const char *ota_get_running_version(void) {
     const esp_app_desc_t *desc = esp_app_get_description();
     return desc->version;
+}
+
+const char *ota_get_partition_label(void) {
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    return running ? running->label : "?";
 }

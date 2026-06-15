@@ -29,7 +29,7 @@ static void append_to_buf(const char *data, size_t len) {
 
 // Nasza funkcja przechwytujaca — wola oryginalna (UART) i zapisuje do bufora
 static int log_vprintf(const char *fmt, va_list args) {
-    char line[256];
+    char line[768];   // bylo 256 - za malo na dlugie ramki/linki wmbusmeters
     va_list args_copy;
     va_copy(args_copy, args);
     int n = vsnprintf(line, sizeof(line), fmt, args_copy);

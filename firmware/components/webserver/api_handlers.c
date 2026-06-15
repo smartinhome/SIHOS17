@@ -128,6 +128,19 @@ static esp_err_t handle_config_meter(httpd_req_t *req) {
     int idx = -1;
     for (int i = 0; i < cfg.meter_count; i++)
         if (strcasecmp(cfg.meters[i].id_hex, id) == 0) { idx = i; break; }
+
+    // Usuwanie licznika: body zawiera "del":1
+    if (strstr(body, "\"del\"")) {
+        if (idx >= 0) {
+            for (int i = idx; i < cfg.meter_count - 1; i++)
+                cfg.meters[i] = cfg.meters[i + 1];
+            cfg.meter_count--;
+            memset(&cfg.meters[cfg.meter_count], 0, sizeof(meter_config_t));
+            nvs_config_save(&cfg);
+        }
+        resp_ok(req);
+        return ESP_OK;
+    }
     if (idx < 0) {
         if (cfg.meter_count >= MAX_METERS) { resp_err(req, "limit licznikow"); return ESP_OK; }
         idx = cfg.meter_count++;

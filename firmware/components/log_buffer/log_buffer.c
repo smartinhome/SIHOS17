@@ -29,15 +29,17 @@ static void append_to_buf(const char *data, size_t len) {
 
 // Nasza funkcja przechwytujaca — wola oryginalna (UART) i zapisuje do bufora
 static int log_vprintf(const char *fmt, va_list args) {
-    char line[768];   // bylo 256 - za malo na dlugie ramki/linki wmbusmeters
-    va_list args_copy;
-    va_copy(args_copy, args);
-    int n = vsnprintf(line, sizeof(line), fmt, args_copy);
-    va_end(args_copy);
-
-    if (n > 0) {
-        size_t len = (n < (int)sizeof(line)) ? (size_t)n : sizeof(line) - 1;
-        if (s_mutex && xSemaphoreTake(s_mutex, 0) == pdTRUE) {
+    // Bufor STATYCZNY (nie na stosie!) - 768B na stosie wywalało male taski ESP-IDF.
+    // Chroniony tym samym mutexem co zapis do bufora kolowego.
+    static char line[768];
+    int n = 0;
+    if (s_mutex && xSemaphoreTake(s_mutex, 0) == pdTRUE) {
+        va_list args_copy;
+        va_copy(args_copy, args);
+        n = vsnprintf(line, sizeof(line), fmt, args_copy);
+        va_end(args_copy);
+        if (n > 0) {
+            size_t len = (n < (int)sizeof(line)) ? (size_t)n : sizeof(line) - 1;
             // Prefix [HH:MM:SS] gdy czas zsynchronizowany (SNTP, rok>2020)
             time_t now = time(NULL);
             struct tm ti;
@@ -49,8 +51,8 @@ static int log_vprintf(const char *fmt, va_list args) {
                 append_to_buf(ts, tn);
             }
             append_to_buf(line, len);
-            xSemaphoreGive(s_mutex);
         }
+        xSemaphoreGive(s_mutex);
     }
 
     // Przekaz dalej do oryginalnego (UART)

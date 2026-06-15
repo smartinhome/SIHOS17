@@ -80,7 +80,7 @@ static const char *TAG = "CC1101";
 
 // Stale strumieniowego odbioru
 #define RX_FIFO_THRESHOLD 10
-#define MAX_FRAME_SIZE    290
+#define MAX_FRAME_SIZE    450   // bylo 290; Amiplus 3-faz zakodowany 3of6 = 326B
 #define MARC_RETRY        5
 
 #define RXFIFO        0x3F

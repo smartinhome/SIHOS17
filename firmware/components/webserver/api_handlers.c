@@ -13,7 +13,8 @@
 #include "esp_heap_caps.h"
 #include "esp_app_desc.h"
 #include "esp_mac.h"
-#include "esp_clk_tree.h"
+#include "esp_ota_ops.h"
+#include "esp_partition.h"
 #include "driver/temperature_sensor.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -101,9 +102,8 @@ static esp_err_t handle_system(httpd_req_t *req) {
     const esp_partition_t *run = esp_ota_get_running_partition();
     uint32_t app_part_size = run ? run->size : 0;
 
-    // CPU
-    uint32_t cpu_freq = 0;
-    esp_clk_tree_src_get_freq_hz(SOC_MOD_CLK_CPU, ESP_CLK_TREE_SRC_FREQ_PRECISION_APPROX, &cpu_freq);
+    // CPU - czestotliwosc z konfiguracji kompilacji (pewne, bez zaleznosci od wersji API)
+    uint32_t cpu_freq_mhz = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ;
 
     // Temperatura wewnetrzna
     float temp_c = 0;
@@ -141,7 +141,7 @@ static esp_err_t handle_system(httpd_req_t *req) {
         "\"idf_ver\":\"%s\",\"compile_time\":\"%s %s\",\"app_ver\":\"%s\""
         "}",
         model, chip.revision, chip.cores,
-        (unsigned)(cpu_freq / 1000000),
+        (unsigned)cpu_freq_mhz,
         (chip.features & CHIP_FEATURE_WIFI_BGN) ? "true" : "false",
         (chip.features & CHIP_FEATURE_BT) ? "true" : "false",
         (chip.features & CHIP_FEATURE_IEEE802154) ? "true" : "false",

@@ -2,6 +2,7 @@
 #include "nvs_config.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include <string.h>
@@ -33,6 +34,8 @@ static void store_raw_frame(const wmbus_frame_t *frame) {
     r->rssi  = frame->rssi;
     r->lqi   = frame->lqi;
     r->ts_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    time_t now = time(NULL);
+    r->ts_unix = (now > 1700000000) ? (uint32_t)now : 0;  // tylko gdy czas zsynchronizowany (SNTP)
 
     s_raw_head = (s_raw_head + 1) % MAX_RAW_FRAMES;
     if (s_raw_count < MAX_RAW_FRAMES) s_raw_count++;

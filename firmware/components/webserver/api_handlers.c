@@ -220,8 +220,8 @@ static esp_err_t handle_frames(httpd_req_t *req) {
         if (!r) continue;
         char buf[MAX_RAW_HEX + 96];
         snprintf(buf, sizeof(buf),
-            "%s{\"hex\":\"%s\",\"rssi\":%d,\"lqi\":%u,\"ts\":%" PRIu32 "}",
-            i > 0 ? "," : "", r->hex, r->rssi, (unsigned)r->lqi, r->ts_ms);
+            "%s{\"hex\":\"%s\",\"rssi\":%d,\"lqi\":%u,\"ts\":%" PRIu32 ",\"ts_unix\":%" PRIu32 "}",
+            i > 0 ? "," : "", r->hex, r->rssi, (unsigned)r->lqi, r->ts_ms, r->ts_unix);
         httpd_resp_sendstr_chunk(req, buf);
     }
     httpd_resp_sendstr_chunk(req, "]");

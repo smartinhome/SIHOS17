@@ -36,6 +36,7 @@ typedef struct {
     int8_t   rssi;
     uint8_t  lqi;
     uint32_t ts_ms;
+    uint32_t ts_unix;   // czas rzeczywisty (unix) odbioru ramki, 0 gdy brak SNTP
 } raw_frame_t;
 
 void          wmbus_decoder_init(void);

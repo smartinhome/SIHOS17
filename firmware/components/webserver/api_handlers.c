@@ -3,6 +3,7 @@
 #include "nvs_config.h"
 #include "wifi_manager.h"
 #include "ota_manager.h"
+#include "history.h"
 #include "log_buffer.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -48,6 +49,32 @@ static int read_body(httpd_req_t *req, char *buf, size_t max) {
         total += ret;
     buf[total] = 0;
     return total;
+}
+
+// ---------- Historia ----------
+static esp_err_t handle_history_list(httpd_req_t *req) {
+    static char buf[1024];
+    history_list_json(buf, sizeof(buf));
+    resp_json(req, buf);
+    return ESP_OK;
+}
+
+static esp_err_t handle_history(httpd_req_t *req) {
+    char id[16] = {0};
+    char res[8] = "hour";
+    char query[64];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        char val[16];
+        if (httpd_query_key_value(query, "id", val, sizeof(val)) == ESP_OK)
+            strlcpy(id, val, sizeof(id));
+        if (httpd_query_key_value(query, "res", val, sizeof(val)) == ESP_OK)
+            strlcpy(res, val, sizeof(res));
+    }
+    if (strlen(id) == 0) { resp_err(req, "brak id"); return ESP_OK; }
+    static char buf[8192];
+    history_get_json(id, res, buf, sizeof(buf));
+    resp_json(req, buf);
+    return ESP_OK;
 }
 
 // Globalny uchwyt czujnika temperatury (inicjalizowany raz)
@@ -396,6 +423,8 @@ void api_register_handlers(httpd_handle_t server) {
     const httpd_uri_t handlers[] = {
         { .uri="/api/status",      .method=HTTP_GET,  .handler=handle_status,      .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/system",      .method=HTTP_GET,  .handler=handle_system,      .user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/history/list", .method=HTTP_GET,  .handler=handle_history_list, .user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/history",      .method=HTTP_GET,  .handler=handle_history,      .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/meters",      .method=HTTP_GET,  .handler=handle_meters,      .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/frames",      .method=HTTP_GET,  .handler=handle_frames,      .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/config",      .method=HTTP_GET,  .handler=handle_config_get,  .user_ctx=NULL, .is_websocket=false },

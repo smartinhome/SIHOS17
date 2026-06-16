@@ -6,6 +6,8 @@ idf_component_register(
         webserver
         cc1101
         wmbus_decoder
+        history
+        meter_total
         ota_manager
         nvs_config
         log_buffer

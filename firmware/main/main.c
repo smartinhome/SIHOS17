@@ -4,6 +4,7 @@
 #include "webserver.h"
 #include "cc1101.h"
 #include "wmbus_decoder.h"
+#include "history.h"
 #include "ota_manager.h"
 #include "log_buffer.h"
 
@@ -53,6 +54,7 @@ void app_main(void) {
     cc1101_init(&radio_cfg);
 
     // Dekoder wMbus
+    history_init();   // montuje SPIFFS, wczytuje historie
     wmbus_decoder_init();
 
     // OTA manager

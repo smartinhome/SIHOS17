@@ -7,6 +7,14 @@
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_system.h"
+#include "esp_chip_info.h"
+#include "esp_flash.h"
+#include "esp_heap_caps.h"
+#include "esp_app_desc.h"
+#include "esp_mac.h"
+#include "esp_clk_tree.h"
+#include "driver/temperature_sensor.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <stdlib.h>
@@ -39,6 +47,114 @@ static int read_body(httpd_req_t *req, char *buf, size_t max) {
         total += ret;
     buf[total] = 0;
     return total;
+}
+
+// Globalny uchwyt czujnika temperatury (inicjalizowany raz)
+static temperature_sensor_handle_t s_temp_sensor = NULL;
+static bool s_temp_ready = false;
+
+static void system_temp_init(void) {
+    temperature_sensor_config_t cfg = TEMPERATURE_SENSOR_CONFIG_DEFAULT(-10, 80);
+    if (temperature_sensor_install(&cfg, &s_temp_sensor) == ESP_OK &&
+        temperature_sensor_enable(s_temp_sensor) == ESP_OK) {
+        s_temp_ready = true;
+    }
+}
+
+static const char *reset_reason_str(void) {
+    switch (esp_reset_reason()) {
+        case ESP_RST_POWERON:   return "wlaczenie zasilania";
+        case ESP_RST_SW:        return "restart programowy";
+        case ESP_RST_PANIC:     return "panika (crash)";
+        case ESP_RST_INT_WDT:   return "watchdog (przerwania)";
+        case ESP_RST_TASK_WDT:  return "watchdog (task)";
+        case ESP_RST_WDT:       return "watchdog (inny)";
+        case ESP_RST_DEEPSLEEP: return "wybudzenie z deep sleep";
+        case ESP_RST_BROWNOUT:  return "spadek napiecia (brownout)";
+        case ESP_RST_SDIO:      return "SDIO";
+        default:                return "nieznany";
+    }
+}
+
+static esp_err_t handle_system(httpd_req_t *req) {
+    // Chip info
+    esp_chip_info_t chip;
+    esp_chip_info(&chip);
+    const char *model = "nieznany";
+    if (chip.model == CHIP_ESP32C6) model = "ESP32-C6";
+    else if (chip.model == CHIP_ESP32) model = "ESP32";
+    else if (chip.model == CHIP_ESP32C3) model = "ESP32-C3";
+    else if (chip.model == CHIP_ESP32S3) model = "ESP32-S3";
+
+    // Pamiec RAM (heap)
+    uint32_t heap_free = esp_get_free_heap_size();
+    uint32_t heap_min  = esp_get_minimum_free_heap_size();
+    uint32_t heap_total = heap_caps_get_total_size(MALLOC_CAP_DEFAULT);
+    uint32_t heap_largest = heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT);
+    int heap_used_pct = heap_total ? (int)(100 - (heap_free * 100 / heap_total)) : 0;
+
+    // Flash
+    uint32_t flash_size = 0;
+    esp_flash_get_size(NULL, &flash_size);
+
+    // Aplikacja - rozmiar partycji
+    const esp_partition_t *run = esp_ota_get_running_partition();
+    uint32_t app_part_size = run ? run->size : 0;
+
+    // CPU
+    uint32_t cpu_freq = 0;
+    esp_clk_tree_src_get_freq_hz(SOC_MOD_CLK_CPU, ESP_CLK_TREE_SRC_FREQ_PRECISION_APPROX, &cpu_freq);
+
+    // Temperatura wewnetrzna
+    float temp_c = 0;
+    bool temp_ok = false;
+    if (s_temp_ready && temperature_sensor_get_celsius(s_temp_sensor, &temp_c) == ESP_OK) {
+        temp_ok = true;
+    }
+
+    // MAC
+    uint8_t mac[6] = {0};
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    char mac_str[18];
+    snprintf(mac_str, sizeof(mac_str), "%02X:%02X:%02X:%02X:%02X:%02X",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+
+    // Taski + uptime
+    UBaseType_t task_count = uxTaskGetNumberOfTasks();
+    int64_t uptime_s = esp_timer_get_time() / 1000000;
+
+    // App description
+    const esp_app_desc_t *app = esp_app_get_description();
+
+    char buf[900];
+    snprintf(buf, sizeof(buf),
+        "{"
+        "\"chip_model\":\"%s\",\"chip_rev\":%d,\"cpu_cores\":%d,"
+        "\"cpu_freq_mhz\":%u,"
+        "\"features\":{\"wifi\":%s,\"bt\":%s,\"ieee802154\":%s},"
+        "\"heap_free\":%u,\"heap_min\":%u,\"heap_total\":%u,"
+        "\"heap_largest\":%u,\"heap_used_pct\":%d,"
+        "\"flash_size\":%u,\"app_part_size\":%u,"
+        "\"temp_c\":%.1f,\"temp_ok\":%s,"
+        "\"mac\":\"%s\",\"task_count\":%u,\"uptime_s\":%lld,"
+        "\"reset_reason\":\"%s\","
+        "\"idf_ver\":\"%s\",\"compile_time\":\"%s %s\",\"app_ver\":\"%s\""
+        "}",
+        model, chip.revision, chip.cores,
+        (unsigned)(cpu_freq / 1000000),
+        (chip.features & CHIP_FEATURE_WIFI_BGN) ? "true" : "false",
+        (chip.features & CHIP_FEATURE_BT) ? "true" : "false",
+        (chip.features & CHIP_FEATURE_IEEE802154) ? "true" : "false",
+        (unsigned)heap_free, (unsigned)heap_min, (unsigned)heap_total,
+        (unsigned)heap_largest, heap_used_pct,
+        (unsigned)flash_size, (unsigned)app_part_size,
+        temp_ok ? temp_c : 0.0f, temp_ok ? "true" : "false",
+        mac_str, (unsigned)task_count, (long long)uptime_s,
+        reset_reason_str(),
+        app->idf_ver, app->date, app->time, app->version
+    );
+    resp_json(req, buf);
+    return ESP_OK;
 }
 
 static esp_err_t handle_status(httpd_req_t *req) {
@@ -276,8 +392,10 @@ static esp_err_t handle_logs_clear(httpd_req_t *req) {
 }
 
 void api_register_handlers(httpd_handle_t server) {
+    system_temp_init();   // czujnik temperatury ESP32-C6
     const httpd_uri_t handlers[] = {
         { .uri="/api/status",      .method=HTTP_GET,  .handler=handle_status,      .user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/system",      .method=HTTP_GET,  .handler=handle_system,      .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/meters",      .method=HTTP_GET,  .handler=handle_meters,      .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/frames",      .method=HTTP_GET,  .handler=handle_frames,      .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/config",      .method=HTTP_GET,  .handler=handle_config_get,  .user_ctx=NULL, .is_websocket=false },

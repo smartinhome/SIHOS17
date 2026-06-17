@@ -2,6 +2,7 @@
 #include "mbedtls/aes.h"
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 // ---------- CRC16 EN 13757 (poly 0x3D65) ----------
 static uint16_t crc16(const uint8_t *d, int off, int len) {
@@ -302,6 +303,136 @@ static bool difvif_meter(const uint8_t *b, int len, const uint8_t key[16],
 }
 
 // ---------- Glowna funkcja ----------
+// Pomocnik: znajdz pole po nazwie (do nadpisania zera niezerowa wartoscia)
+static int mtf_find(mtf_field_t *out, int nf, const char *name) {
+    for (int k = 0; k < nf; k++) if (strcmp(out[k].field, name) == 0) return k;
+    return -1;
+}
+static void mtf_put(mtf_field_t *out, int *nf, int max, const char *name,
+                    double val, const char *unit, int cumulative) {
+    int idx = mtf_find(out, *nf, name);
+    if (idx >= 0) {
+        // pole juz istnieje - nadpisz tylko gdy nowa wartosc niezerowa a stara zerowa
+        if (out[idx].value == 0 && val != 0) out[idx].value = val;
+        return;
+    }
+    if (*nf >= max) return;
+    snprintf(out[*nf].field, sizeof(out[*nf].field), "%s", name);
+    out[*nf].value = val;
+    snprintf(out[*nf].unit, sizeof(out[*nf].unit), "%s", unit);
+    out[*nf].cumulative = cumulative;
+    (*nf)++;
+}
+
+// ---------- Wielopolowy parser DIF/VIF (Amiplus: energia/moc/napiecia) ----------
+static int difvif_fields(const uint8_t *p, int len, mtf_field_t *out, int max_fields) {
+    int nf = 0;
+    int i = 0;
+    int volt_idx = 0;
+    while (i < len && nf < max_fields) {
+        uint8_t dif = p[i];
+        if (dif == 0x2F) { i++; continue; }
+        if (dif == 0x0F || dif == 0x1F) break;
+        int dn = 0;
+        switch (dif & 0x0F) {
+            case 0x01: dn=1; break; case 0x02: dn=2; break; case 0x03: dn=3; break;
+            case 0x04: dn=4; break; case 0x05: dn=4; break; case 0x06: dn=6; break;
+            case 0x07: dn=8; break; case 0x09: dn=1; break; case 0x0A: dn=2; break;
+            case 0x0B: dn=3; break; case 0x0C: dn=4; break; case 0x0E: dn=6; break;
+            default: dn=0; break;
+        }
+        int isbcd = ((dif & 0x0F) >= 0x09 && (dif & 0x0F) <= 0x0E && (dif & 0x0F) != 0x0D);
+        i++;
+        while (i < len && (p[i-1] & 0x80)) i++;
+        if (i >= len) break;
+        uint8_t vif = p[i]; i++;
+        uint8_t vife = 0;
+        while (i < len && (p[i-1] & 0x80)) { vife = p[i]; i++; }
+        if (i + dn > len) break;
+
+        double val = 0;
+        if (isbcd) {
+            double mult = 1;
+            for (int b = 0; b < dn; b++) {
+                val += (p[i+b] & 0x0F) * mult; mult *= 10;
+                val += ((p[i+b] >> 4) & 0x0F) * mult; mult *= 10;
+            }
+        } else {
+            int64_t iv = 0;
+            for (int b = 0; b < dn; b++) iv |= ((int64_t)p[i+b]) << (8*b);
+            val = (double)iv;
+        }
+
+        uint8_t v = vif & 0x7F;
+        bool backflow = (vife == 0x3C);
+
+        if ((v >= 0x00 && v <= 0x07) || vif == 0x83) {
+            int e = (v <= 0x07) ? ((v & 0x07) - 3) : 0;
+            double m = 1; for (int z=0; z<(e<0?-e:e); z++) m *= 10;
+            double kwh = val * ((e < 0) ? 1.0/m : m) / 1000.0;
+            if (!backflow) mtf_put(out, &nf, max_fields, "energia_kwh", kwh, "kWh", 1);
+            else           mtf_put(out, &nf, max_fields, "produkcja_kwh", kwh, "kWh", 1);
+        }
+        else if ((v >= 0x28 && v <= 0x2F) || vif == 0xAB || vif == 0xFB) {
+            int e = (v >= 0x28 && v <= 0x2F) ? ((v & 0x07) - 3) : 0;  // AB/FB: wartosc w W
+            double m = 1; for (int z=0; z<(e<0?-e:e); z++) m *= 10;
+            double kw = val * ((e < 0) ? 1.0/m : m) / 1000.0;
+            if (!backflow) mtf_put(out, &nf, max_fields, "moc_kw", kw, "kW", 0);
+            else           mtf_put(out, &nf, max_fields, "moc_produkcji_kw", kw, "kW", 0);
+        }
+        else if (vif == 0xFD && (vife >= 0x01 && vife <= 0x03) && volt_idx < 3) {
+            char name[24]; snprintf(name, sizeof(name), "napiecie_l%d_v", volt_idx + 1);
+            mtf_put(out, &nf, max_fields, name, val / 10.0, "V", 0);
+            volt_idx++;
+        }
+        i += dn;
+    }
+    return nf;
+}
+
+int meter_total_extract_fields(const uint8_t *data, size_t len,
+                               const char *key_hex,
+                               mtf_field_t *out, int max_fields, int *out_kind) {
+    if (!data || len < 12 || !out || max_fields < 1) return 0;
+    *out_kind = 0;
+    uint8_t key[16];
+    bool have_key = hex_to_key(key_hex, key);
+    char mf[4]; manuf3(data, mf);
+    uint8_t medium = data[9];
+    uint8_t clean[300];
+    int clen = remove_block_crc(data, (int)len, clean, sizeof(clean));
+
+    // Tylko Amiplus prad (APA, medium 0x02) ma wiele pol
+    if (strcmp(mf, "APA") == 0 && medium == 0x02 && have_key) {
+        int ci = -1;
+        for (int i = 10; i < 20 && i < clen; i++) if (clean[i] == 0x7A) { ci = i; break; }
+        if (ci < 0) return 0;
+        uint8_t iv[16];
+        for (int i = 0; i < 8; i++) iv[i] = clean[2+i];
+        for (int i = 8; i < 16; i++) iv[i] = clean[ci+1];
+        int encStart = ci + 5;
+        int encLen = ((clen - encStart) / 16) * 16;
+        if (encLen <= 0 || encLen > 240) return 0;
+        uint8_t dec[240];
+        if (!aes_cbc(key, iv, clean + encStart, encLen, dec)) return 0;
+        if (!(dec[0] == 0x2F && dec[1] == 0x2F)) return 0;
+        *out_kind = 2;
+        return difvif_fields(dec + 2, encLen - 2, out, max_fields);
+    }
+
+    // Pozostale liczniki: jedno pole total (uzyj istniejacej funkcji)
+    double total = 0; int kind = 0;
+    if (meter_total_extract(data, len, key_hex, &total, &kind)) {
+        *out_kind = kind;
+        snprintf(out[0].field, sizeof(out[0].field), "%s", kind == 2 ? "energia_kwh" : "total_m3");
+        out[0].value = total;
+        snprintf(out[0].unit, sizeof(out[0].unit), "%s", kind == 2 ? "kWh" : "m3");
+        out[0].cumulative = 1;
+        return 1;
+    }
+    return 0;
+}
+
 bool meter_total_extract(const uint8_t *data, size_t len,
                          const char *key_hex,
                          double *out_total, int *out_kind) {

@@ -29,6 +29,12 @@ void history_init(void);
 // id_hex - identyfikator licznika, total - skumulowany stan, kind - 1=m3, 2=kWh.
 void history_on_reading(const char *id_hex, double total, int kind, uint32_t ts_unix);
 
+// Per-pole: zapisuje wartosc konkretnego pola licznika (klucz id+pole).
+// cumulative=1 (energia/woda/gaz -> wykres roznic), 0 (moc/napiecie -> wartosc).
+// Zapisuje TYLKO gdy pole jest sledzone (history_is_tracked("id:pole")).
+void history_on_field(const char *id_hex, const char *field, double value,
+                      int kind, int cumulative, uint32_t ts_unix);
+
 // Zwraca JSON z historia danego licznika dla danej rozdzielczosci.
 // res: "rt"|"hour"|"day"|"month"|"year". Zapisuje do buf (zwraca dlugosc).
 // Zwraca zuzycie (roznice) miedzy kolejnymi kubelkami - styl HA Energy.

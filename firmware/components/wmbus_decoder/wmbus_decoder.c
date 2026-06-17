@@ -202,9 +202,8 @@ void wmbus_decoder_on_frame(const wmbus_frame_t *frame) {
     // Sygnalizuj w logach jesli licznik zaszyfrowany a brak klucza
     check_encryption_key(frame->data, frame->len, tmp.id_hex);
 
-    // --- HISTORIA 24/7: wyciagnij total i zapisz do historii ---
+    // --- HISTORIA 24/7: wyciagnij wszystkie pola i zapisz sledzone ---
     {
-        // znajdz klucz AES dla tego licznika w NVS
         const char *key_hex = "";
         sih_config_t cfg = nvs_config_get();
         for (int i = 0; i < cfg.meter_count; i++) {
@@ -213,11 +212,18 @@ void wmbus_decoder_on_frame(const wmbus_frame_t *frame) {
                 break;
             }
         }
-        double total = 0; int kind = 0;
-        if (meter_total_extract(frame->data, frame->len, key_hex, &total, &kind)) {
-            time_t now = time(NULL);
-            uint32_t ts_unix = (now > 1700000000) ? (uint32_t)now : 0;
-            if (ts_unix) history_on_reading(tmp.id_hex, total, kind, ts_unix);
+        time_t now = time(NULL);
+        uint32_t ts_unix = (now > 1700000000) ? (uint32_t)now : 0;
+        if (ts_unix) {
+            mtf_field_t fields[MTF_MAX_FIELDS];
+            int kind = 0;
+            int nf = meter_total_extract_fields(frame->data, frame->len, key_hex,
+                                                fields, MTF_MAX_FIELDS, &kind);
+            for (int i = 0; i < nf; i++) {
+                // zapis tylko sledzonych pol (filtr w history_on_field)
+                history_on_field(tmp.id_hex, fields[i].field, fields[i].value,
+                                 kind, fields[i].cumulative, ts_unix);
+            }
         }
     }
 

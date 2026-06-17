@@ -9,16 +9,16 @@
 #include "freertos/semphr.h"
 
 static const char *TAG = "HISTORY";
-#define MAX_HIST_METERS 8
+#define MAX_HIST_METERS 16
 
 // Stan historii pojedynczego licznika
 typedef struct {
-    char     id[16];
-    int      kind;            // 1=m3, 2=kWh
+    char     id[28];          // klucz: "id" lub "id:pole" (np. 56989134:moc_kw)
+    int      kind;            // 1=woda, 2=prad, 3=gaz
+    int      cumulative;      // 1=kumulacyjne (roznice), 0=chwilowe (wartosc)
     bool     used;
-    float    last_total;      // ostatni znany total
-    uint32_t last_ts;         // czas ostatniego odczytu
-    // Kubelki (kolowe bufory - najnowszy na koncu)
+    float    last_total;
+    uint32_t last_ts;
     hist_bucket_t hours[HIST_HOURS];   int n_hours;
     hist_bucket_t days[HIST_DAYS];     int n_days;
     hist_bucket_t months[HIST_MONTHS]; int n_months;
@@ -28,8 +28,8 @@ typedef struct {
 
 static meter_hist_t s_meters[MAX_HIST_METERS];
 // Lista sledzonych licznikow (pokazywane w Historii). Reszta (sasiedzi) ukryta.
-#define MAX_TRACKED 16
-static char s_tracked[MAX_TRACKED][16];
+#define MAX_TRACKED 24
+static char s_tracked[MAX_TRACKED][28];
 static int  s_tracked_count = 0;
 static SemaphoreHandle_t s_mutex = NULL;
 static bool s_fs_ok = false;
@@ -78,7 +78,13 @@ static void rt_update(meter_hist_t *m, uint32_t ts, float total) {
 
 // ---------- SPIFFS zapis/odczyt ----------
 static void meter_path(const char *id, char *out, int cap) {
-    snprintf(out, cap, "/spiffs/h_%s.bin", id);
+    // zamien ':' na '_' (SPIFFS nie lubi dwukropka w nazwie)
+    char safe[28];
+    int j = 0;
+    for (int i = 0; id[i] && j < (int)sizeof(safe) - 1; i++)
+        safe[j++] = (id[i] == ':') ? '_' : id[i];
+    safe[j] = 0;
+    snprintf(out, cap, "/spiffs/h_%s.bin", safe);
 }
 
 static void save_meter(meter_hist_t *m) {
@@ -158,7 +164,7 @@ static void tracked_load(void) {
     if (!s_fs_ok) return;
     FILE *f = fopen(TRACKED_PATH, "rb");
     if (!f) return;
-    char line[20];
+    char line[36];
     while (fgets(line, sizeof(line), f) && s_tracked_count < MAX_TRACKED) {
         // usun biale znaki z konca
         int len = strlen(line);
@@ -279,6 +285,39 @@ void history_on_reading(const char *id_hex, double total, int kind, uint32_t ts_
     if (s_mutex) xSemaphoreGive(s_mutex);
 }
 
+// Per-pole: klucz "id:pole". Zbiera TYLKO gdy pole sledzone (Etap A).
+void history_on_field(const char *id_hex, const char *field, double value,
+                      int kind, int cumulative, uint32_t ts_unix) {
+    if (!id_hex || !field || ts_unix < 1700000000) return;
+    char key[28];
+    snprintf(key, sizeof(key), "%s:%s", id_hex, field);
+
+    // ETAP A: zbieramy tylko sledzone pola (sasiedzi i niewybrane ignorowane)
+    if (!history_is_tracked(key)) return;
+
+    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
+    meter_hist_t *m = get_or_load(key, true);
+    if (!m) { if (s_mutex) xSemaphoreGive(s_mutex); return; }
+
+    float ft = (float)value;
+    m->kind = kind;
+    m->cumulative = cumulative;
+    m->last_total = ft;
+    m->last_ts = ts_unix;
+
+    uint32_t bh = floor_hour(ts_unix);
+    bool hour_closed = (m->n_hours > 0 && m->hours[m->n_hours-1].ts != bh);
+
+    series_update(m->hours,  &m->n_hours,  HIST_HOURS,  bh, ft);
+    series_update(m->days,   &m->n_days,   HIST_DAYS,   floor_day(ts_unix),   ft);
+    series_update(m->months, &m->n_months, HIST_MONTHS, floor_month(ts_unix), ft);
+    series_update(m->years,  &m->n_years,  HIST_YEARS,  floor_year(ts_unix),  ft);
+    rt_update(m, ts_unix, ft);
+
+    if (hour_closed) save_meter(m);
+    if (s_mutex) xSemaphoreGive(s_mutex);
+}
+
 // ---------- JSON historii (zuzycie = roznice) ----------
 int history_get_json(const char *id_hex, const char *res, char *buf, int buf_cap) {
     if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
@@ -295,7 +334,7 @@ int history_get_json(const char *id_hex, const char *res, char *buf, int buf_cap
     else if (strcmp(res, "month") == 0) { arr = m->months; cnt = m->n_months; }
     else if (strcmp(res, "year")  == 0) { arr = m->years;  cnt = m->n_years; }
 
-    n += snprintf(buf + n, buf_cap - n, "{\"id\":\"%s\",\"kind\":%d,\"points\":[", m->id, m->kind);
+    n += snprintf(buf + n, buf_cap - n, "{\"id\":\"%s\",\"kind\":%d,\"cumulative\":%d,\"points\":[", m->id, m->kind, m->cumulative);
     // zuzycie = total[i] - total[i-1]; pierwszy punkt pomijamy (brak odniesienia)
     bool first = true;
     if (strcmp(res, "rt") == 0) {
@@ -307,10 +346,15 @@ int history_get_json(const char *id_hex, const char *res, char *buf, int buf_cap
         }
     } else {
         for (int i = 1; i < cnt && n < buf_cap - 60; i++) {
-            float use = arr[i].total - arr[i-1].total;
-            if (use < 0) use = 0;  // reset/przepelnienie licznika
+            float v;
+            if (m->cumulative) {
+                v = arr[i].total - arr[i-1].total;  // zuzycie = roznica
+                if (v < 0) v = 0;
+            } else {
+                v = arr[i].total;  // chwilowe (moc/napiecie) = wartosc
+            }
             n += snprintf(buf + n, buf_cap - n, "%s{\"t\":%u,\"v\":%.3f}",
-                          first ? "" : ",", (unsigned)arr[i].ts, use);
+                          first ? "" : ",", (unsigned)arr[i].ts, v);
             first = false;
         }
     }
@@ -325,8 +369,8 @@ int history_list_json(char *buf, int buf_cap) {
     bool first = true;
     for (int i = 0; i < MAX_HIST_METERS; i++) {
         if (!s_meters[i].used) continue;
-        n += snprintf(buf + n, buf_cap - n, "%s{\"id\":\"%s\",\"kind\":%d,\"last\":%.3f,\"ts\":%u,\"tracked\":%s}",
-                      first ? "" : ",", s_meters[i].id, s_meters[i].kind,
+        n += snprintf(buf + n, buf_cap - n, "%s{\"id\":\"%s\",\"kind\":%d,\"cumulative\":%d,\"last\":%.3f,\"ts\":%u,\"tracked\":%s}",
+                      first ? "" : ",", s_meters[i].id, s_meters[i].kind, s_meters[i].cumulative,
                       s_meters[i].last_total, (unsigned)s_meters[i].last_ts,
                       history_is_tracked(s_meters[i].id) ? "true" : "false");
         first = false;

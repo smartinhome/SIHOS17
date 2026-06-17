@@ -13,3 +13,18 @@
 bool meter_total_extract(const uint8_t *data, size_t len,
                          const char *key_hex,
                          double *out_total, int *out_kind);
+
+// --- Wielopolowa ekstrakcja (dla licznika energii: energia, moc, napiecia) ---
+#define MTF_MAX_FIELDS 8
+typedef struct {
+    char   field[24];   // nazwa pola, np. "energia_kwh", "napiecie_l1_v"
+    double value;
+    char   unit[8];     // "kWh","kW","V","m3"
+    int    cumulative;  // 1=kumulacyjne (roznica/zuzycie), 0=chwilowe (wartosc)
+} mtf_field_t;
+
+// Wyciaga wszystkie istotne pola z ramki. Zwraca liczbe pol (0 gdy brak).
+// kind: 1=woda,2=prad,3=gaz (jak w meter_total_extract).
+int meter_total_extract_fields(const uint8_t *data, size_t len,
+                               const char *key_hex,
+                               mtf_field_t *out, int max_fields, int *out_kind);

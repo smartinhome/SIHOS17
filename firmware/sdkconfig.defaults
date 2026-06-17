@@ -24,6 +24,10 @@ CONFIG_LITTLEFS_OBJ_NAME_LEN=64
 # NVS
 CONFIG_NVS_ENCRYPTION=n
 
+# Stos tasku main - sih_config_t (~970B) kopiowany na stos w wifi/ota,
+# domyslne 3584B za malo -> stack protection fault. Zwiekszamy do 8KB.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
 # Log
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y

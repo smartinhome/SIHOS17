@@ -321,22 +321,24 @@ bool meter_total_extract(const uint8_t *data, size_t len,
 
     // IZAR (Diehl SAP, woda) - LFSR, dziala na surowej ramce
     if (strcmp(mf, "SAP") == 0 && medium == 0x01) {
-        if (izar_decode(data, (int)len, out_total)) { *out_kind = 1; return true; }
+        if (izar_decode(data, (int)len, out_total)) { *out_kind = 1; return true; }  // 1=woda
         return false;
     }
     // Apator woda (APA, medium 0x06/0x07)
     if (strcmp(mf, "APA") == 0 && (medium == 0x07 || medium == 0x06)) {
-        if (apator_total(clean, clen, key, have_key, out_total)) { *out_kind = 1; return true; }
+        if (apator_total(clean, clen, key, have_key, out_total)) { *out_kind = 1; return true; }  // 1=woda
         return false;
     }
     // Amiplus prad (APA, medium 0x02) - AES + DIF/VIF
     if (strcmp(mf, "APA") == 0 && medium == 0x02) {
-        if (difvif_meter(clean, clen, key, have_key, out_total, out_kind)) return true;
+        int k = 0;
+        if (difvif_meter(clean, clen, key, have_key, out_total, &k)) { *out_kind = 2; return true; }  // 2=prad
         return false;
     }
     // Unismart gaz (AMX, medium 0x03)
     if (strcmp(mf, "AMX") == 0 && medium == 0x03) {
-        if (difvif_meter(clean, clen, key, have_key, out_total, out_kind)) return true;
+        int k = 0;
+        if (difvif_meter(clean, clen, key, have_key, out_total, &k)) { *out_kind = 3; return true; }  // 3=gaz
         return false;
     }
     return false;

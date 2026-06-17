@@ -485,7 +485,7 @@ void cc1101_init(const cc1101_config_t *cfg) {
 void cc1101_start_receive(wmbus_frame_cb_t callback) {
     s_callback = callback;
     s_rx_stop = false;
-    xTaskCreate(rx_task, "cc1101_rx", 8192, NULL, 6, &s_rx_task);
+    xTaskCreate(rx_task, "cc1101_rx", 12288, NULL, 6, &s_rx_task);
     ESP_LOGI(TAG, "Odbior wMbus uruchomiony");
 }
 

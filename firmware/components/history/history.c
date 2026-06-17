@@ -163,22 +163,32 @@ void history_init(void) {
     // Wczytanie nastapi leniwie przy pierwszym odczycie/zapisie kazdego licznika.
 }
 
+// znajdz w RAM, lub wczytaj z dysku WPROST do slotu (bez kopii na stosie!)
+static meter_hist_t *get_or_load(const char *id, bool create_if_missing) {
+    meter_hist_t *m = find_meter(id, false);
+    if (m) return m;
+    // nie ma w RAM - zaalokuj slot i wczytaj z dysku wprost do niego
+    meter_hist_t *slot = find_meter(id, true);
+    if (!slot) return NULL;
+    if (load_meter(slot, id)) {
+        return slot;   // wczytano z dysku
+    }
+    // brak pliku
+    if (create_if_missing) {
+        // slot juz zainicjowany przez find_meter (memset+id+used)
+        return slot;
+    }
+    // nie tworzymy - zwolnij slot
+    slot->used = false;
+    return NULL;
+}
+
 // ---------- Glowne wejscie: nowy odczyt ----------
 void history_on_reading(const char *id_hex, double total, int kind, uint32_t ts_unix) {
     if (!id_hex || ts_unix < 1700000000) return;  // wymaga zsynchronizowanego czasu
     if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
 
-    meter_hist_t *m = find_meter(id_hex, false);
-    if (!m) {
-        // sprobuj wczytac z dysku, inaczej utworz
-        meter_hist_t tmp;
-        if (load_meter(&tmp, id_hex)) {
-            meter_hist_t *slot = find_meter(id_hex, true);
-            if (slot) { *slot = tmp; slot->used = true; m = slot; }
-        } else {
-            m = find_meter(id_hex, true);
-        }
-    }
+    meter_hist_t *m = get_or_load(id_hex, true);
     if (!m) { if (s_mutex) xSemaphoreGive(s_mutex); return; }
 
     float ft = (float)total;
@@ -205,14 +215,7 @@ void history_on_reading(const char *id_hex, double total, int kind, uint32_t ts_
 // ---------- JSON historii (zuzycie = roznice) ----------
 int history_get_json(const char *id_hex, const char *res, char *buf, int buf_cap) {
     if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
-    meter_hist_t *m = find_meter(id_hex, false);
-    if (!m) {
-        meter_hist_t tmp;
-        if (load_meter(&tmp, id_hex)) {
-            meter_hist_t *slot = find_meter(id_hex, true);
-            if (slot) { *slot = tmp; m = slot; }
-        }
-    }
+    meter_hist_t *m = get_or_load(id_hex, false);
     int n = 0;
     if (!m) {
         n = snprintf(buf, buf_cap, "{\"id\":\"%s\",\"kind\":0,\"points\":[]}", id_hex ? id_hex : "");
@@ -268,14 +271,7 @@ int history_list_json(char *buf, int buf_cap) {
 bool history_last_known(const char *id_hex, double *out_total, int *out_kind, uint32_t *out_ts) {
     bool found = false;
     if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
-    meter_hist_t *m = find_meter(id_hex, false);
-    if (!m) {
-        meter_hist_t tmp;
-        if (load_meter(&tmp, id_hex)) {
-            meter_hist_t *slot = find_meter(id_hex, true);
-            if (slot) { *slot = tmp; m = slot; }
-        }
-    }
+    meter_hist_t *m = get_or_load(id_hex, false);
     if (m) {
         *out_total = m->last_total; *out_kind = m->kind; *out_ts = m->last_ts;
         found = true;

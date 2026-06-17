@@ -27,6 +27,10 @@ typedef struct {
 } meter_hist_t;
 
 static meter_hist_t s_meters[MAX_HIST_METERS];
+// Lista sledzonych licznikow (pokazywane w Historii). Reszta (sasiedzi) ukryta.
+#define MAX_TRACKED 16
+static char s_tracked[MAX_TRACKED][16];
+static int  s_tracked_count = 0;
 static SemaphoreHandle_t s_mutex = NULL;
 static bool s_fs_ok = false;
 
@@ -137,6 +141,67 @@ static meter_hist_t *find_meter(const char *id, bool create) {
 }
 
 // ---------- Inicjalizacja ----------
+// ---------- Sledzenie licznikow ----------
+#define TRACKED_PATH "/spiffs/tracked.txt"
+
+static void tracked_save(void) {
+    if (!s_fs_ok) return;
+    FILE *f = fopen(TRACKED_PATH, "wb");
+    if (!f) return;
+    for (int i = 0; i < s_tracked_count; i++)
+        fprintf(f, "%s\n", s_tracked[i]);
+    fclose(f);
+}
+
+static void tracked_load(void) {
+    s_tracked_count = 0;
+    if (!s_fs_ok) return;
+    FILE *f = fopen(TRACKED_PATH, "rb");
+    if (!f) return;
+    char line[20];
+    while (fgets(line, sizeof(line), f) && s_tracked_count < MAX_TRACKED) {
+        // usun biale znaki z konca
+        int len = strlen(line);
+        while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r' || line[len-1] == ' '))
+            line[--len] = 0;
+        if (len > 0) {
+            strncpy(s_tracked[s_tracked_count], line, sizeof(s_tracked[0]) - 1);
+            s_tracked_count++;
+        }
+    }
+    fclose(f);
+}
+
+bool history_is_tracked(const char *id_hex) {
+    if (!id_hex) return false;
+    for (int i = 0; i < s_tracked_count; i++)
+        if (strcasecmp(s_tracked[i], id_hex) == 0) return true;
+    return false;
+}
+
+void history_set_tracked(const char *id_hex, bool tracked) {
+    if (!id_hex) return;
+    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
+    bool exists = false;
+    int idx = -1;
+    for (int i = 0; i < s_tracked_count; i++)
+        if (strcasecmp(s_tracked[i], id_hex) == 0) { exists = true; idx = i; break; }
+
+    if (tracked && !exists && s_tracked_count < MAX_TRACKED) {
+        strncpy(s_tracked[s_tracked_count], id_hex, sizeof(s_tracked[0]) - 1);
+        s_tracked[s_tracked_count][sizeof(s_tracked[0]) - 1] = 0;
+        s_tracked_count++;
+        tracked_save();
+    } else if (!tracked && exists) {
+        // usun przesuwajac reszte
+        for (int i = idx; i < s_tracked_count - 1; i++)
+            memcpy(s_tracked[i], s_tracked[i+1], sizeof(s_tracked[0]));
+        s_tracked_count--;
+        tracked_save();
+    }
+    if (s_mutex) xSemaphoreGive(s_mutex);
+}
+
 void history_init(void) {
     s_mutex = xSemaphoreCreateMutex();
 
@@ -156,6 +221,8 @@ void history_init(void) {
     size_t total = 0, used = 0;
     esp_spiffs_info("littlefs", &total, &used);
     ESP_LOGI(TAG, "SPIFFS zamontowany: %u/%u B", (unsigned)used, (unsigned)total);
+    tracked_load();
+    ESP_LOGI(TAG, "Sledzonych licznikow: %d", s_tracked_count);
 
     // Wczytaj historie wszystkich plikow h_*.bin
     // (proste: probujemy wczytac dla wszystkich slotow przez liste katalogu)
@@ -258,9 +325,10 @@ int history_list_json(char *buf, int buf_cap) {
     bool first = true;
     for (int i = 0; i < MAX_HIST_METERS; i++) {
         if (!s_meters[i].used) continue;
-        n += snprintf(buf + n, buf_cap - n, "%s{\"id\":\"%s\",\"kind\":%d,\"last\":%.3f,\"ts\":%u}",
+        n += snprintf(buf + n, buf_cap - n, "%s{\"id\":\"%s\",\"kind\":%d,\"last\":%.3f,\"ts\":%u,\"tracked\":%s}",
                       first ? "" : ",", s_meters[i].id, s_meters[i].kind,
-                      s_meters[i].last_total, (unsigned)s_meters[i].last_ts);
+                      s_meters[i].last_total, (unsigned)s_meters[i].last_ts,
+                      history_is_tracked(s_meters[i].id) ? "true" : "false");
         first = false;
     }
     n += snprintf(buf + n, buf_cap - n, "]");

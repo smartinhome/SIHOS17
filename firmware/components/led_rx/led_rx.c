@@ -22,7 +22,15 @@ static esp_timer_handle_t s_off_timer = NULL;
 
 // Ustaw surowy duty (0-255) uwzgledniajac inwersje.
 static void led_set_duty(uint8_t duty) {
-    uint32_t d = LED_INVERTED ? (255 - duty) : duty;
+    // 8-bit PWM: pelne wypelnienie = 256 (nie 255). Przy inverted, duty=0
+    // (zgaszona) musi dac stale wysoki stan -> d=256, inaczej zostaje ~0.4%
+    // niskiego stanu i dioda lekko swieci.
+    uint32_t d;
+    if (LED_INVERTED) {
+        d = 256 - (uint32_t)duty;   // duty=0 -> 256 (pelne high = zgaszona)
+    } else {
+        d = duty;
+    }
     ledc_set_duty(LED_MODE, LED_CHANNEL, d);
     ledc_update_duty(LED_MODE, LED_CHANNEL);
 }
@@ -52,7 +60,7 @@ void led_rx_init(bool enabled, uint8_t brightness) {
         .speed_mode = LED_MODE,
         .channel    = LED_CHANNEL,
         .timer_sel  = LED_TIMER,
-        .duty       = LED_INVERTED ? 255 : 0,  // zgaszona
+        .duty       = LED_INVERTED ? 256 : 0,  // zgaszona (pelne high)
         .hpoint     = 0
     };
     if (ledc_channel_config(&ccfg) != ESP_OK) {

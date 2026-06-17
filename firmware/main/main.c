@@ -31,6 +31,11 @@ void app_main(void) {
     }
     ESP_ERROR_CHECK(ret);
 
+    // OTA: potwierdz sprawnosc firmware NATYCHMIAST po nvs, zanim cokolwiek
+    // innego (wifi/radio/led/dekoder) zdazy ewentualnie crashnac. Bez tego
+    // bootloader z wlaczonym rollbackiem cofnie obraz przy nastepnym restarcie.
+    ota_manager_init();
+
     // Netif + event loop
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -61,9 +66,6 @@ void app_main(void) {
         led_rx_init(lc.led_enabled, lc.led_brightness);
     }
     wmbus_decoder_init();
-
-    // OTA manager
-    ota_manager_init();
 
     // Serwer HTTP (REST API + Web UI)
     webserver_init();

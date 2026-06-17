@@ -60,11 +60,11 @@ static esp_err_t handle_history_list(httpd_req_t *req) {
 }
 
 static esp_err_t handle_history(httpd_req_t *req) {
-    char id[16] = {0};
+    char id[40] = {0};
     char res[8] = "hour";
-    char query[64];
+    char query[96];
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
-        char val[16];
+        char val[40];
         if (httpd_query_key_value(query, "id", val, sizeof(val)) == ESP_OK)
             strlcpy(id, val, sizeof(id));
         if (httpd_query_key_value(query, "res", val, sizeof(val)) == ESP_OK)

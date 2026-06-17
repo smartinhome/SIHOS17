@@ -151,11 +151,11 @@ static const char *ROOT_HTML =
 "if(!list2.length){document.getElementById('hist-chart').innerHTML='<div class=\"empty\">Brak sledzonych licznikow. Wejdz w zakladke Liczniki i kliknij \\\"+ Dodaj do historii\\\" przy wybranych licznikach.</div>';sel.innerHTML='';return}"
 "const cur=histState.id||sel.value;sel.innerHTML=list2.map(function(m){var typ=m.kind===2?'Prad':(m.kind===3?'Gaz':'Woda');var parts=m.id.split(':');var dev=parts[0];var pole=parts[1]?parts[1].replace(/_/g,' '):'total';return '<option value=\"'+m.id+'\">'+typ+' '+dev+' - '+pole+'</option>'}).join('');"
 "if(cur&&list2.some(function(m){return m.id===cur}))sel.value=cur;histState.id=sel.value;"
-"sel.onchange=function(){histState.id=sel.value;loadHistory()};"
-"document.querySelectorAll('.hist-r').forEach(function(b){b.onclick=function(){histState.res=b.getAttribute('data-r');document.querySelectorAll('.hist-r').forEach(function(x){x.classList.remove('btn-primary')});b.classList.add('btn-primary');loadHistory()}});"
+"sel.onchange=function(){histState.id=sel.value;window._histLast=null;loadHistory()};"
+"document.querySelectorAll('.hist-r').forEach(function(b){b.onclick=function(){histState.res=b.getAttribute('data-r');window._histLast=null;document.querySelectorAll('.hist-r').forEach(function(x){x.classList.remove('btn-primary')});b.classList.add('btn-primary');loadHistory()}});"
 "var def=document.querySelector('.hist-r[data-r=\"'+histState.res+'\"]');if(def)def.classList.add('btn-primary');"
 "loadHistory()}catch(e){}}"
-"async function loadHistory(){if(!histState.id)return;const el=document.getElementById('hist-chart');el.innerHTML='<div class=\"empty\">Ladowanie...</div>';try{const d=await(await fetch('/api/history?id='+histState.id+'&res='+histState.res)).json();renderChart(d)}catch(e){el.innerHTML='<div class=\"empty\">Blad ladowania</div>'}}"
+"async function loadHistory(silent){if(!histState.id)return;const el=document.getElementById('hist-chart');if(!silent)el.innerHTML='<div class=\"empty\">Ladowanie...</div>';try{const txt=await(await fetch('/api/history?id='+histState.id+'&res='+histState.res)).text();if(txt===window._histLast&&silent)return;window._histLast=txt;const d=JSON.parse(txt);renderChart(d)}catch(e){if(!silent)el.innerHTML='<div class=\"empty\">Blad ladowania</div>'}}"
 "function fieldUnit(key){if(!key)return '';if(key.indexOf('kwh')>=0||key.indexOf('energia')>=0||key.indexOf('produkcja')>=0)return 'kWh';if(key.indexOf('moc')>=0)return 'kW';if(key.indexOf('napiecie')>=0)return 'V';if(key.indexOf('m3')>=0)return 'm3';return ''}"
 "function renderChart(d){const el=document.getElementById('hist-chart');if(!d.points||!d.points.length){el.innerHTML='<div class=\"empty\">Brak danych dla tego okresu</div>';return}"
 "const unit=fieldUnit(d.id);const cumul=(d.cumulative!==0);const pts=d.points;"
@@ -220,7 +220,7 @@ static const char *ROOT_HTML =
 "async function clearLogs(){try{await fetch('/api/logs/clear',{method:'POST'});document.getElementById('log-output').textContent='(wyczyszczono)'}catch(e){}}"
 "document.getElementById('nav').addEventListener('click',e=>{const b=e.target.closest('.nav-item');if(b)showPage(b.dataset.page)});"
 "window.addEventListener('hashchange',()=>showPage((location.hash||'#dashboard').slice(1)));"
-"showPage((location.hash||'#dashboard').slice(1));fetchAll();setInterval(fetchAll,5000);setInterval(function(){var ph=document.getElementById('page-history');if(ph&&ph.classList.contains('active')&&histState.id){loadHistory()}},5000);"
+"showPage((location.hash||'#dashboard').slice(1));fetchAll();setInterval(fetchAll,5000);setInterval(function(){var ph=document.getElementById('page-history');if(ph&&ph.classList.contains('active')&&histState.id){loadHistory(true)}},5000);"
 "</script></body></html>"
 "";
 

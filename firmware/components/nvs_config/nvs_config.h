@@ -21,6 +21,8 @@ typedef struct {
     float          freq_mhz;
     uint8_t        meter_count;
     meter_config_t meters[MAX_METERS];
+    bool           led_enabled;     // dioda RX wlaczona
+    uint8_t        led_brightness;  // jasnosc 0-100 (%)
 } sih_config_t;
 
 void         nvs_config_init(void);

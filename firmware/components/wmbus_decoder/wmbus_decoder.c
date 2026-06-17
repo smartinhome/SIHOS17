@@ -2,6 +2,7 @@
 #include "nvs_config.h"
 #include "meter_total.h"
 #include "history.h"
+#include "led_rx.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include <time.h>
@@ -167,6 +168,8 @@ static void check_encryption_key(const uint8_t *data, size_t len, const char *id
 
 void wmbus_decoder_on_frame(const wmbus_frame_t *frame) {
     if (!frame || frame->len < 12) return;
+
+    led_rx_blink();   // blysk diody RX przy odebraniu telegramu
 
     int maxb = (int)frame->len;
     if (maxb > 290) maxb = 290;  // zabezpieczenie bufora

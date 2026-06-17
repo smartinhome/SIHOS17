@@ -7,6 +7,7 @@ idf_component_register(
         cc1101
         wmbus_decoder
         history
+        led_rx
         meter_total
         ota_manager
         nvs_config

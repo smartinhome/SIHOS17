@@ -4,6 +4,7 @@
 #include "wifi_manager.h"
 #include "ota_manager.h"
 #include "history.h"
+#include "led_rx.h"
 #include "log_buffer.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -278,6 +279,32 @@ static esp_err_t handle_frames(httpd_req_t *req) {
 }
 
 // Dodaj/zaktualizuj licznik wraz z kluczem AES (zapis do NVS)
+// GET /api/led -> {"enabled":true,"brightness":50}
+// POST /api/led body: {"enabled":true,"brightness":70}
+static esp_err_t handle_led(httpd_req_t *req) {
+    sih_config_t cfg = nvs_config_get();
+    if (req->method == HTTP_POST) {
+        char body[96];
+        read_body(req, body, sizeof(body));
+        cfg.led_enabled = (strstr(body, "\"enabled\":true") != NULL);
+        char *p = strstr(body, "\"brightness\":");
+        if (p) {
+            int b = atoi(p + 13);
+            if (b < 0) b = 0; if (b > 100) b = 100;
+            cfg.led_brightness = (uint8_t)b;
+        }
+        nvs_config_save(&cfg);
+        led_rx_set(cfg.led_enabled, cfg.led_brightness);
+        resp_ok(req);
+        return ESP_OK;
+    }
+    char buf[64];
+    snprintf(buf, sizeof(buf), "{\"enabled\":%s,\"brightness\":%d}",
+             cfg.led_enabled ? "true" : "false", cfg.led_brightness);
+    resp_json(req, buf);
+    return ESP_OK;
+}
+
 static esp_err_t handle_config_meter(httpd_req_t *req) {
     char body[512];
     read_body(req, body, sizeof(body));
@@ -443,6 +470,8 @@ void api_register_handlers(httpd_handle_t server) {
     system_temp_init();   // czujnik temperatury ESP32-C6
     const httpd_uri_t handlers[] = {
         { .uri="/api/status",      .method=HTTP_GET,  .handler=handle_status,      .user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/led",         .method=HTTP_GET,  .handler=handle_led,         .user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/led",         .method=HTTP_POST, .handler=handle_led,         .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/system",      .method=HTTP_GET,  .handler=handle_system,      .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/history/list", .method=HTTP_GET,  .handler=handle_history_list, .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/history",      .method=HTTP_GET,  .handler=handle_history,      .user_ctx=NULL, .is_websocket=false },

@@ -50,3 +50,6 @@ bool history_last_known(const char *id_hex, double *out_total, int *out_kind, ui
 // Sledzenie: ktore liczniki pokazywac w Historii (reszta np. sasiedzi - ukryte).
 void history_set_tracked(const char *id_hex, bool tracked);
 bool history_is_tracked(const char *id_hex);
+
+// Lista sledzonych kluczy (id:pole) jako JSON tablica stringow.
+int history_tracked_json(char *buf, int buf_cap);

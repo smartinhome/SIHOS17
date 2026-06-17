@@ -185,6 +185,18 @@ bool history_is_tracked(const char *id_hex) {
     return false;
 }
 
+// Lista sledzonych kluczy jako JSON: ["id:pole","id2:pole2",...]
+int history_tracked_json(char *buf, int buf_cap) {
+    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
+    int n = snprintf(buf, buf_cap, "[");
+    for (int i = 0; i < s_tracked_count; i++) {
+        n += snprintf(buf + n, buf_cap - n, "%s\"%s\"", i ? "," : "", s_tracked[i]);
+    }
+    n += snprintf(buf + n, buf_cap - n, "]");
+    if (s_mutex) xSemaphoreGive(s_mutex);
+    return n;
+}
+
 void history_set_tracked(const char *id_hex, bool tracked) {
     if (!id_hex) return;
     if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);

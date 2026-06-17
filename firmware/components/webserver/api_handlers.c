@@ -78,6 +78,13 @@ static esp_err_t handle_history(httpd_req_t *req) {
 }
 
 // POST /api/history/track  body: {"id":"...","tracked":true|false}
+static esp_err_t handle_history_tracked(httpd_req_t *req) {
+    static char buf[1024];
+    history_tracked_json(buf, sizeof(buf));
+    resp_json(req, buf);
+    return ESP_OK;
+}
+
 static esp_err_t handle_history_track(httpd_req_t *req) {
     char body[128];
     read_body(req, body, sizeof(body));
@@ -440,6 +447,7 @@ void api_register_handlers(httpd_handle_t server) {
         { .uri="/api/history/list", .method=HTTP_GET,  .handler=handle_history_list, .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/history",      .method=HTTP_GET,  .handler=handle_history,      .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/history/track",.method=HTTP_POST, .handler=handle_history_track,.user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/history/tracked",.method=HTTP_GET, .handler=handle_history_tracked,.user_ctx=NULL, .is_websocket=false },
         { .uri="/api/meters",      .method=HTTP_GET,  .handler=handle_meters,      .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/frames",      .method=HTTP_GET,  .handler=handle_frames,      .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/config",      .method=HTTP_GET,  .handler=handle_config_get,  .user_ctx=NULL, .is_websocket=false },

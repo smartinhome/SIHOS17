@@ -290,7 +290,8 @@ static esp_err_t handle_led(httpd_req_t *req) {
         char *p = strstr(body, "\"brightness\":");
         if (p) {
             int b = atoi(p + 13);
-            if (b < 0) b = 0; if (b > 100) b = 100;
+            if (b < 0) b = 0;
+            if (b > 100) b = 100;
             cfg.led_brightness = (uint8_t)b;
         }
         nvs_config_save(&cfg);

@@ -149,8 +149,8 @@ static const char *ROOT_HTML =
 "if(!list.length){document.getElementById('hist-chart').innerHTML='<div class=\"empty\">Brak danych historycznych. Poczekaj az licznik zbierze odczyty.</div>';sel.innerHTML='';return}"
 "var list2=list.filter(function(m){return m.tracked});"
 "if(!list2.length){document.getElementById('hist-chart').innerHTML='<div class=\"empty\">Brak sledzonych licznikow. Wejdz w zakladke Liczniki i kliknij \\\"+ Dodaj do historii\\\" przy wybranych licznikach.</div>';sel.innerHTML='';return}"
-"const cur=sel.value;sel.innerHTML=list2.map(function(m){var typ=m.kind===2?'Prad':(m.kind===3?'Gaz':'Woda');var parts=m.id.split(':');var dev=parts[0];var pole=parts[1]?parts[1].replace(/_/g,' '):'total';return '<option value=\"'+m.id+'\">'+typ+' '+dev+' - '+pole+'</option>'}).join('');"
-"if(cur)sel.value=cur;histState.id=sel.value;"
+"const cur=histState.id||sel.value;sel.innerHTML=list2.map(function(m){var typ=m.kind===2?'Prad':(m.kind===3?'Gaz':'Woda');var parts=m.id.split(':');var dev=parts[0];var pole=parts[1]?parts[1].replace(/_/g,' '):'total';return '<option value=\"'+m.id+'\">'+typ+' '+dev+' - '+pole+'</option>'}).join('');"
+"if(cur&&list2.some(function(m){return m.id===cur}))sel.value=cur;histState.id=sel.value;"
 "sel.onchange=function(){histState.id=sel.value;loadHistory()};"
 "document.querySelectorAll('.hist-r').forEach(function(b){b.onclick=function(){histState.res=b.getAttribute('data-r');document.querySelectorAll('.hist-r').forEach(function(x){x.classList.remove('btn-primary')});b.classList.add('btn-primary');loadHistory()}});"
 "var def=document.querySelector('.hist-r[data-r=\"'+histState.res+'\"]');if(def)def.classList.add('btn-primary');"
@@ -220,7 +220,7 @@ static const char *ROOT_HTML =
 "async function clearLogs(){try{await fetch('/api/logs/clear',{method:'POST'});document.getElementById('log-output').textContent='(wyczyszczono)'}catch(e){}}"
 "document.getElementById('nav').addEventListener('click',e=>{const b=e.target.closest('.nav-item');if(b)showPage(b.dataset.page)});"
 "window.addEventListener('hashchange',()=>showPage((location.hash||'#dashboard').slice(1)));"
-"showPage((location.hash||'#dashboard').slice(1));fetchAll();setInterval(fetchAll,5000);"
+"showPage((location.hash||'#dashboard').slice(1));fetchAll();setInterval(fetchAll,5000);setInterval(function(){var ph=document.getElementById('page-history');if(ph&&ph.classList.contains('active')&&histState.id){loadHistory()}},5000);"
 "</script></body></html>"
 "";
 

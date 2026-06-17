@@ -88,9 +88,9 @@ static esp_err_t handle_history_tracked(httpd_req_t *req) {
 static esp_err_t handle_history_track(httpd_req_t *req) {
     char body[128];
     read_body(req, body, sizeof(body));
-    char id[16] = {0};
+    char id[40] = {0};
     char *p;
-    if ((p = strstr(body, "\"id\":\""))) sscanf(p, "\"id\":\"%15[^\"]\"", id);
+    if ((p = strstr(body, "\"id\":\""))) sscanf(p, "\"id\":\"%39[^\"]\"", id);
     if (strlen(id) == 0) { resp_err(req, "brak id"); return ESP_OK; }
     bool tracked = (strstr(body, "\"tracked\":true") != NULL);
     history_set_tracked(id, tracked);

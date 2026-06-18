@@ -288,32 +288,39 @@ static esp_err_t handle_dashboard(httpd_req_t *req) {
     if (req->method == HTTP_POST) {
         char body[96];
         read_body(req, body, sizeof(body));
-        char id[16] = {0};
+        char id[12] = {0};
         char *p = strstr(body, "\"id\":\"");
         if (p) {
             p += 6;
             int n = 0;
-            while (*p && *p != '"' && n < 15) id[n++] = *p++;
+            while (*p && *p != '"' && n < 11) id[n++] = *p++;
             id[n] = 0;
         }
+        if (strlen(id) == 0) { resp_err(req, "brak id"); return ESP_OK; }
         bool want = (strstr(body, "\"pinned\":true") != NULL);
-        for (int i = 0; i < cfg.meter_count && i < MAX_METERS; i++) {
-            if (strcasecmp(cfg.meters[i].id_hex, id) == 0) {
-                cfg.dashboard_pinned[i] = want;
-                break;
-            }
+        // znajdz ID na liscie przypietych (case-insensitive)
+        int idx = -1, freeIdx = -1;
+        for (int i = 0; i < MAX_METERS; i++) {
+            if (cfg.dashboard_ids[i][0] == 0) { if (freeIdx < 0) freeIdx = i; }
+            else if (strcasecmp(cfg.dashboard_ids[i], id) == 0) { idx = i; break; }
         }
-        nvs_config_save(&cfg);
+        if (want && idx < 0 && freeIdx >= 0) {
+            strlcpy(cfg.dashboard_ids[freeIdx], id, sizeof(cfg.dashboard_ids[freeIdx]));
+            nvs_config_save(&cfg);
+        } else if (!want && idx >= 0) {
+            cfg.dashboard_ids[idx][0] = 0;
+            nvs_config_save(&cfg);
+        }
         resp_ok(req);
         return ESP_OK;
     }
     char buf[256];
     int pos = snprintf(buf, sizeof(buf), "{\"pinned\":[");
     bool first = true;
-    for (int i = 0; i < cfg.meter_count && i < MAX_METERS; i++) {
-        if (cfg.dashboard_pinned[i]) {
+    for (int i = 0; i < MAX_METERS; i++) {
+        if (cfg.dashboard_ids[i][0]) {
             pos += snprintf(buf + pos, sizeof(buf) - pos, "%s\"%s\"",
-                            first ? "" : ",", cfg.meters[i].id_hex);
+                            first ? "" : ",", cfg.dashboard_ids[i]);
             first = false;
         }
     }

@@ -23,7 +23,7 @@ typedef struct {
     meter_config_t meters[MAX_METERS];
     bool           led_enabled;     // dioda RX wlaczona
     uint8_t        led_brightness;  // jasnosc 0-100 (%)
-    bool           dashboard_pinned[MAX_METERS]; // licznik przypiety do dashboard
+    char           dashboard_ids[MAX_METERS][12]; // ID licznikow przypietych do dashboard (niezalezne od meters[])
 } sih_config_t;
 
 void         nvs_config_init(void);

@@ -180,7 +180,7 @@ cleanup:
 // ── Pobierz URL najnowszego firmware z GitHub API (na module) ──
 // Odpytuje api.github.com, parsuje JSON, znajduje browser_download_url
 // dla sih-wmbus-reader.bin. Zwraca true + wypelnia out_url.
-#define GITHUB_API_URL "https://api.github.com/repos/smartinhome/SIHOS17/releases?per_page=1"
+#define GITHUB_API_URL "https://api.github.com/repos/smartinhome/SIHOS17/releases?per_page=15"
 
 static bool github_get_latest_bin_url(char *out_url, size_t out_max) {
     ESP_LOGI(TAG, "GitHub: wolny heap = %lu B, najwiekszy blok = %lu B",
@@ -258,10 +258,13 @@ static bool github_get_latest_bin_url(char *out_url, size_t out_max) {
         return false;
     }
 
-    // Znajdz wszystkie browser_download_url, zaloguj kazdy
+    // Znajdz wszystkie browser_download_url. Lista releasow z API moze NIE byc
+    // posortowana wg numeru wersji (data tagu/dwa rownolegle buildy), wiec
+    // wybieramy URL z NAJWYZSZYM numerem beta, nie pierwszy z brzegu.
     const char *key = "\"browser_download_url\":\"";
     char *p = buf;
     int found_count = 0;
+    int best_beta = -1;
     bool result = false;
     while ((p = strstr(p, key)) != NULL) {
         p += strlen(key);
@@ -275,14 +278,23 @@ static bool github_get_latest_bin_url(char *out_url, size_t out_max) {
             found_count++;
             ESP_LOGI(TAG, "GitHub: asset[%d]: %s", found_count, tmp);
             if (strstr(tmp, "sih-wmbus-reader.bin") && ulen < out_max) {
-                strlcpy(out_url, tmp, out_max);
-                ESP_LOGI(TAG, "GitHub: WYBRANO %s", out_url);
-                result = true;
-                // nie przerywamy — chcemy zalogowac wszystkie assety
+                // wyciagnij numer beta z URL ".../v1.0.0-betaN/..."
+                int beta = 0;
+                char *bp = strstr(tmp, "beta");
+                if (bp) beta = atoi(bp + 4);
+                // bez 'beta' w nazwie (stabilny release) traktuj jako najwyzszy
+                if (!bp) beta = 1000000;
+                if (beta > best_beta) {
+                    best_beta = beta;
+                    strlcpy(out_url, tmp, out_max);
+                    result = true;
+                    ESP_LOGI(TAG, "GitHub: kandydat beta%d -> %s", beta, out_url);
+                }
             }
         }
         p = end;
     }
+    if (result) ESP_LOGI(TAG, "GitHub: WYBRANO najwyzszy beta%d: %s", best_beta, out_url);
 
     ESP_LOGI(TAG, "GitHub: znaleziono %d assetow, firmware %s",
              found_count, result ? "OK" : "NIE ZNALEZIONO");

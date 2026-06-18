@@ -45,6 +45,9 @@ void nvs_config_init(void) {
         set_defaults(&g_cfg);
     } else {
         ESP_LOGI(TAG, "Konfiguracja wczytana, %d liczników", g_cfg.meter_count);
+        for (int i = 0; i < MAX_METERS; i++)
+            if (g_cfg.dashboard_ids[i][0])
+                ESP_LOGI(TAG, "  dashboard[%d] = '%s'", i, g_cfg.dashboard_ids[i]);
     }
 }
 

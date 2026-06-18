@@ -298,18 +298,24 @@ static esp_err_t handle_dashboard(httpd_req_t *req) {
         }
         if (strlen(id) == 0) { resp_err(req, "brak id"); return ESP_OK; }
         bool want = (strstr(body, "\"pinned\":true") != NULL);
+        ESP_LOGI(TAG, "DASH POST: id='%s' want=%d body='%s'", id, want, body);
         // znajdz ID na liscie przypietych (case-insensitive)
         int idx = -1, freeIdx = -1;
         for (int i = 0; i < MAX_METERS; i++) {
             if (cfg.dashboard_ids[i][0] == 0) { if (freeIdx < 0) freeIdx = i; }
             else if (strcasecmp(cfg.dashboard_ids[i], id) == 0) { idx = i; break; }
         }
+        ESP_LOGI(TAG, "DASH POST: idx=%d freeIdx=%d", idx, freeIdx);
         if (want && idx < 0 && freeIdx >= 0) {
             strlcpy(cfg.dashboard_ids[freeIdx], id, sizeof(cfg.dashboard_ids[freeIdx]));
             nvs_config_save(&cfg);
+            ESP_LOGI(TAG, "DASH POST: ZAPISANO '%s' na pozycji %d", id, freeIdx);
         } else if (!want && idx >= 0) {
             cfg.dashboard_ids[idx][0] = 0;
             nvs_config_save(&cfg);
+            ESP_LOGI(TAG, "DASH POST: USUNIETO z pozycji %d", idx);
+        } else {
+            ESP_LOGW(TAG, "DASH POST: NIC nie zapisano (want=%d idx=%d freeIdx=%d)", want, idx, freeIdx);
         }
         resp_ok(req);
         return ESP_OK;
@@ -325,6 +331,7 @@ static esp_err_t handle_dashboard(httpd_req_t *req) {
         }
     }
     snprintf(buf + pos, sizeof(buf) - pos, "]}");
+    ESP_LOGI(TAG, "DASH GET: zwracam %s", buf);
     resp_json(req, buf);
     return ESP_OK;
 }

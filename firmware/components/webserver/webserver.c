@@ -68,7 +68,7 @@ static const char *ROOT_HTML =
 ".pin-btn{border:1px solid var(--line);background:var(--panel2);color:var(--mut);border-radius:7px;width:28px;height:28px;cursor:pointer;font-size:1rem;line-height:1;flex-shrink:0;transition:.15s}"
 ".pin-btn:hover{border-color:var(--accent)}.pin-btn.on{background:var(--accent);color:#fff;border-color:var(--accent)}"
 ".sec-lbl{font-size:.72rem;letter-spacing:.4px;color:var(--mut);text-transform:uppercase;margin:14px 0 8px}"
-".tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px}"
+".tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-bottom:8px}.tiles:last-child{margin-bottom:0}"
 ".tile{background:var(--panel2);border-radius:10px;padding:12px 13px;position:relative}"
 ".tile-k{font-size:.72rem;color:var(--mut);margin-bottom:5px}"
 ".tile-v{font-size:1.18rem;font-weight:600;color:var(--txt)}.tile-v small{font-size:.7rem;color:var(--mut);font-weight:400}"

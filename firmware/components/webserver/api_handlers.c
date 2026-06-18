@@ -283,6 +283,19 @@ static esp_err_t handle_frames(httpd_req_t *req) {
 // POST /api/led body: {"enabled":true,"brightness":70}
 // GET /api/dashboard -> {"pinned":["56989134","215f1155"]}
 // POST /api/dashboard body: {"id":"56989134","pinned":true}
+// Sprawdza czy ID licznika jest poprawne (hex, dlugosc 6-10).
+// Chroni przed smieciami w NVS (np. "   ") po migracji starej struktury.
+static bool valid_meter_id(const char *id) {
+    size_t n = strlen(id);
+    if (n < 6 || n > 10) return false;
+    for (size_t i = 0; i < n; i++) {
+        char ch = id[i];
+        bool hex = (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F');
+        if (!hex) return false;
+    }
+    return true;
+}
+
 static esp_err_t handle_dashboard(httpd_req_t *req) {
     sih_config_t cfg = nvs_config_get();
     if (req->method == HTTP_POST) {
@@ -296,14 +309,18 @@ static esp_err_t handle_dashboard(httpd_req_t *req) {
             while (*p && *p != '"' && n < 11) id[n++] = *p++;
             id[n] = 0;
         }
-        if (strlen(id) == 0) { resp_err(req, "brak id"); return ESP_OK; }
+        if (!valid_meter_id(id)) { resp_err(req, "zle id"); return ESP_OK; }
         bool want = (strstr(body, "\"pinned\":true") != NULL);
-        ESP_LOGI(TAG, "DASH POST: id='%s' want=%d body='%s'", id, want, body);
-        // znajdz ID na liscie przypietych (case-insensitive)
+        ESP_LOGI(TAG, "DASH POST: id='%s' want=%d", id, want);
+        // znajdz ID na liscie; slot pusty LUB ze smieciem (niepoprawne id) = wolny
         int idx = -1, freeIdx = -1;
         for (int i = 0; i < MAX_METERS; i++) {
-            if (cfg.dashboard_ids[i][0] == 0) { if (freeIdx < 0) freeIdx = i; }
-            else if (strcasecmp(cfg.dashboard_ids[i], id) == 0) { idx = i; break; }
+            if (!valid_meter_id(cfg.dashboard_ids[i])) {
+                cfg.dashboard_ids[i][0] = 0;       // wyczysc smiec
+                if (freeIdx < 0) freeIdx = i;
+            } else if (strcasecmp(cfg.dashboard_ids[i], id) == 0) {
+                idx = i;
+            }
         }
         ESP_LOGI(TAG, "DASH POST: idx=%d freeIdx=%d", idx, freeIdx);
         if (want && idx < 0 && freeIdx >= 0) {
@@ -324,7 +341,7 @@ static esp_err_t handle_dashboard(httpd_req_t *req) {
     int pos = snprintf(buf, sizeof(buf), "{\"pinned\":[");
     bool first = true;
     for (int i = 0; i < MAX_METERS; i++) {
-        if (cfg.dashboard_ids[i][0]) {
+        if (valid_meter_id(cfg.dashboard_ids[i])) {
             pos += snprintf(buf + pos, sizeof(buf) - pos, "%s\"%s\"",
                             first ? "" : ",", cfg.dashboard_ids[i]);
             first = false;

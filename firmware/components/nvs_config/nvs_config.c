@@ -45,9 +45,27 @@ void nvs_config_init(void) {
         set_defaults(&g_cfg);
     } else {
         ESP_LOGI(TAG, "Konfiguracja wczytana, %d liczników", g_cfg.meter_count);
-        for (int i = 0; i < MAX_METERS; i++)
-            if (g_cfg.dashboard_ids[i][0])
-                ESP_LOGI(TAG, "  dashboard[%d] = '%s'", i, g_cfg.dashboard_ids[i]);
+        // Wyczysc smieciowe wpisy dashboard_ids (np. po migracji starej struktury):
+        // poprawne ID = hex dlugosci 6-10. Reszta -> wyzeruj.
+        bool cleaned = false;
+        for (int i = 0; i < MAX_METERS; i++) {
+            char *d = g_cfg.dashboard_ids[i];
+            size_t n = strlen(d);
+            bool ok = (n >= 6 && n <= 10);
+            if (ok) {
+                for (size_t k = 0; k < n; k++) {
+                    char ch = d[k];
+                    bool hex = (ch>='0'&&ch<='9')||(ch>='a'&&ch<='f')||(ch>='A'&&ch<='F');
+                    if (!hex) { ok = false; break; }
+                }
+            }
+            if (!ok && d[0] != 0) { d[0] = 0; cleaned = true; }
+            if (d[0]) ESP_LOGI(TAG, "  dashboard[%d] = '%s'", i, d);
+        }
+        if (cleaned) {
+            ESP_LOGW(TAG, "Wyczyszczono smieciowe wpisy dashboard, zapisuje");
+            nvs_config_save(&g_cfg);
+        }
     }
 }
 

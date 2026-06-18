@@ -9,6 +9,7 @@ static sih_config_t g_cfg = {0};
 
 // Domyślna konfiguracja
 static void set_defaults(sih_config_t *c) {
+    memset(c, 0, sizeof(*c));
     strlcpy(c->ap_ssid, "SIH-wMbus", sizeof(c->ap_ssid));
     strlcpy(c->ap_pass, "smartinhome", sizeof(c->ap_pass));
     c->freq_mhz    = 868.950f;
@@ -27,6 +28,17 @@ void nvs_config_init(void) {
     }
     size_t sz = sizeof(sih_config_t);
     err = nvs_get_blob(h, "config", &g_cfg, &sz);
+    if (err == ESP_ERR_NVS_INVALID_LENGTH) {
+        // Rozmiar struktury zmienil sie miedzy wersjami firmware.
+        // Wczytaj tyle ile zapisano, reszte (nowe pola) zostaw wyzerowana,
+        // zeby NIE stracic licznikow i kluczy po aktualizacji OTA.
+        set_defaults(&g_cfg);
+        size_t stored = 0;
+        if (nvs_get_blob(h, "config", NULL, &stored) == ESP_OK && stored > 0 &&
+            stored <= sizeof(sih_config_t)) {
+            err = nvs_get_blob(h, "config", &g_cfg, &stored);
+        }
+    }
     nvs_close(h);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Błąd odczytu konfiguracji, reset do domyślnej");

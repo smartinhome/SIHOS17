@@ -281,6 +281,47 @@ static esp_err_t handle_frames(httpd_req_t *req) {
 // Dodaj/zaktualizuj licznik wraz z kluczem AES (zapis do NVS)
 // GET /api/led -> {"enabled":true,"brightness":50}
 // POST /api/led body: {"enabled":true,"brightness":70}
+// GET /api/dashboard -> {"pinned":["56989134","215f1155"]}
+// POST /api/dashboard body: {"id":"56989134","pinned":true}
+static esp_err_t handle_dashboard(httpd_req_t *req) {
+    sih_config_t cfg = nvs_config_get();
+    if (req->method == HTTP_POST) {
+        char body[96];
+        read_body(req, body, sizeof(body));
+        char id[16] = {0};
+        char *p = strstr(body, "\"id\":\"");
+        if (p) {
+            p += 6;
+            int n = 0;
+            while (*p && *p != '"' && n < 15) id[n++] = *p++;
+            id[n] = 0;
+        }
+        bool want = (strstr(body, "\"pinned\":true") != NULL);
+        for (int i = 0; i < cfg.meter_count && i < MAX_METERS; i++) {
+            if (strcmp(cfg.meters[i].id_hex, id) == 0) {
+                cfg.dashboard_pinned[i] = want;
+                break;
+            }
+        }
+        nvs_config_save(&cfg);
+        resp_ok(req);
+        return ESP_OK;
+    }
+    char buf[256];
+    int pos = snprintf(buf, sizeof(buf), "{\"pinned\":[");
+    bool first = true;
+    for (int i = 0; i < cfg.meter_count && i < MAX_METERS; i++) {
+        if (cfg.dashboard_pinned[i]) {
+            pos += snprintf(buf + pos, sizeof(buf) - pos, "%s\"%s\"",
+                            first ? "" : ",", cfg.meters[i].id_hex);
+            first = false;
+        }
+    }
+    snprintf(buf + pos, sizeof(buf) - pos, "]}");
+    resp_json(req, buf);
+    return ESP_OK;
+}
+
 static esp_err_t handle_led(httpd_req_t *req) {
     sih_config_t cfg = nvs_config_get();
     if (req->method == HTTP_POST) {
@@ -473,6 +514,8 @@ void api_register_handlers(httpd_handle_t server) {
         { .uri="/api/status",      .method=HTTP_GET,  .handler=handle_status,      .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/led",         .method=HTTP_GET,  .handler=handle_led,         .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/led",         .method=HTTP_POST, .handler=handle_led,         .user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/dashboard",   .method=HTTP_GET,  .handler=handle_dashboard,   .user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/dashboard",   .method=HTTP_POST, .handler=handle_dashboard,   .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/system",      .method=HTTP_GET,  .handler=handle_system,      .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/history/list", .method=HTTP_GET,  .handler=handle_history_list, .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/history",      .method=HTTP_GET,  .handler=handle_history,      .user_ctx=NULL, .is_websocket=false },

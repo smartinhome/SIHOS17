@@ -8,6 +8,7 @@ idf_component_register(
         wmbus_decoder
         history
         led_rx
+        led_status
         meter_total
         ota_manager
         nvs_config

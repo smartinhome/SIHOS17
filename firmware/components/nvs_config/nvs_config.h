@@ -24,6 +24,8 @@ typedef struct {
     bool           led_enabled;     // dioda RX wlaczona
     uint8_t        led_brightness;  // jasnosc 0-100 (%)
     char           dashboard_ids[MAX_METERS][12]; // ID licznikow przypietych do dashboard (niezalezne od meters[])
+    bool           led_status_enabled;     // dioda RGB statusu WiFi (GPIO8)
+    uint8_t        led_status_brightness;  // jasnosc 0-100 (%)
 } sih_config_t;
 
 void         nvs_config_init(void);

@@ -6,6 +6,7 @@
 #include "wmbus_decoder.h"
 #include "history.h"
 #include "led_rx.h"
+#include "led_status.h"
 #include "ota_manager.h"
 #include "log_buffer.h"
 
@@ -64,6 +65,7 @@ void app_main(void) {
     {
         sih_config_t lc = nvs_config_get();
         led_rx_init(lc.led_enabled, lc.led_brightness);
+        led_status_init(lc.led_status_enabled, lc.led_status_brightness);
     }
     wmbus_decoder_init();
 

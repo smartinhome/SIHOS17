@@ -5,6 +5,7 @@
 #include "ota_manager.h"
 #include "history.h"
 #include "led_rx.h"
+#include "led_status.h"
 #include "log_buffer.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -378,6 +379,31 @@ static esp_err_t handle_led(httpd_req_t *req) {
     return ESP_OK;
 }
 
+static esp_err_t handle_led_status(httpd_req_t *req) {
+    sih_config_t cfg = nvs_config_get();
+    if (req->method == HTTP_POST) {
+        char body[96];
+        read_body(req, body, sizeof(body));
+        cfg.led_status_enabled = (strstr(body, "\"enabled\":true") != NULL);
+        char *p = strstr(body, "\"brightness\":");
+        if (p) {
+            int b = atoi(p + 13);
+            if (b < 0) b = 0;
+            if (b > 100) b = 100;
+            cfg.led_status_brightness = (uint8_t)b;
+        }
+        nvs_config_save(&cfg);
+        led_status_set(cfg.led_status_enabled, cfg.led_status_brightness);
+        resp_ok(req);
+        return ESP_OK;
+    }
+    char buf[64];
+    snprintf(buf, sizeof(buf), "{\"enabled\":%s,\"brightness\":%d}",
+             cfg.led_status_enabled ? "true" : "false", cfg.led_status_brightness);
+    resp_json(req, buf);
+    return ESP_OK;
+}
+
 static esp_err_t handle_config_meter(httpd_req_t *req) {
     char body[512];
     read_body(req, body, sizeof(body));
@@ -553,6 +579,8 @@ void api_register_handlers(httpd_handle_t server) {
         { .uri="/api/status",      .method=HTTP_GET,  .handler=handle_status,      .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/led",         .method=HTTP_GET,  .handler=handle_led,         .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/led",         .method=HTTP_POST, .handler=handle_led,         .user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/led-status",  .method=HTTP_GET,  .handler=handle_led_status,  .user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/led-status",  .method=HTTP_POST, .handler=handle_led_status,  .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/dashboard",   .method=HTTP_GET,  .handler=handle_dashboard,   .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/dashboard",   .method=HTTP_POST, .handler=handle_dashboard,   .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/system",      .method=HTTP_GET,  .handler=handle_system,      .user_ctx=NULL, .is_websocket=false },

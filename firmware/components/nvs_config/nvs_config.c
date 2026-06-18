@@ -16,6 +16,8 @@ static void set_defaults(sih_config_t *c) {
     c->meter_count = 0;
     c->led_enabled = true;     // dioda RX domyslnie wlaczona
     c->led_brightness = 50;    // 50% jasnosci
+    c->led_status_enabled = true;    // dioda RGB statusu domyslnie wlaczona
+    c->led_status_brightness = 50;   // 50% jasnosci
 }
 
 void nvs_config_init(void) {

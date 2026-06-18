@@ -15,7 +15,7 @@ bool meter_total_extract(const uint8_t *data, size_t len,
                          double *out_total, int *out_kind);
 
 // --- Wielopolowa ekstrakcja (dla licznika energii: energia, moc, napiecia) ---
-#define MTF_MAX_FIELDS 8
+#define MTF_MAX_FIELDS 16
 typedef struct {
     char   field[24];   // nazwa pola, np. "energia_kwh", "napiecie_l1_v"
     double value;

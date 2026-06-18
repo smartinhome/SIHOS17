@@ -343,7 +343,13 @@ static int difvif_fields(const uint8_t *p, int len, mtf_field_t *out, int max_fi
         }
         int isbcd = ((dif & 0x0F) >= 0x09 && (dif & 0x0F) <= 0x0E && (dif & 0x0F) != 0x0D);
         i++;
-        while (i < len && (p[i-1] & 0x80)) i++;
+        // odczyt DIFE - wyciagnij numer taryfy z bitow 4-5 pierwszego DIFE
+        int tariff = 0;
+        bool first_dife = true;
+        while (i < len && (p[i-1] & 0x80)) {
+            if (first_dife) { tariff = (p[i] >> 4) & 0x03; first_dife = false; }
+            i++;
+        }
         if (i >= len) break;
         uint8_t vif = p[i]; i++;
         uint8_t vife = 0;
@@ -370,8 +376,17 @@ static int difvif_fields(const uint8_t *p, int len, mtf_field_t *out, int max_fi
             int e = (v <= 0x07) ? ((v & 0x07) - 3) : 0;
             double m = 1; for (int z=0; z<(e<0?-e:e); z++) m *= 10;
             double kwh = val * ((e < 0) ? 1.0/m : m) / 1000.0;
-            if (!backflow) mtf_put(out, &nf, max_fields, "energia_kwh", kwh, "kWh", 1);
-            else           mtf_put(out, &nf, max_fields, "produkcja_kwh", kwh, "kWh", 1);
+            if (tariff == 0) {
+                // suma (bez taryfy)
+                if (!backflow) mtf_put(out, &nf, max_fields, "energia_kwh", kwh, "kWh", 1);
+                else           mtf_put(out, &nf, max_fields, "produkcja_kwh", kwh, "kWh", 1);
+            } else {
+                // energia/produkcja w konkretnej taryfie (G12: t1=dzien, t2=noc)
+                char name[24];
+                if (!backflow) snprintf(name, sizeof(name), "energia_t%d_kwh", tariff);
+                else           snprintf(name, sizeof(name), "produkcja_t%d_kwh", tariff);
+                mtf_put(out, &nf, max_fields, name, kwh, "kWh", 1);
+            }
         }
         else if ((v >= 0x28 && v <= 0x2F) || vif == 0xAB || vif == 0xFB) {
             int e = (v >= 0x28 && v <= 0x2F) ? ((v & 0x07) - 3) : 0;  // AB/FB: wartosc w W

@@ -298,7 +298,7 @@ static esp_err_t handle_dashboard(httpd_req_t *req) {
         }
         bool want = (strstr(body, "\"pinned\":true") != NULL);
         for (int i = 0; i < cfg.meter_count && i < MAX_METERS; i++) {
-            if (strcmp(cfg.meters[i].id_hex, id) == 0) {
+            if (strcasecmp(cfg.meters[i].id_hex, id) == 0) {
                 cfg.dashboard_pinned[i] = want;
                 break;
             }

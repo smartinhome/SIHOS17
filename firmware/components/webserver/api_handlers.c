@@ -524,6 +524,14 @@ static esp_err_t handle_restart(httpd_req_t *req) {
     return ESP_OK;
 }
 
+static esp_err_t handle_factory_reset(httpd_req_t *req) {
+    resp_ok(req);
+    vTaskDelay(pdMS_TO_TICKS(500));
+    nvs_config_reset();   // kasuje cala konfiguracje (liczniki, klucze, wifi, dashboard)
+    esp_restart();
+    return ESP_OK;
+}
+
 static esp_err_t handle_logs(httpd_req_t *req) {
     static char logbuf[16384];
     size_t n = log_buffer_dump(logbuf, sizeof(logbuf));
@@ -562,6 +570,7 @@ void api_register_handlers(httpd_handle_t server) {
         { .uri="/api/ota/upload",  .method=HTTP_POST, .handler=handle_ota_upload,  .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/ota/status",  .method=HTTP_GET,  .handler=handle_ota_status,  .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/restart",     .method=HTTP_POST, .handler=handle_restart,     .user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/factory-reset",.method=HTTP_POST,.handler=handle_factory_reset,.user_ctx=NULL, .is_websocket=false },
         { .uri="/api/logs",        .method=HTTP_GET,  .handler=handle_logs,        .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/logs/clear",  .method=HTTP_POST, .handler=handle_logs_clear,  .user_ctx=NULL, .is_websocket=false },
     };

@@ -275,6 +275,7 @@ void webserver_init(void) {
     cfg.max_uri_handlers = 24;
     cfg.stack_size       = 8192;
     cfg.lru_purge_enable = true;
+    cfg.max_open_sockets = 7;   // limit gniazd httpd; reszta z puli LWIP wolna dla OTA
     ESP_ERROR_CHECK(httpd_start(&s_server, &cfg));
     httpd_uri_t root = {
         .uri          = "/",

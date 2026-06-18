@@ -208,10 +208,18 @@ static bool github_get_latest_bin_url(char *out_url, size_t out_max) {
     esp_http_client_set_header(client, "Accept", "application/vnd.github+json");
 
     ESP_LOGI(TAG, "GitHub: otwieranie polaczenia (TLS handshake)...");
-    esp_err_t err = esp_http_client_open(client, 0);
-    ESP_LOGI(TAG, "GitHub: open zwrocil %s", esp_err_to_name(err));
+    esp_err_t err = ESP_FAIL;
+    for (int attempt = 1; attempt <= 3; attempt++) {
+        err = esp_http_client_open(client, 0);
+        ESP_LOGI(TAG, "GitHub: open (proba %d) zwrocil %s", attempt, esp_err_to_name(err));
+        if (err == ESP_OK) break;
+        // Czesta przyczyna: brak wolnego gniazda (webserver je trzyma).
+        // Poczekaj — lru_purge/timeout zwolni gniazda — i sprobuj ponownie.
+        ESP_LOGW(TAG, "GitHub: polaczenie nieudane, ponawiam za 2s...");
+        vTaskDelay(pdMS_TO_TICKS(2000));
+    }
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "GitHub: open failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "GitHub: open failed po 3 probach: %s", esp_err_to_name(err));
         esp_http_client_cleanup(client);
         return false;
     }

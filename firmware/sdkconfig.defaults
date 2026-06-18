@@ -49,3 +49,8 @@ CONFIG_LWIP_TCP_SND_BUF_DEFAULT=32768
 
 # --- FreeRTOS tick 1ms (dla odbioru dlugich ramek wMbus bez FIFO overflow) ---
 CONFIG_FREERTOS_HZ=1000
+
+# --- Wiecej gniazd LWIP (webserver + OTA jednoczesnie) ---
+# Domyslnie 10 gniazd; webserver przy auto-odswiezaniu zajmowal wszystkie,
+# przez co OTA nie moglo otworzyc gniazda TLS (Failed to create socket).
+CONFIG_LWIP_MAX_SOCKETS=16

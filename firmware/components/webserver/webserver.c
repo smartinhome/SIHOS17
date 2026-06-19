@@ -279,7 +279,22 @@ static const char *ROOT_HTML =
 static esp_err_t root_handler(httpd_req_t *req) {
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
-    httpd_resp_send(req, ROOT_HTML, HTTPD_RESP_USE_STRLEN);
+    // Strona jest duza (~70 KB) — wysylamy w kawalkach, by uniknac
+    // bledu wysylki (EAGAIN/error 11) przy ograniczonym buforze TCP.
+    const char *p = ROOT_HTML;
+    size_t remaining = strlen(ROOT_HTML);
+    const size_t CHUNK = 2048;
+    while (remaining > 0) {
+        size_t n = remaining > CHUNK ? CHUNK : remaining;
+        esp_err_t err = httpd_resp_send_chunk(req, p, n);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "root_handler: wysylka przerwana (%s)", esp_err_to_name(err));
+            return err;
+        }
+        p += n;
+        remaining -= n;
+    }
+    httpd_resp_send_chunk(req, NULL, 0);   // koniec
     return ESP_OK;
 }
 

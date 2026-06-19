@@ -598,7 +598,7 @@ static esp_err_t handle_backup_get(httpd_req_t *req) {
             // tylko pliki historii i listy sledzonych
             if (strncmp(nm, "h_", 2) != 0 && strcmp(nm, "tracked.txt") != 0) continue;
             char path[96];
-            snprintf(path, sizeof(path), "/spiffs/%s", nm);
+            snprintf(path, sizeof(path), "/spiffs/%.80s", nm);
             FILE *f = fopen(path, "rb");
             if (!f) continue;
             fseek(f, 0, SEEK_END);
@@ -662,7 +662,7 @@ static esp_err_t handle_backup_post(httpd_req_t *req) {
         uint32_t dlen; memcpy(&dlen, buf + p, 4); p += 4;
         if (p + (int)dlen > total) break;
         char path[96];
-        snprintf(path, sizeof(path), "/spiffs/%s", nm);
+        snprintf(path, sizeof(path), "/spiffs/%.80s", nm);
         FILE *f = fopen(path, "wb");
         if (f) {
             fwrite(buf + p, 1, dlen, f);

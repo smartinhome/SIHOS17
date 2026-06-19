@@ -96,13 +96,14 @@ static void led_show(uint8_t r, uint8_t g, uint8_t b) {
     s_last_r = r; s_last_g = g; s_last_b = b; s_have_last = true;
     if (!s_chan || !s_encoder) return;
     uint8_t br = s_enabled ? s_brightness : 0;
-    uint8_t grb[3] = {
-        (uint8_t)((uint16_t)g * br / 100),
+    // WS2812 na tym module pracuje w kolejnosci RGB (jak w konfiguracji uzytkownika)
+    uint8_t rgb[3] = {
         (uint8_t)((uint16_t)r * br / 100),
+        (uint8_t)((uint16_t)g * br / 100),
         (uint8_t)((uint16_t)b * br / 100),
     };
     rmt_transmit_config_t tx = { .loop_count = 0 };
-    rmt_transmit(s_chan, s_encoder, grb, sizeof(grb), &tx);
+    rmt_transmit(s_chan, s_encoder, rgb, sizeof(rgb), &tx);
     rmt_tx_wait_all_done(s_chan, 50);
 }
 

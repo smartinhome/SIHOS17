@@ -25,6 +25,7 @@
 #include <inttypes.h>
 #include <string.h>
 #include <stdio.h>
+#include <dirent.h>
 
 static const char *TAG = "API";
 
@@ -558,6 +559,126 @@ static esp_err_t handle_factory_reset(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// ===== Kopia zapasowa =====
+// Format pliku .sihbak (binarny):
+//   [4B "SBAK"][1B wersja=1]
+//   [4B len config][config: sih_config_t]
+//   powtarzane dla kazdego pliku historii:
+//     [1B len nazwy][nazwa][4B len danych][dane]
+//   [1B 0x00 = koniec listy plikow]
+#define BACKUP_MAGIC "SBAK"
+#define BACKUP_VER   1
+
+// helper: dopisz do bufora z kontrola pojemnosci
+static int buf_append(char *buf, int *pos, int cap, const void *data, int len) {
+    if (*pos + len > cap) return 0;
+    memcpy(buf + *pos, data, len);
+    *pos += len;
+    return 1;
+}
+
+static esp_err_t handle_backup_get(httpd_req_t *req) {
+    static char buf[60000];   // historia + config; SPIFFS jest maly
+    int pos = 0, cap = sizeof(buf);
+    // naglowek
+    buf_append(buf, &pos, cap, BACKUP_MAGIC, 4);
+    uint8_t ver = BACKUP_VER;
+    buf_append(buf, &pos, cap, &ver, 1);
+    // config
+    sih_config_t cfg = nvs_config_get();
+    uint32_t clen = sizeof(sih_config_t);
+    buf_append(buf, &pos, cap, &clen, 4);
+    buf_append(buf, &pos, cap, &cfg, clen);
+    // pliki historii z /spiffs (h_*.bin oraz tracked)
+    DIR *dir = opendir("/spiffs");
+    if (dir) {
+        struct dirent *de;
+        while ((de = readdir(dir)) != NULL) {
+            const char *nm = de->d_name;
+            // tylko pliki historii i listy sledzonych
+            if (strncmp(nm, "h_", 2) != 0 && strcmp(nm, "tracked.txt") != 0) continue;
+            char path[96];
+            snprintf(path, sizeof(path), "/spiffs/%s", nm);
+            FILE *f = fopen(path, "rb");
+            if (!f) continue;
+            fseek(f, 0, SEEK_END);
+            long fsz = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            if (fsz <= 0 || pos + (int)strlen(nm) + 5 + (int)fsz > cap) { fclose(f); continue; }
+            uint8_t nlen = (uint8_t)strlen(nm);
+            buf_append(buf, &pos, cap, &nlen, 1);
+            buf_append(buf, &pos, cap, nm, nlen);
+            uint32_t dlen = (uint32_t)fsz;
+            buf_append(buf, &pos, cap, &dlen, 4);
+            int rd = fread(buf + pos, 1, fsz, f);
+            pos += rd;
+            fclose(f);
+        }
+        closedir(dir);
+    }
+    uint8_t endmark = 0;
+    buf_append(buf, &pos, cap, &endmark, 1);
+
+    httpd_resp_set_type(req, "application/octet-stream");
+    httpd_resp_set_hdr(req, "Content-Disposition",
+                       "attachment; filename=\"sih-backup.sihbak\"");
+    httpd_resp_send(req, buf, pos);
+    ESP_LOGI(TAG, "Backup wyeksportowany: %d B", pos);
+    return ESP_OK;
+}
+
+static esp_err_t handle_backup_post(httpd_req_t *req) {
+    static char buf[60000];
+    int total = 0, ret;
+    while ((ret = httpd_req_recv(req, buf + total, sizeof(buf) - total)) > 0) {
+        total += ret;
+        if (total >= (int)sizeof(buf)) break;
+    }
+    if (total < 9 || memcmp(buf, BACKUP_MAGIC, 4) != 0) {
+        resp_err(req, "zly plik kopii");
+        return ESP_OK;
+    }
+    int p = 4;
+    uint8_t ver = (uint8_t)buf[p]; p += 1;
+    if (ver != BACKUP_VER) { resp_err(req, "zla wersja kopii"); return ESP_OK; }
+    // config
+    uint32_t clen; memcpy(&clen, buf + p, 4); p += 4;
+    if (clen != sizeof(sih_config_t) || p + (int)clen > total) {
+        resp_err(req, "niezgodny config");
+        return ESP_OK;
+    }
+    sih_config_t cfg;
+    memcpy(&cfg, buf + p, clen); p += clen;
+    nvs_config_save(&cfg);
+    // pliki historii
+    int restored = 0;
+    while (p < total) {
+        uint8_t nlen = (uint8_t)buf[p]; p += 1;
+        if (nlen == 0) break;   // koniec
+        if (p + nlen + 4 > total) break;
+        char nm[64] = {0};
+        if (nlen >= sizeof(nm)) break;
+        memcpy(nm, buf + p, nlen); p += nlen;
+        uint32_t dlen; memcpy(&dlen, buf + p, 4); p += 4;
+        if (p + (int)dlen > total) break;
+        char path[96];
+        snprintf(path, sizeof(path), "/spiffs/%s", nm);
+        FILE *f = fopen(path, "wb");
+        if (f) {
+            fwrite(buf + p, 1, dlen, f);
+            fclose(f);
+            restored++;
+        }
+        p += dlen;
+    }
+    ESP_LOGI(TAG, "Backup przywrocony: config + %d plikow historii", restored);
+    resp_ok(req);
+    vTaskDelay(pdMS_TO_TICKS(500));
+    esp_restart();   // restart wczyta przywrocona konfiguracje i historie
+    return ESP_OK;
+}
+
+
 static esp_err_t handle_logs(httpd_req_t *req) {
     static char logbuf[16384];
     size_t n = log_buffer_dump(logbuf, sizeof(logbuf));
@@ -599,6 +720,8 @@ void api_register_handlers(httpd_handle_t server) {
         { .uri="/api/ota/status",  .method=HTTP_GET,  .handler=handle_ota_status,  .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/restart",     .method=HTTP_POST, .handler=handle_restart,     .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/factory-reset",.method=HTTP_POST,.handler=handle_factory_reset,.user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/backup",      .method=HTTP_GET,  .handler=handle_backup_get,  .user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/backup",      .method=HTTP_POST, .handler=handle_backup_post, .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/logs",        .method=HTTP_GET,  .handler=handle_logs,        .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/logs/clear",  .method=HTTP_POST, .handler=handle_logs_clear,  .user_ctx=NULL, .is_websocket=false },
     };

@@ -28,6 +28,8 @@ static void event_handler(void *arg, esp_event_base_t base,
         esp_wifi_connect();
         s_state = WIFI_STATE_CONNECTING;
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        wifi_event_sta_disconnected_t *dis = (wifi_event_sta_disconnected_t *)data;
+        if (dis) ESP_LOGW(TAG, "Rozlaczono z WiFi, powod = %d", dis->reason);
         if (s_retry < MAX_RETRY) {
             esp_wifi_connect();
             s_retry++;
@@ -98,6 +100,9 @@ void wifi_manager_init(void) {
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_cfg));
     ESP_ERROR_CHECK(esp_wifi_start());
+    // Wylacz oszczedzanie energii WiFi — modul zasilany z sieci, a power save
+    // na ESP32-C6 bywa przyczyna losowych rozlaczen z niektorymi routerami.
+    esp_wifi_set_ps(WIFI_PS_NONE);
 
     EventBits_t bits = xEventGroupWaitBits(s_wifi_eg,
         WIFI_CONNECTED_BIT | WIFI_FAIL_BIT, pdFALSE, pdFALSE,

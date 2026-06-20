@@ -578,8 +578,10 @@ static int buf_append(char *buf, int *pos, int cap, const void *data, int len) {
 }
 
 static esp_err_t handle_backup_get(httpd_req_t *req) {
-    static char buf[60000];   // historia + config; SPIFFS jest maly
-    int pos = 0, cap = sizeof(buf);
+    const int cap = 60000;   // historia + config; SPIFFS jest maly
+    char *buf = malloc(cap);   // alokacja tylko na czas tworzenia kopii
+    if (!buf) { resp_err(req, "brak pamieci na kopie"); return ESP_OK; }
+    int pos = 0;
     // naglowek
     buf_append(buf, &pos, cap, BACKUP_MAGIC, 4);
     uint8_t ver = BACKUP_VER;
@@ -624,27 +626,32 @@ static esp_err_t handle_backup_get(httpd_req_t *req) {
                        "attachment; filename=\"sih-backup.sihbak\"");
     httpd_resp_send(req, buf, pos);
     ESP_LOGI(TAG, "Backup wyeksportowany: %d B", pos);
+    free(buf);
     return ESP_OK;
 }
 
 static esp_err_t handle_backup_post(httpd_req_t *req) {
-    static char buf[60000];
+    const int cap = 60000;
+    char *buf = malloc(cap);   // alokacja tylko na czas przywracania kopii
+    if (!buf) { resp_err(req, "brak pamieci na kopie"); return ESP_OK; }
     int total = 0, ret;
-    while ((ret = httpd_req_recv(req, buf + total, sizeof(buf) - total)) > 0) {
+    while ((ret = httpd_req_recv(req, buf + total, cap - total)) > 0) {
         total += ret;
-        if (total >= (int)sizeof(buf)) break;
+        if (total >= cap) break;
     }
     if (total < 9 || memcmp(buf, BACKUP_MAGIC, 4) != 0) {
         resp_err(req, "zly plik kopii");
+        free(buf);
         return ESP_OK;
     }
     int p = 4;
     uint8_t ver = (uint8_t)buf[p]; p += 1;
-    if (ver != BACKUP_VER) { resp_err(req, "zla wersja kopii"); return ESP_OK; }
+    if (ver != BACKUP_VER) { resp_err(req, "zla wersja kopii"); free(buf); return ESP_OK; }
     // config
     uint32_t clen; memcpy(&clen, buf + p, 4); p += 4;
     if (clen != sizeof(sih_config_t) || p + (int)clen > total) {
         resp_err(req, "niezgodny config");
+        free(buf);
         return ESP_OK;
     }
     sih_config_t cfg;
@@ -672,6 +679,7 @@ static esp_err_t handle_backup_post(httpd_req_t *req) {
         p += dlen;
     }
     ESP_LOGI(TAG, "Backup przywrocony: config + %d plikow historii", restored);
+    free(buf);
     resp_ok(req);
     vTaskDelay(pdMS_TO_TICKS(500));
     esp_restart();   // restart wczyta przywrocona konfiguracje i historie

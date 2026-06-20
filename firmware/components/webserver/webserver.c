@@ -65,7 +65,7 @@ static const char *ROOT_HTML =
 ".meter-top-r{display:flex;align-items:center;gap:10px}"
 ".meter-ts{font-size:.78rem;color:var(--ok);display:inline-flex;align-items:center;gap:5px}.meter-ts.pending{color:var(--mut)}"
 ".meter-pending{opacity:.72}"
-".pin-btn{border:1px solid var(--line);background:var(--panel2);color:var(--mut);border-radius:7px;width:28px;height:28px;cursor:pointer;font-size:1rem;line-height:1;flex-shrink:0;transition:.15s}"
+".pin-btn{border:1px solid var(--accent);background:var(--panel2);color:var(--accent);border-radius:7px;width:28px;height:28px;cursor:pointer;font-size:1.2rem;font-weight:600;line-height:1;flex-shrink:0;transition:.15s}"
 ".pin-btn:hover{border-color:var(--accent)}.pin-btn.on{background:var(--accent);color:#fff;border-color:var(--accent)}"
 ".sec-lbl{font-size:.72rem;letter-spacing:.4px;color:var(--mut);text-transform:uppercase;margin:14px 0 8px}"
 ".tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-bottom:8px}.tiles:last-child{margin-bottom:0}"

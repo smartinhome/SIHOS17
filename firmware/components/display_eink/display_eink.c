@@ -1,6 +1,7 @@
 #include "display_eink.h"
 #include "qr_data.h"
 #include "logo_data.h"
+#include "font_data.h"
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -186,6 +187,64 @@ static void fb_draw_bitmap(int x0, int y0, const uint8_t *data, int size, int bp
     }
 }
 
+// ---------- tekst (fonty Terminus z font_data.h) ----------
+
+static const glyph_t *font_find(const font_t *f, uint32_t cp) {
+    for (int i = 0; i < f->n_glyphs; i++)
+        if (f->glyphs[i].cp == cp) return &f->glyphs[i];
+    return NULL;
+}
+
+// Dekoduj jeden znak UTF-8, zwraca liczbe bajtow.
+static int utf8_next(const char *s, uint32_t *cp) {
+    unsigned char c = (unsigned char)s[0];
+    if (c < 0x80) { *cp = c; return 1; }
+    if ((c >> 5) == 0x6)  { *cp = ((c & 0x1F) << 6) | (s[1] & 0x3F); return 2; }
+    if ((c >> 4) == 0xE)  { *cp = ((c & 0x0F) << 12) | ((s[1] & 0x3F) << 6) | (s[2] & 0x3F); return 3; }
+    if ((c >> 3) == 0x1E) { *cp = ((c & 0x07) << 18) | ((s[1] & 0x3F) << 12) | ((s[2] & 0x3F) << 6) | (s[3] & 0x3F); return 4; }
+    *cp = '?'; return 1;
+}
+
+// Szerokosc napisu w pikselach (do wysrodkowania).
+static int fb_text_width(const font_t *f, const char *txt) {
+    int w = 0; uint32_t cp; int i = 0;
+    while (txt[i]) {
+        int n = utf8_next(txt + i, &cp); i += n;
+        const glyph_t *g = font_find(f, cp);
+        w += g ? g->adv : f->cell_w;
+    }
+    return w;
+}
+
+// Rysuj napis. (x,y) = lewy gorny rog komorki tekstu. 1=czarny.
+static void fb_draw_text(const font_t *f, int x, int y, const char *txt) {
+    uint32_t cp; int i = 0; int penx = x;
+    while (txt[i]) {
+        int n = utf8_next(txt + i, &cp); i += n;
+        const glyph_t *g = font_find(f, cp);
+        if (!g) { penx += f->cell_w; continue; }
+        int bpr = (g->w + 7) / 8;
+        for (int ry = 0; ry < g->h; ry++) {
+            for (int rx = 0; rx < g->w; rx++) {
+                uint8_t byte = f->bitmap[g->off + ry * bpr + (rx >> 3)];
+                int bit = (byte >> (7 - (rx & 7))) & 1;
+                if (bit) {
+                    int gx = penx + g->xoff + rx;
+                    int gy = y + f->ascent - (g->h + g->yoff) + ry;
+                    fb_set_pixel(gx, gy, 1);
+                }
+            }
+        }
+        penx += g->adv;
+    }
+}
+
+// Rysuj napis wysrodkowany poziomo wzgledem (cx).
+static void fb_draw_text_center(const font_t *f, int cx, int y, const char *txt) {
+    int w = fb_text_width(f, txt);
+    fb_draw_text(f, cx - w / 2, y, txt);
+}
+
 // ---------- API ----------
 
 bool display_eink_init(const display_eink_config_t *cfg) {
@@ -224,22 +283,30 @@ bool display_eink_init(const display_eink_config_t *cfg) {
 void display_eink_show_splash(void) {
     fb_clear_white();
 
-    // Layout 250x122: logo po lewej, QR po prawej.
-    // Logo 96x96 -> skala x1, wysrodkowane pionowo: y=(122-96)/2=13, x=14
-    int logo_x = 14;
-    int logo_y = (LCD_H - LOGO_SIZE) / 2;
+    // Lewa strefa: 0..qr_x, prawa: QR. Napis www.smartinhome.pl ma ~144px
+    // w foncie F14 - wysrodkowany wzgledem srodka strefy lewej (nie srodka logo).
+    int qr_scale = 3;
+    int qr_px = QR_SIZE * qr_scale;            // 87
+    int qr_x = LCD_W - qr_px - 10;             // ~153
+    int qr_y = (LCD_H - qr_px) / 2;            // ~17
+    int left_w = qr_x - 6;                     // szerokosc strefy lewej (~147)
+    int left_cx = left_w / 2;                  // srodek strefy lewej
+
+    // Logo wysrodkowane poziomo w strefie lewej, u gory.
+    int logo_x = left_cx - LOGO_SIZE / 2;
+    if (logo_x < 2) logo_x = 2;
+    int logo_y = 0;
     fb_draw_bitmap(logo_x, logo_y, &LOGO_DATA[0][0], LOGO_SIZE, LOGO_BYTES_PER_ROW, 1);
 
-    // QR 29x29 -> skala x3 = 87x87, po prawej: x=250-87-12=151, y=(122-87)/2=17
-    int qr_scale = 3;
-    int qr_px = QR_SIZE * qr_scale;
-    int qr_x = LCD_W - qr_px - 14;
-    int qr_y = (LCD_H - qr_px) / 2;
-    // biala ramka pod QR (margines) - quiet zone
+    // Napis pod logo (realna tresc logo siega ~y=98), wysrodkowany w strefie lewej.
+    int txt_y = 100;
+    fb_draw_text_center(&F14, left_cx, txt_y, "www.smartinhome.pl");
+
+    // QR po prawej, biala quiet-zone.
     fb_fill_rect(qr_x - 4, qr_y - 4, qr_px + 8, qr_px + 8, 0);
     fb_draw_bitmap(qr_x, qr_y, &QR_DATA[0][0], QR_SIZE, QR_BYTES_PER_ROW, qr_scale);
 
     eink_full_refresh();
     eink_sleep();
-    ESP_LOGI(TAG, "Splash (logo + QR) wyswietlony");
+    ESP_LOGI(TAG, "Splash (logo + napis + QR) wyswietlony");
 }

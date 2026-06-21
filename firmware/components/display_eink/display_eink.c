@@ -182,11 +182,9 @@ static void eink_full_refresh(void) {
     spi_device_release_bus(s_spi);
 }
 
-static void eink_sleep(void) {
-    eink_cmd(0x10); // deep sleep
-    eink_data(0x01);
-    vTaskDelay(pdMS_TO_TICKS(100));
-}
+// (panel nie usypia miedzy odswiezeniami - po deep sleep nie odpowiada,
+// co powodowalo BUSY timeout przy kolejnym refresh)
+
 
 // ---------- framebuffer / rysowanie ----------
 // Konwencja: w SSD1680 bit=1 -> bialy, bit=0 -> czarny.
@@ -381,7 +379,6 @@ void display_eink_show_splash(void) {
     fb_draw_bitmap(qr_x, qr_y, &QR_DATA[0][0], QR_SIZE, QR_BYTES_PER_ROW, qr_scale);
 
     eink_full_refresh();
-    eink_sleep();
     ESP_LOGI(TAG, "Splash (logo + napis + QR) wyswietlony");
 }
 
@@ -565,7 +562,6 @@ static void draw_diag(void) {
 
     fb_draw_text(&F14, 4, 96, "www.smartinhome.pl");
     eink_full_refresh();
-    eink_sleep();
 }
 
 static void rebuild_pages(void) {
@@ -582,7 +578,6 @@ void display_eink_refresh_pages(void) {
     if (s_cur_page < 0 || s_cur_page >= s_page_count) s_cur_page = 0;
     draw_meter_page(s_page_ids[s_cur_page], s_cur_page + 1, s_page_count);
     eink_full_refresh();
-    eink_sleep();
 }
 
 void display_eink_next_page(void) {
@@ -591,7 +586,6 @@ void display_eink_next_page(void) {
     s_cur_page = (s_cur_page + 1) % s_page_count;
     draw_meter_page(s_page_ids[s_cur_page], s_cur_page + 1, s_page_count);
     eink_full_refresh();
-    eink_sleep();
 }
 
 void display_eink_first_page(void) {
@@ -600,7 +594,6 @@ void display_eink_first_page(void) {
     s_cur_page = 0;
     draw_meter_page(s_page_ids[s_cur_page], s_cur_page + 1, s_page_count);
     eink_full_refresh();
-    eink_sleep();
 }
 
 // ---------- przycisk BOOT + auto-odswiezanie ----------

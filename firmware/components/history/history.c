@@ -403,3 +403,93 @@ bool history_last_known(const char *id_hex, double *out_total, int *out_kind, ui
     if (s_mutex) xSemaphoreGive(s_mutex);
     return found;
 }
+
+// ----- API dla wyswietlacza e-ink -----
+
+bool history_display_summary(const char *key, hist_display_t *out) {
+    if (!key || !out) return false;
+    memset(out, 0, sizeof(*out));
+    strncpy(out->key, key, sizeof(out->key) - 1);
+
+    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
+    meter_hist_t *m = get_or_load(key, false);
+    if (!m) {
+        if (s_mutex) xSemaphoreGive(s_mutex);
+        return false;
+    }
+
+    out->kind       = m->kind;
+    out->cumulative = m->cumulative;
+    out->last_total = m->last_total;
+    out->last_ts    = m->last_ts;
+    out->has_value  = (m->last_ts != 0);
+
+    // Granice dni wedlug czasu lokalnego.
+    uint32_t now = (uint32_t)time(NULL);
+    uint32_t day0 = floor_day(now);              // poczatek dzis
+    uint32_t day_1 = floor_day(day0 - 1);        // poczatek wczoraj
+    uint32_t day_2 = floor_day(day_1 - 1);       // poczatek przedwczoraj
+
+    if (m->cumulative) {
+        // Zuzycie = total na koncu dnia - total na poczatku dnia.
+        // Bufory dzienne trzymaja total na POCZATEK okresu (ts=floor_day).
+        // Dzis: last_total - total(day0). Wczoraj: total(day0) - total(day_1). itd.
+        float t_day0 = 0, t_day1 = 0, t_day2 = 0;
+        bool has0 = false, has1 = false, has2 = false;
+        for (int i = 0; i < m->n_days; i++) {
+            if (m->days[i].ts == day0) { t_day0 = m->days[i].total; has0 = true; }
+            else if (m->days[i].ts == day_1) { t_day1 = m->days[i].total; has1 = true; }
+            else if (m->days[i].ts == day_2) { t_day2 = m->days[i].total; has2 = true; }
+        }
+        if (has0 && out->has_value) {
+            out->today = m->last_total - t_day0;
+            if (out->today < 0) out->today = 0;
+            out->has_today = true;
+        }
+        if (has0 && has1) {
+            out->yesterday = t_day0 - t_day1;
+            if (out->yesterday < 0) out->yesterday = 0;
+            out->has_yesterday = true;
+        }
+        if (has1 && has2) {
+            out->day_before = t_day1 - t_day2;
+            if (out->day_before < 0) out->day_before = 0;
+            out->has_day_before = true;
+        }
+    } else {
+        // Chwilowe (moc/napiecie): "dzis" = biezaca wartosc, dzien = ostatnia z dnia.
+        out->today = m->last_total;
+        out->has_today = out->has_value;
+        for (int i = 0; i < m->n_days; i++) {
+            if (m->days[i].ts == day_1) { out->yesterday = m->days[i].total; out->has_yesterday = true; }
+            else if (m->days[i].ts == day_2) { out->day_before = m->days[i].total; out->has_day_before = true; }
+        }
+    }
+
+    if (s_mutex) xSemaphoreGive(s_mutex);
+    return true;
+}
+
+int history_tracked_meter_ids(char ids[][12], int max_ids) {
+    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
+    int count = 0;
+    for (int i = 0; i < s_tracked_count && count < max_ids; i++) {
+        // Klucz to "id" lub "id:pole" - wyciagnij sama czesc id.
+        char id[12] = {0};
+        const char *colon = strchr(s_tracked[i], ':');
+        int len = colon ? (int)(colon - s_tracked[i]) : (int)strlen(s_tracked[i]);
+        if (len > 11) len = 11;
+        memcpy(id, s_tracked[i], len);
+        // Czy juz dodane?
+        bool dup = false;
+        for (int j = 0; j < count; j++)
+            if (strcasecmp(ids[j], id) == 0) { dup = true; break; }
+        if (!dup) {
+            strncpy(ids[count], id, 11);
+            ids[count][11] = 0;
+            count++;
+        }
+    }
+    if (s_mutex) xSemaphoreGive(s_mutex);
+    return count;
+}

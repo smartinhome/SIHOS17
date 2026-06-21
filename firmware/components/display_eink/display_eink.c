@@ -2,6 +2,9 @@
 #include "qr_data.h"
 #include "logo_data.h"
 #include "font_data.h"
+#include "history.h"
+#include <stdio.h>
+#include <time.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -245,6 +248,35 @@ static void fb_draw_text_center(const font_t *f, int cx, int y, const char *txt)
     fb_draw_text(f, cx - w / 2, y, txt);
 }
 
+// Kontur prostokata (1px).
+static void fb_rect(int x, int y, int w, int h) {
+    for (int i = 0; i < w; i++) { fb_set_pixel(x + i, y, 1); fb_set_pixel(x + i, y + h - 1, 1); }
+    for (int j = 0; j < h; j++) { fb_set_pixel(x, y + j, 1); fb_set_pixel(x + w - 1, y + j, 1); }
+}
+
+// Tekst odwrocony: bialy na czarnym tle (dla naglowka). 0 = bialy piksel.
+static void fb_draw_text_inv(const font_t *f, int x, int y, const char *txt) {
+    uint32_t cp; int i = 0; int penx = x;
+    while (txt[i]) {
+        int n = utf8_next(txt + i, &cp); i += n;
+        const glyph_t *g = font_find(f, cp);
+        if (!g) { penx += f->cell_w; continue; }
+        int bpr = (g->w + 7) / 8;
+        for (int ry = 0; ry < g->h; ry++) {
+            for (int rx = 0; rx < g->w; rx++) {
+                uint8_t byte = f->bitmap[g->off + ry * bpr + (rx >> 3)];
+                int bit = (byte >> (7 - (rx & 7))) & 1;
+                if (bit) {
+                    int gx = penx + g->xoff + rx;
+                    int gy = y + f->ascent - (g->h + g->yoff) + ry;
+                    fb_set_pixel(gx, gy, 0); // bialy
+                }
+            }
+        }
+        penx += g->adv;
+    }
+}
+
 // ---------- API ----------
 
 bool display_eink_init(const display_eink_config_t *cfg) {
@@ -309,4 +341,183 @@ void display_eink_show_splash(void) {
     eink_full_refresh();
     eink_sleep();
     ESP_LOGI(TAG, "Splash (logo + napis + QR) wyswietlony");
+}
+
+// ---------- strony licznikow (dane z historii) ----------
+
+#define MAX_PAGES 12
+static char s_page_ids[MAX_PAGES][12];  // ID licznikow ze sledzonymi polami
+static int  s_page_count = 0;
+static int  s_cur_page = 0;
+
+// Etykieta i jednostka wg rodzaju licznika (kind: 1=woda,2=prad,3=gaz).
+static const char* kind_title(int kind) {
+    switch (kind) { case 1: return "Woda"; case 2: return "Elektrycznosc"; case 3: return "Gaz"; default: return "Licznik"; }
+}
+static const char* kind_unit(int kind) {
+    switch (kind) { case 1: return "m\u00b3"; case 2: return "kWh"; case 3: return "m\u00b3"; default: return ""; }
+}
+
+// Sformatuj liczbe z jednostka do bufora.
+static void fmt_val(char *buf, int cap, double v, const char *unit, int decimals) {
+    if (decimals <= 0) snprintf(buf, cap, "%.0f %s", v, unit);
+    else if (decimals == 2) snprintf(buf, cap, "%.2f %s", v, unit);
+    else snprintf(buf, cap, "%.3f %s", v, unit);
+}
+
+// Narysuj jedna strone licznika do framebuffera (styl jak ESPHome).
+static void draw_meter_page(const char *id, int page_no, int total_pages) {
+    fb_clear_white();
+
+    hist_display_t s;
+    bool ok = history_display_summary(id, &s);
+    const char *unit = ok ? kind_unit(s.kind) : "";
+
+    // NAGLOWEK (czarny pasek, bialy tekst)
+    fb_fill_rect(0, 0, LCD_W, 16, 1);
+    fb_draw_text_inv(&F14, 3, 0, ok ? kind_title(s.kind) : "Licznik");
+    char pg[12];
+    snprintf(pg, sizeof(pg), "%d/%d", page_no, total_pages);
+    int pgw = fb_text_width(&F14, pg);
+    fb_draw_text_inv(&F14, LCD_W - pgw - 4, 0, pg);
+
+    if (!ok || !s.has_value) {
+        fb_draw_text(&F14, 6, 50, "Oczekiwanie na dane...");
+        char idline[32];
+        snprintf(idline, sizeof(idline), "ID: %s", id);
+        fb_draw_text(&F14, 6, 70, idline);
+        return;
+    }
+
+    // ZUZYCIE DZIS - duza czcionka po lewej
+    char big[24];
+    if (s.has_today) fmt_val(big, sizeof(big), s.today, unit, s.cumulative ? 3 : 0);
+    else snprintf(big, sizeof(big), "--.- %s", unit);
+    fb_draw_text(&F24, 3, 18, big);
+    fb_draw_text(&F14, 3, 44, s.cumulative ? "zuzycie dzis" : "wartosc");
+
+    // RAMKA - statystyki (wczoraj / przedwczoraj / licznik)
+    fb_rect(2, 58, LCD_W - 4, 48);
+
+    char line[32];
+    if (s.has_yesterday) {
+        fmt_val(line, sizeof(line), s.yesterday, unit, s.cumulative ? 3 : 0);
+        fb_draw_text(&F14, 7, 60, "wczoraj:");
+        fb_draw_text(&F14, 80, 60, line);
+    } else {
+        fb_draw_text(&F14, 7, 60, "wczoraj:   --");
+    }
+    if (s.has_day_before) {
+        fmt_val(line, sizeof(line), s.day_before, unit, s.cumulative ? 3 : 0);
+        fb_draw_text(&F14, 7, 74, "przedwcz:");
+        fb_draw_text(&F14, 80, 74, line);
+    } else {
+        fb_draw_text(&F14, 7, 74, "przedwcz:  --");
+    }
+    fmt_val(line, sizeof(line), s.last_total, unit, s.cumulative ? 3 : 0);
+    fb_draw_text(&F14, 7, 90, "licznik:");
+    fb_draw_text(&F14, 80, 90, line);
+
+    // ODCZYT (czas ostatniej ramki)
+    if (s.last_ts) {
+        time_t tt = s.last_ts; struct tm tm; localtime_r(&tt, &tm);
+        char ts[40];
+        strftime(ts, sizeof(ts), "%d.%m.%Y  %H:%M:%S", &tm);
+        char odczyt[52];
+        snprintf(odczyt, sizeof(odczyt), "odczyt: %s", ts);
+        fb_draw_text(&F14, 3, 108, odczyt);
+    } else {
+        fb_draw_text(&F14, 3, 108, "odczyt: --");
+    }
+}
+
+// Odswiez liste stron z historii (unikalne ID sledzonych licznikow).
+static void rebuild_pages(void) {
+    s_page_count = history_tracked_meter_ids(s_page_ids, MAX_PAGES);
+    if (s_cur_page >= s_page_count) s_cur_page = 0;
+}
+
+void display_eink_refresh_pages(void) {
+    rebuild_pages();
+    if (s_page_count == 0) {
+        // Brak sledzonych licznikow - pokaz splash.
+        display_eink_show_splash();
+        return;
+    }
+    if (s_cur_page < 0 || s_cur_page >= s_page_count) s_cur_page = 0;
+    draw_meter_page(s_page_ids[s_cur_page], s_cur_page + 1, s_page_count);
+    eink_full_refresh();
+    eink_sleep();
+}
+
+void display_eink_next_page(void) {
+    rebuild_pages();
+    if (s_page_count == 0) { display_eink_show_splash(); return; }
+    s_cur_page = (s_cur_page + 1) % s_page_count;
+    draw_meter_page(s_page_ids[s_cur_page], s_cur_page + 1, s_page_count);
+    eink_full_refresh();
+    eink_sleep();
+}
+
+void display_eink_first_page(void) {
+    rebuild_pages();
+    if (s_page_count == 0) { display_eink_show_splash(); return; }
+    s_cur_page = 0;
+    draw_meter_page(s_page_ids[s_cur_page], s_cur_page + 1, s_page_count);
+    eink_full_refresh();
+    eink_sleep();
+}
+
+// ---------- przycisk BOOT + auto-odswiezanie ----------
+
+static int s_btn_pin = -1;
+
+// Task przycisku: krotkie nacisniecie = nastepna strona, dlugie = pierwsza.
+static void button_task(void *arg) {
+    (void)arg;
+    const int LONG_MS = 1000;   // prog dlugiego nacisniecia
+    bool prev_up = true;        // przycisk zwolniony (pullup, stan wysoki)
+    while (1) {
+        int level = gpio_get_level(s_btn_pin);
+        bool down = (level == 0); // aktywny w stanie niskim
+        if (down && prev_up) {
+            // poczatek nacisniecia - mierz czas trzymania
+            int held = 0;
+            while (gpio_get_level(s_btn_pin) == 0) {
+                vTaskDelay(pdMS_TO_TICKS(20));
+                held += 20;
+                if (held > 5000) break;
+            }
+            if (held >= LONG_MS) display_eink_first_page();
+            else if (held >= 40)  display_eink_next_page();  // odfiltruj drgania <40ms
+            prev_up = false;
+        } else if (!down) {
+            prev_up = true;
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+}
+
+// Task auto-odswiezania: co 60 s odswiez biezaca strone (nowe dane z historii).
+static void refresh_task(void *arg) {
+    (void)arg;
+    // Pierwsze odswiezenie po 15 s (daj czas na pierwsze ramki i SNTP).
+    vTaskDelay(pdMS_TO_TICKS(15000));
+    while (1) {
+        display_eink_refresh_pages();
+        vTaskDelay(pdMS_TO_TICKS(60000));
+    }
+}
+
+void display_eink_start_tasks(int pin_button) {
+    s_btn_pin = pin_button;
+    gpio_config_t btn = {
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = 1,
+        .pin_bit_mask = (1ULL << pin_button),
+    };
+    gpio_config(&btn);
+    xTaskCreate(button_task, "eink_btn", 3072, NULL, 5, NULL);
+    xTaskCreate(refresh_task, "eink_refresh", 4096, NULL, 4, NULL);
+    ESP_LOGI(TAG, "Tasks e-ink uruchomione (przycisk GPIO%d)", pin_button);
 }

@@ -53,3 +53,28 @@ bool history_is_tracked(const char *id_hex);
 
 // Lista sledzonych kluczy (id:pole) jako JSON tablica stringow.
 int history_tracked_json(char *buf, int buf_cap);
+
+// ----- API dla wyswietlacza e-ink -----
+
+// Podsumowanie jednego sledzonego pola/licznika dla ekranu.
+typedef struct {
+    char     key[28];       // klucz historii (id lub id:pole)
+    int      kind;          // 1=woda, 2=prad, 3=gaz
+    int      cumulative;    // 1=kumulacyjne (woda/energia/gaz), 0=chwilowe (moc/napiecie)
+    bool     has_value;     // czy jest jakikolwiek odczyt
+    double   last_total;    // biezacy stan licznika (lub wartosc chwilowa)
+    uint32_t last_ts;       // czas ostatniego odczytu
+    bool     has_today;     // czy mozna policzyc zuzycie dzis
+    double   today;         // zuzycie dzis (cumulative) lub wartosc (chwilowe)
+    bool     has_yesterday;
+    double   yesterday;     // zuzycie wczoraj
+    bool     has_day_before;
+    double   day_before;    // zuzycie przedwczoraj
+} hist_display_t;
+
+// Wypelnia podsumowanie dla danego klucza. Zwraca true gdy licznik istnieje.
+bool history_display_summary(const char *key, hist_display_t *out);
+
+// Liczba unikalnych licznikow (ID) ze sledzonymi polami - liczba stron na e-ink.
+// Wypelnia tablice unikalnych ID (do max_ids). Zwraca liczbe.
+int history_tracked_meter_ids(char ids[][12], int max_ids);

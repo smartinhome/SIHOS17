@@ -25,6 +25,20 @@ bool display_eink_init(const display_eink_config_t *cfg);
 // Pokaz ekran startowy: logo SIH + kod QR do smartinhome.pl.
 void display_eink_show_splash(void);
 
+// Odswiez strony liczników na podstawie danych z historii (sledzone pola).
+// Wywolaj okresowo lub po nadejsciu ramki. Pokazuje aktualnie wybrana strone.
+void display_eink_refresh_pages(void);
+
+// Przelacz na nastepna strone licznika (krotkie nacisniecie przycisku).
+void display_eink_next_page(void);
+
+// Wroc do pierwszej strony (dlugie nacisniecie przycisku).
+void display_eink_first_page(void);
+
+// Uruchom obsluge przycisku BOOT (przelaczanie stron) + okresowe odswiezanie.
+// pin_button - GPIO przycisku BOOT (aktywny w stanie niskim).
+void display_eink_start_tasks(int pin_button);
+
 #ifdef __cplusplus
 }
 #endif

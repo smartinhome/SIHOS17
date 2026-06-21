@@ -70,7 +70,7 @@ void app_main(void) {
         .pin_rst  = EINK_PIN_RST,
     };
     if (display_eink_init(&eink_cfg)) {
-        display_eink_show_splash();  // logo SIH + QR do smartinhome.pl
+        display_eink_show_splash();  // logo SIH + QR (ekran startowy)
     }
 
     // Dekoder wMbus
@@ -87,6 +87,10 @@ void app_main(void) {
 
     // Uruchom odbiór ramek
     cc1101_start_receive(wmbus_decoder_on_frame);
+
+    // Taski wyswietlacza: przycisk BOOT (przelaczanie stron) + auto-odswiezanie.
+    // Strony pokazuja sledzone liczniki z danymi z historii.
+    display_eink_start_tasks(BOOT_BUTTON_PIN);
 
     ESP_LOGI(TAG, "System gotowy");
 }

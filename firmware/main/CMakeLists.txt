@@ -10,6 +10,7 @@ idf_component_register(
         led_rx
         led_status
         meter_total
+        display_eink
         ota_manager
         nvs_config
         log_buffer

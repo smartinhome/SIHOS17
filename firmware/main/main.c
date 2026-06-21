@@ -8,6 +8,7 @@
 #include "led_rx.h"
 #include "led_status.h"
 #include "ota_manager.h"
+#include "display_eink.h"
 #include "log_buffer.h"
 
 #include "nvs_flash.h"
@@ -59,6 +60,18 @@ void app_main(void) {
         .freq_mhz = WMBUS_FREQ_MHZ,
     };
     cc1101_init(&radio_cfg);
+
+    // Wyswietlacz e-ink (wspoldzieli magistrale SPI2 z CC1101 - dodaj jako 2. urzadzenie)
+    display_eink_config_t eink_cfg = {
+        .spi_host = CC1101_SPI_HOST,
+        .pin_cs   = EINK_PIN_CS,
+        .pin_dc   = EINK_PIN_DC,
+        .pin_busy = EINK_PIN_BUSY,
+        .pin_rst  = EINK_PIN_RST,
+    };
+    if (display_eink_init(&eink_cfg)) {
+        display_eink_show_splash();  // logo SIH + QR do smartinhome.pl
+    }
 
     // Dekoder wMbus
     history_init();   // montuje SPIFFS, wczytuje historie

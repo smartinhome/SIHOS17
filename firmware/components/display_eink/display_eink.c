@@ -48,7 +48,7 @@ static void eink_cmd(uint8_t c) {
     spi_transaction_t t = {0};
     t.length = 8;
     t.tx_buffer = &c;
-    spi_device_polling_transmit(s_spi, &t);
+    spi_device_transmit(s_spi, &t);
 }
 
 static void eink_data(uint8_t d) {
@@ -56,7 +56,7 @@ static void eink_data(uint8_t d) {
     spi_transaction_t t = {0};
     t.length = 8;
     t.tx_buffer = &d;
-    spi_device_polling_transmit(s_spi, &t);
+    spi_device_transmit(s_spi, &t);
 }
 
 static void eink_data_buf(const uint8_t *buf, int len) {
@@ -69,7 +69,7 @@ static void eink_data_buf(const uint8_t *buf, int len) {
         spi_transaction_t t = {0};
         t.length = 8 * chunk;
         t.tx_buffer = buf + off;
-        spi_device_polling_transmit(s_spi, &t);
+        spi_device_transmit(s_spi, &t);
         off += chunk;
     }
 }
@@ -130,6 +130,10 @@ static void eink_set_cursor(void) {
 }
 
 static void eink_full_refresh(void) {
+    // Wylaczny dostep do magistrali SPI na czas odswiezania - radio (CC1101)
+    // dzieli te sama magistrale SPI2 i bez tego polling/transmit moga sie zablokowac.
+    spi_device_acquire_bus(s_spi, portMAX_DELAY);
+
     eink_set_cursor();
     eink_cmd(0x24); // write RAM (BW)
     eink_data_buf(s_fb, FB_SIZE);
@@ -138,6 +142,8 @@ static void eink_full_refresh(void) {
     eink_data(0xF7); // full update sequence
     eink_cmd(0x20); // master activation
     eink_wait_busy();
+
+    spi_device_release_bus(s_spi);
 }
 
 static void eink_sleep(void) {
@@ -581,8 +587,8 @@ static void button_task(void *arg) {
                 held += 20;
                 if (held > 5000) break;
             }
-            if (held >= LONG_MS) display_eink_first_page();
-            else if (held >= 40)  display_eink_next_page();  // odfiltruj drgania <40ms
+            if (held >= LONG_MS) { ESP_LOGI(TAG, "Przycisk: dlugie -> pierwsza strona"); display_eink_first_page(); }
+            else if (held >= 40)  { ESP_LOGI(TAG, "Przycisk: krotkie -> nastepna strona"); display_eink_next_page(); }
             prev_up = false;
         } else if (!down) {
             prev_up = true;
@@ -594,9 +600,10 @@ static void button_task(void *arg) {
 // Task auto-odswiezania: co 60 s odswiez biezaca strone (nowe dane z historii).
 static void refresh_task(void *arg) {
     (void)arg;
-    // Pierwsze odswiezenie po 15 s (daj czas na pierwsze ramki i SNTP).
-    vTaskDelay(pdMS_TO_TICKS(15000));
+    // Pierwsze odswiezenie po 8 s (daj czas na pierwsze ramki i SNTP).
+    vTaskDelay(pdMS_TO_TICKS(8000));
     while (1) {
+        ESP_LOGI(TAG, "Odswiezanie ekranu (stron: %d)", history_tracked_count());
         display_eink_refresh_pages();
         vTaskDelay(pdMS_TO_TICKS(60000));
     }

@@ -493,3 +493,21 @@ int history_tracked_meter_ids(char ids[][12], int max_ids) {
     if (s_mutex) xSemaphoreGive(s_mutex);
     return count;
 }
+
+int history_keys_for_id(const char *id, char keys[][28], int max_keys) {
+    if (!id) return 0;
+    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
+    int count = 0;
+    int idlen = (int)strlen(id);
+    for (int i = 0; i < s_tracked_count && count < max_keys; i++) {
+        // Klucz pasuje gdy zaczyna sie od "id" i dalej jest ':' lub koniec.
+        if (strncasecmp(s_tracked[i], id, idlen) == 0 &&
+            (s_tracked[i][idlen] == ':' || s_tracked[i][idlen] == '\0')) {
+            strncpy(keys[count], s_tracked[i], 27);
+            keys[count][27] = 0;
+            count++;
+        }
+    }
+    if (s_mutex) xSemaphoreGive(s_mutex);
+    return count;
+}

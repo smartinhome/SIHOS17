@@ -365,69 +365,127 @@ static void fmt_val(char *buf, int cap, double v, const char *unit, int decimals
     else snprintf(buf, cap, "%.3f %s", v, unit);
 }
 
-// Narysuj jedna strone licznika do framebuffera (styl jak ESPHome).
+// Ladniejsza nazwa pola do wyswietlenia.
+static const char* field_label(const char *field) {
+    if (strstr(field, "energia")) return "energia";
+    if (strstr(field, "produkcja")) return "produkcja";
+    if (strstr(field, "total_m3")) return "zuzycie";
+    if (strstr(field, "moc_produkcji")) return "moc prod.";
+    if (strstr(field, "moc")) return "moc";
+    if (strstr(field, "napiecie_l1")) return "napiecie L1";
+    if (strstr(field, "napiecie_l2")) return "napiecie L2";
+    if (strstr(field, "napiecie_l3")) return "napiecie L3";
+    return field;
+}
+
+// Jednostka pola z nazwy.
+static const char* field_unit(const char *field) {
+    if (strstr(field, "kwh")) return "kWh";
+    if (strstr(field, "kw"))  return "kW";
+    if (strstr(field, "_v"))  return "V";
+    if (strstr(field, "m3"))  return "m\u00b3";
+    return "";
+}
+
+// Wyodrebnij pole z klucza "id:pole" (lub pusty gdy sam id).
+static const char* key_field(const char *key) {
+    const char *c = strchr(key, ':');
+    return c ? c + 1 : "";
+}
+
+// Narysuj jedna strone licznika (wszystkie sledzone pola tego ID).
 static void draw_meter_page(const char *id, int page_no, int total_pages) {
     fb_clear_white();
 
-    hist_display_t s;
-    bool ok = history_display_summary(id, &s);
-    const char *unit = ok ? kind_unit(s.kind) : "";
+    // Zbierz wszystkie sledzone klucze tego licznika.
+    char keys[8][28];
+    int nkeys = history_keys_for_id(id, keys, 8);
 
-    // NAGLOWEK (czarny pasek, bialy tekst)
+    // Wybierz glowne pole kumulacyjne (energia/woda/gaz) - do duzego widoku.
+    int main_idx = -1;
+    hist_display_t main_s; bool main_ok = false;
+    for (int i = 0; i < nkeys; i++) {
+        hist_display_t s;
+        if (history_display_summary(keys[i], &s) && s.cumulative) {
+            main_idx = i; main_s = s; main_ok = true; break;
+        }
+    }
+    // Tytul i numer strony.
+    int kind = main_ok ? main_s.kind : 0;
     fb_fill_rect(0, 0, LCD_W, 16, 1);
-    fb_draw_text_inv(&F14, 3, 0, ok ? kind_title(s.kind) : "Licznik");
+    fb_draw_text_inv(&F14, 3, 0, kind ? kind_title(kind) : "Licznik");
     char pg[12];
     snprintf(pg, sizeof(pg), "%d/%d", page_no, total_pages);
     int pgw = fb_text_width(&F14, pg);
     fb_draw_text_inv(&F14, LCD_W - pgw - 4, 0, pg);
 
-    if (!ok || !s.has_value) {
-        fb_draw_text(&F14, 6, 50, "Oczekiwanie na dane...");
-        char idline[32];
+    if (nkeys == 0) {
+        fb_draw_text(&F14, 6, 50, "Brak sledzonych pol");
+        char idline[40];
         snprintf(idline, sizeof(idline), "ID: %s", id);
         fb_draw_text(&F14, 6, 70, idline);
         return;
     }
 
-    // ZUZYCIE DZIS - duza czcionka po lewej
-    char big[24];
-    if (s.has_today) fmt_val(big, sizeof(big), s.today, unit, s.cumulative ? 3 : 0);
-    else snprintf(big, sizeof(big), "--.- %s", unit);
-    fb_draw_text(&F24, 3, 18, big);
-    fb_draw_text(&F14, 3, 44, s.cumulative ? "zuzycie dzis" : "wartosc");
+    uint32_t last_ts = 0;
 
-    // RAMKA - statystyki (wczoraj / przedwczoraj / licznik)
-    fb_rect(2, 58, LCD_W - 4, 48);
+    if (main_ok && main_s.has_value) {
+        const char *unit = field_unit(key_field(keys[main_idx]));
+        if (unit[0] == 0) unit = kind_unit(kind);
+        last_ts = main_s.last_ts;
 
-    char line[32];
-    if (s.has_yesterday) {
-        fmt_val(line, sizeof(line), s.yesterday, unit, s.cumulative ? 3 : 0);
-        fb_draw_text(&F14, 7, 60, "wczoraj:");
-        fb_draw_text(&F14, 80, 60, line);
+        // ZUZYCIE DZIS duza czcionka.
+        char big[24];
+        if (main_s.has_today) fmt_val(big, sizeof(big), main_s.today, unit, 3);
+        else snprintf(big, sizeof(big), "--.- %s", unit);
+        fb_draw_text(&F24, 3, 18, big);
+        fb_draw_text(&F14, 3, 44, "zuzycie dzis");
+
+        // RAMKA statystyki (wczoraj/przedwczoraj/licznik).
+        fb_rect(2, 58, LCD_W - 4, 48);
+        char line[32];
+        if (main_s.has_yesterday) {
+            fmt_val(line, sizeof(line), main_s.yesterday, unit, 3);
+            fb_draw_text(&F14, 7, 60, "wczoraj:");
+            fb_draw_text(&F14, 80, 60, line);
+        } else fb_draw_text(&F14, 7, 60, "wczoraj:   --");
+        if (main_s.has_day_before) {
+            fmt_val(line, sizeof(line), main_s.day_before, unit, 3);
+            fb_draw_text(&F14, 7, 74, "przedwcz:");
+            fb_draw_text(&F14, 80, 74, line);
+        } else fb_draw_text(&F14, 7, 74, "przedwcz:  --");
+        fmt_val(line, sizeof(line), main_s.last_total, unit, 3);
+        fb_draw_text(&F14, 7, 90, "licznik:");
+        fb_draw_text(&F14, 80, 90, line);
     } else {
-        fb_draw_text(&F14, 7, 60, "wczoraj:   --");
+        // Brak pola kumulacyjnego - pokaz tylko pola chwilowe (np. same napiecia).
+        int y = 22;
+        for (int i = 0; i < nkeys && y < 104; i++) {
+            hist_display_t s;
+            if (!history_display_summary(keys[i], &s) || !s.has_value) continue;
+            const char *f = key_field(keys[i]);
+            const char *unit = field_unit(f);
+            char line[40];
+            snprintf(line, sizeof(line), "%s:", field_label(f));
+            fb_draw_text(&F14, 6, y, line);
+            char val[24];
+            fmt_val(val, sizeof(val), s.last_total, unit, s.cumulative ? 3 : 0);
+            fb_draw_text(&F14, 130, y, val);
+            if (s.last_ts > last_ts) last_ts = s.last_ts;
+            y += 16;
+        }
     }
-    if (s.has_day_before) {
-        fmt_val(line, sizeof(line), s.day_before, unit, s.cumulative ? 3 : 0);
-        fb_draw_text(&F14, 7, 74, "przedwcz:");
-        fb_draw_text(&F14, 80, 74, line);
-    } else {
-        fb_draw_text(&F14, 7, 74, "przedwcz:  --");
-    }
-    fmt_val(line, sizeof(line), s.last_total, unit, s.cumulative ? 3 : 0);
-    fb_draw_text(&F14, 7, 90, "licznik:");
-    fb_draw_text(&F14, 80, 90, line);
 
-    // ODCZYT (czas ostatniej ramki)
-    if (s.last_ts) {
-        time_t tt = s.last_ts; struct tm tm; localtime_r(&tt, &tm);
+    // ODCZYT.
+    if (last_ts) {
+        time_t tt = last_ts; struct tm tm; localtime_r(&tt, &tm);
         char ts[40];
         strftime(ts, sizeof(ts), "%d.%m.%Y  %H:%M:%S", &tm);
         char odczyt[52];
         snprintf(odczyt, sizeof(odczyt), "odczyt: %s", ts);
         fb_draw_text(&F14, 3, 108, odczyt);
     } else {
-        fb_draw_text(&F14, 3, 108, "odczyt: --");
+        fb_draw_text(&F14, 3, 108, "odczyt: oczekiwanie...");
     }
 }
 

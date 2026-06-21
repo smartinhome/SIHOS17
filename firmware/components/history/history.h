@@ -78,3 +78,7 @@ bool history_display_summary(const char *key, hist_display_t *out);
 // Liczba unikalnych licznikow (ID) ze sledzonymi polami - liczba stron na e-ink.
 // Wypelnia tablice unikalnych ID (do max_ids). Zwraca liczbe.
 int history_tracked_meter_ids(char ids[][12], int max_ids);
+
+// Wypelnia pelne klucze sledzenia (id:pole lub id) dla danego ID licznika.
+// keys: tablica bufow [n][28]. Zwraca liczbe znalezionych kluczy.
+int history_keys_for_id(const char *id, char keys[][28], int max_keys);

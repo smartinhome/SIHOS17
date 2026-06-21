@@ -511,3 +511,13 @@ int history_keys_for_id(const char *id, char keys[][28], int max_keys) {
     if (s_mutex) xSemaphoreGive(s_mutex);
     return count;
 }
+
+int history_tracked_count(void) {
+    return s_tracked_count;
+}
+
+void history_tracked_first(char *out, int cap) {
+    if (!out || cap < 1) return;
+    if (s_tracked_count > 0) strncpy(out, s_tracked[0], cap - 1), out[cap-1] = 0;
+    else out[0] = 0;
+}

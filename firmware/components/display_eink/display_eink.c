@@ -490,6 +490,42 @@ static void draw_meter_page(const char *id, int page_no, int total_pages) {
 }
 
 // Odswiez liste stron z historii (unikalne ID sledzonych licznikow).
+// Ekran diagnostyczny - pokazuje czemu nie ma stron (do debugowania).
+static void draw_diag(void) {
+    fb_clear_white();
+    fb_fill_rect(0, 0, LCD_W, 16, 1);
+    fb_draw_text_inv(&F14, 3, 0, "Diagnostyka e-ink");
+
+    char line[64];
+    int nt = history_tracked_count();
+    snprintf(line, sizeof(line), "Sledzonych pol: %d", nt);
+    fb_draw_text(&F14, 4, 22, line);
+
+    char first[28]; history_tracked_first(first, sizeof(first));
+    if (first[0]) {
+        snprintf(line, sizeof(line), "Pierwszy: %s", first);
+        fb_draw_text(&F14, 4, 40, line);
+    } else {
+        fb_draw_text(&F14, 4, 40, "Brak - oznacz pole w UI");
+        fb_draw_text(&F14, 4, 56, "(Liczniki -> + przy wartosci)");
+    }
+
+    // Status czasu (SNTP) - bez czasu historia nie zapisuje.
+    time_t now = time(NULL);
+    if (now > 1700000000) {
+        struct tm tm; localtime_r(&now, &tm);
+        char ts[40];
+        strftime(ts, sizeof(ts), "Czas: %d.%m %H:%M:%S", &tm);
+        fb_draw_text(&F14, 4, 74, ts);
+    } else {
+        fb_draw_text(&F14, 4, 74, "Czas: BRAK (czekam na SNTP)");
+    }
+
+    fb_draw_text(&F14, 4, 96, "www.smartinhome.pl");
+    eink_full_refresh();
+    eink_sleep();
+}
+
 static void rebuild_pages(void) {
     s_page_count = history_tracked_meter_ids(s_page_ids, MAX_PAGES);
     if (s_cur_page >= s_page_count) s_cur_page = 0;
@@ -498,8 +534,7 @@ static void rebuild_pages(void) {
 void display_eink_refresh_pages(void) {
     rebuild_pages();
     if (s_page_count == 0) {
-        // Brak sledzonych licznikow - pokaz splash.
-        display_eink_show_splash();
+        draw_diag();   // zamiast splash - pokaz co jest nie tak
         return;
     }
     if (s_cur_page < 0 || s_cur_page >= s_page_count) s_cur_page = 0;
@@ -510,7 +545,7 @@ void display_eink_refresh_pages(void) {
 
 void display_eink_next_page(void) {
     rebuild_pages();
-    if (s_page_count == 0) { display_eink_show_splash(); return; }
+    if (s_page_count == 0) { draw_diag(); return; }
     s_cur_page = (s_cur_page + 1) % s_page_count;
     draw_meter_page(s_page_ids[s_cur_page], s_cur_page + 1, s_page_count);
     eink_full_refresh();
@@ -519,7 +554,7 @@ void display_eink_next_page(void) {
 
 void display_eink_first_page(void) {
     rebuild_pages();
-    if (s_page_count == 0) { display_eink_show_splash(); return; }
+    if (s_page_count == 0) { draw_diag(); return; }
     s_cur_page = 0;
     draw_meter_page(s_page_ids[s_cur_page], s_cur_page + 1, s_page_count);
     eink_full_refresh();

@@ -83,41 +83,63 @@ static void eink_reset(void) {
 
 // ---------- sekwencja init SSD1680 ----------
 
+// Tablice waveform (LUT) i komendy - dokladnie jak sterownik ESPHome 2.13 v3.
+// Pierwszy bajt 0x32 to komenda Write LUT.
+static const uint8_t FULL_LUT[] = {
+    0x32,
+    0x80,0x4A,0x40,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x40,0x4A,0x80,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x80,0x4A,0x40,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x40,0x4A,0x80,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x0F,0x00,0x00,0x00,0x00,0x00,0x00,0x0F,0x00,0x00,0x0F,0x00,0x00,0x02,0x0F,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x22,0x22,0x22,0x22,0x22,0x22,0x00,0x00,0x00,
+};
+
 static void eink_panel_init(void) {
+    // Podwojny reset jak ESPHome (reset_ + send_reset_)
     eink_reset();
+    vTaskDelay(pdMS_TO_TICKS(20));
+    gpio_set_level(s_cfg.pin_rst, 0);
+    vTaskDelay(pdMS_TO_TICKS(2));
+    gpio_set_level(s_cfg.pin_rst, 1);
+    vTaskDelay(pdMS_TO_TICKS(100));
     eink_wait_busy();
 
-    eink_cmd(0x12); // SWRESET
+    eink_cmd(0x12); // SW_RESET
     eink_wait_busy();
 
-    eink_cmd(0x01); // Driver output control
-    eink_data((PANEL_H - 1) & 0xFF);
-    eink_data(((PANEL_H - 1) >> 8) & 0xFF);
-    eink_data(0x00);
+    // DRV_OUT_CTL {0x01,0x27,0x01,0x00} - driver output control (250-1=0x0127)
+    eink_cmd(0x01); eink_data(0x27); eink_data(0x01); eink_data(0x00);
+    // DATA_ENTRY {0x11,0x03}
+    eink_cmd(0x11); eink_data(0x03);
+    // CMD5 {0x37, 0,0,0,0,0,0x40,0,0,0,0}
+    eink_cmd(0x37);
+    eink_data(0x00); eink_data(0x00); eink_data(0x00); eink_data(0x00); eink_data(0x00);
+    eink_data(0x40); eink_data(0x00); eink_data(0x00); eink_data(0x00); eink_data(0x00);
 
-    eink_cmd(0x11); // data entry mode
-    eink_data(0x03); // X inc, Y inc
+    // set_window (0..height): RAM_X_START {0x44,0x00,121/8=15}, RAM_Y_START {0x45,0,0,249,0}
+    eink_cmd(0x44); eink_data(0x00); eink_data(121 / 8);
+    eink_cmd(0x45); eink_data(0x00); eink_data(0x00); eink_data((PANEL_H - 1) & 0xFF); eink_data(0x00);
+    eink_cmd(0x4E); eink_data(0x00);                       // RAM X counter
+    eink_cmd(0x4F); eink_data(0x00); eink_data(0x00);      // RAM Y counter
 
-    eink_cmd(0x44); // set RAM X start/end (w bajtach)
-    eink_data(0x00);
-    eink_data(PANEL_BPR - 1); // 15
+    // BORDER_FULL {0x3C,0x05}
+    eink_cmd(0x3C); eink_data(0x05);
+    // DISPLAY_UPDATE {0x21,0x00,0x80}
+    eink_cmd(0x21); eink_data(0x00); eink_data(0x80);
+    // TEMP_SENS {0x18,0x80}
+    eink_cmd(0x18); eink_data(0x80);
+    eink_wait_busy();
 
-    eink_cmd(0x45); // set RAM Y start/end
-    eink_data(0x00);
-    eink_data(0x00);
-    eink_data((PANEL_H - 1) & 0xFF);
-    eink_data(((PANEL_H - 1) >> 8) & 0xFF);
-
-    eink_cmd(0x3C); // border waveform
-    eink_data(0x05);
-
-    eink_cmd(0x21); // display update control
-    eink_data(0x00);
-    eink_data(0x80);
-
-    eink_cmd(0x18); // temperature sensor
-    eink_data(0x80);
-
+    // write_lut(FULL_LUT) + CMD1/GATEV/SRCV/VCOM
+    eink_cmd(FULL_LUT[0]);
+    eink_data_buf(FULL_LUT + 1, sizeof(FULL_LUT) - 1);
+    eink_cmd(0x3F); eink_data(0x22);                       // CMD1
+    eink_cmd(0x03); eink_data(0x17);                       // GATEV
+    eink_cmd(0x04); eink_data(0x41); eink_data(0x0C); eink_data(0x32); // SRCV
+    eink_cmd(0x2C); eink_data(0x36);                       // VCOM
     eink_wait_busy();
 }
 
@@ -130,17 +152,31 @@ static void eink_set_cursor(void) {
 }
 
 static void eink_full_refresh(void) {
-    // Wylaczny dostep do magistrali SPI na czas odswiezania - radio (CC1101)
-    // dzieli te sama magistrale SPI2 i bez tego polling/transmit moga sie zablokowac.
+    // Wylaczny dostep do magistrali SPI na czas odswiezania (wspoldzielone z CC1101).
     spi_device_acquire_bus(s_spi, portMAX_DELAY);
 
+    eink_wait_busy();
     eink_set_cursor();
-    eink_cmd(0x24); // write RAM (BW)
+
+    // Zaladuj LUT pelny przed kazdym odswiezeniem (jak full_update_ w ESPHome).
+    eink_cmd(FULL_LUT[0]);
+    eink_data_buf(FULL_LUT + 1, sizeof(FULL_LUT) - 1);
+    eink_cmd(0x3F); eink_data(0x22);
+    eink_cmd(0x03); eink_data(0x17);
+    eink_cmd(0x04); eink_data(0x41); eink_data(0x0C); eink_data(0x32);
+    eink_cmd(0x2C); eink_data(0x36);
+
+    // Pisz OBA bufory: WRITE_BUFFER (0x24) i WRITE_BASE (0x26).
+    eink_set_cursor();
+    eink_cmd(0x24);
+    eink_data_buf(s_fb, FB_SIZE);
+    eink_set_cursor();
+    eink_cmd(0x26);
     eink_data_buf(s_fb, FB_SIZE);
 
-    eink_cmd(0x22); // display update control 2
-    eink_data(0xF7); // full update sequence
-    eink_cmd(0x20); // master activation
+    // ON_FULL {0x22,0xC7} + ACTIVATE.
+    eink_cmd(0x22); eink_data(0xC7);
+    eink_cmd(0x20); // ACTIVATE
     eink_wait_busy();
 
     spi_device_release_bus(s_spi);
@@ -587,8 +623,8 @@ static void button_task(void *arg) {
                 held += 20;
                 if (held > 5000) break;
             }
-            if (held >= LONG_MS) { ESP_LOGI(TAG, "Przycisk: dlugie -> pierwsza strona"); display_eink_first_page(); }
-            else if (held >= 40)  { ESP_LOGI(TAG, "Przycisk: krotkie -> nastepna strona"); display_eink_next_page(); }
+            if (held >= LONG_MS) display_eink_first_page();
+            else if (held >= 40)  display_eink_next_page();  // odfiltruj drgania <40ms
             prev_up = false;
         } else if (!down) {
             prev_up = true;
@@ -600,10 +636,9 @@ static void button_task(void *arg) {
 // Task auto-odswiezania: co 60 s odswiez biezaca strone (nowe dane z historii).
 static void refresh_task(void *arg) {
     (void)arg;
-    // Pierwsze odswiezenie po 8 s (daj czas na pierwsze ramki i SNTP).
-    vTaskDelay(pdMS_TO_TICKS(8000));
+    // Pierwsze odswiezenie po 15 s (daj czas na pierwsze ramki i SNTP).
+    vTaskDelay(pdMS_TO_TICKS(15000));
     while (1) {
-        ESP_LOGI(TAG, "Odswiezanie ekranu (stron: %d)", history_tracked_count());
         display_eink_refresh_pages();
         vTaskDelay(pdMS_TO_TICKS(60000));
     }

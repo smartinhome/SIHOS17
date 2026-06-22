@@ -549,6 +549,37 @@ static void draw_meter_page(const char *id, int page_no, int total_pages) {
         fb_draw_text(&F24, 3, 18, big);
         fb_draw_text(&F14, 3, 44, "zuzycie dzis");
 
+        // POLA CHWILOWE (moc, napiecia) - jesli sledzone, w prawej czesci ekranu.
+        // Moc -> prawy gorny rog w W (jak ESPHome akt. pobor). Napiecia -> lista.
+        int volt_y = 60;
+        for (int i = 0; i < nkeys; i++) {
+            if (i == main_idx) continue;
+            const char *f = key_field(keys[i]);
+            hist_display_t fs;
+            if (!history_display_summary(keys[i], &fs) || !fs.has_value) continue;
+            if (strstr(f, "moc") && !strstr(f, "produkcji")) {
+                // Aktualny pobor w W (kW * 1000), prawy gorny rog, odwrocony.
+                char pw[20];
+                snprintf(pw, sizeof(pw), "%.0f W", fs.last_total * 1000.0);
+                int pw_w = fb_text_width(&F24, pw);
+                int pw_x = LCD_W - pw_w - 4;
+                fb_fill_rect(pw_x - 4, 17, LCD_W - pw_x + 4, 26, 1);
+                fb_draw_text_inv(&F24, pw_x, 18, pw);
+                int lbl_w = fb_text_width(&F14, "akt. pobor");
+                fb_draw_text(&F14, LCD_W - lbl_w - 4, 44, "akt. pobor");
+            } else if (strstr(f, "napiecie") || strstr(f, "_v")) {
+                // Napiecie - w prawej czesci ramki statystyk.
+                char v[16];
+                snprintf(v, sizeof(v), "%.0fV", fs.last_total);
+                const char *lbl = strstr(f, "l1") ? "L1:" : strstr(f, "l2") ? "L2:" : strstr(f, "l3") ? "L3:" : "U:";
+                if (volt_y <= 90) {
+                    fb_draw_text(&F14, 188, volt_y, lbl);
+                    fb_draw_text(&F14, 210, volt_y, v);
+                    volt_y += 14;
+                }
+            }
+        }
+
         // RAMKA statystyki (wczoraj/przedwczoraj/licznik).
         fb_rect(2, 58, LCD_W - 4, 48);
         char line[32];

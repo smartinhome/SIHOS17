@@ -429,30 +429,37 @@ bool history_display_summary(const char *key, hist_display_t *out) {
     uint32_t day0 = floor_day(now);              // poczatek dzis
     uint32_t day_1 = floor_day(day0 - 1);        // poczatek wczoraj
     uint32_t day_2 = floor_day(day_1 - 1);       // poczatek przedwczoraj
+    uint32_t day_3 = floor_day(day_2 - 1);       // poczatek 3 dni temu
 
     if (m->cumulative) {
-        // Zuzycie = total na koncu dnia - total na poczatku dnia.
-        // Bufory dzienne trzymaja total na POCZATEK okresu (ts=floor_day).
-        // Dzis: last_total - total(day0). Wczoraj: total(day0) - total(day_1). itd.
-        float t_day0 = 0, t_day1 = 0, t_day2 = 0;
-        bool has0 = false, has1 = false, has2 = false;
+        // WAZNE: bufor dzienny (series_update) trzyma total na KONIEC dnia
+        // (ostatni odczyt danego dnia), nie na poczatek. Zatem:
+        //   zuzycie dzis      = biezacy total - total na koniec WCZORAJ
+        //   zuzycie wczoraj   = total koniec wczoraj - total koniec przedwczoraj
+        //   zuzycie przedwcz. = total koniec przedwczoraj - total koniec 3 dni temu
+        float t_d1 = 0, t_d2 = 0, t_d3 = 0;
+        bool h1 = false, h2 = false, h3 = false;
         for (int i = 0; i < m->n_days; i++) {
-            if (m->days[i].ts == day0) { t_day0 = m->days[i].total; has0 = true; }
-            else if (m->days[i].ts == day_1) { t_day1 = m->days[i].total; has1 = true; }
-            else if (m->days[i].ts == day_2) { t_day2 = m->days[i].total; has2 = true; }
+            if      (m->days[i].ts == day_1) { t_d1 = m->days[i].total; h1 = true; }
+            else if (m->days[i].ts == day_2) { t_d2 = m->days[i].total; h2 = true; }
+            else if (m->days[i].ts == day_3) { t_d3 = m->days[i].total; h3 = true; }
         }
-        if (has0 && out->has_value) {
-            out->today = m->last_total - t_day0;
+        if (h1 && out->has_value) {
+            out->today = m->last_total - t_d1;
             if (out->today < 0) out->today = 0;
             out->has_today = true;
+        } else if (out->has_value) {
+            // Brak danych z wczoraj (np. pierwszy dzien) - dzis = 0 do polnocy.
+            out->today = 0;
+            out->has_today = true;
         }
-        if (has0 && has1) {
-            out->yesterday = t_day0 - t_day1;
+        if (h1 && h2) {
+            out->yesterday = t_d1 - t_d2;
             if (out->yesterday < 0) out->yesterday = 0;
             out->has_yesterday = true;
         }
-        if (has1 && has2) {
-            out->day_before = t_day1 - t_day2;
+        if (h2 && h3) {
+            out->day_before = t_d2 - t_d3;
             if (out->day_before < 0) out->day_before = 0;
             out->has_day_before = true;
         }

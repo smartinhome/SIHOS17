@@ -1,5 +1,6 @@
 #include "ota_manager.h"
 #include "cc1101.h"
+#include "display_eink.h"
 #include <stdlib.h>
 #include "esp_ota_ops.h"
 #include "esp_https_ota.h"
@@ -24,6 +25,7 @@ static void ota_url_task(void *arg) {
 
     // Zatrzymaj radio jesli jeszcze dziala (gdy wolane bezposrednio z URL)
     cc1101_stop();
+    display_eink_pause();  // zwolnij SPI i RAM przed OTA
 
     esp_http_client_config_t http_cfg = {
         .url                         = url,
@@ -31,7 +33,7 @@ static void ota_url_task(void *arg) {
         .crt_bundle_attach           = esp_crt_bundle_attach,
         .skip_cert_common_name_check = true,
         .max_redirection_count       = 10,
-        .buffer_size                 = 16384,
+        .buffer_size                 = 8192,
         .buffer_size_tx              = 4096,
         .user_agent                  = "SIH-wMbus-Reader",
         .keep_alive_enable           = true,
@@ -319,6 +321,7 @@ static void ota_github_task(void *arg) {
     // Zatrzymaj radio — task RX glodzi siec (wyzszy priorytet, ciagly SPI)
     ESP_LOGI(TAG, "OTA: zatrzymuje radio CC1101 na czas aktualizacji");
     cc1101_stop();
+    display_eink_pause();  // zwolnij SPI i RAM przed OTA
     vTaskDelay(pdMS_TO_TICKS(100));
 
     char url[480] = {0};

@@ -670,6 +670,10 @@ void display_eink_first_page(void) {
 static int s_btn_pin = -1;
 
 // Task przycisku: krotkie nacisniecie = nastepna strona, dlugie = pierwsza.
+static TaskHandle_t s_btn_task_h = NULL;
+static TaskHandle_t s_refresh_task_h = NULL;
+static volatile bool s_eink_paused = false;
+
 static void button_task(void *arg) {
     (void)arg;
     const int LONG_MS = 1000;   // prog dlugiego nacisniecia
@@ -701,7 +705,7 @@ static void refresh_task(void *arg) {
     // Pierwsze odswiezenie po 15 s (daj czas na pierwsze ramki i SNTP).
     vTaskDelay(pdMS_TO_TICKS(15000));
     while (1) {
-        display_eink_refresh_pages();
+        if (!s_eink_paused) display_eink_refresh_pages();
         vTaskDelay(pdMS_TO_TICKS(60000));
     }
 }
@@ -714,7 +718,15 @@ void display_eink_start_tasks(int pin_button) {
         .pin_bit_mask = (1ULL << pin_button),
     };
     gpio_config(&btn);
-    xTaskCreate(button_task, "eink_btn", 3072, NULL, 5, NULL);
-    xTaskCreate(refresh_task, "eink_refresh", 4096, NULL, 4, NULL);
+    xTaskCreate(button_task, "eink_btn", 3072, NULL, 5, &s_btn_task_h);
+    xTaskCreate(refresh_task, "eink_refresh", 4096, NULL, 4, &s_refresh_task_h);
     ESP_LOGI(TAG, "Tasks e-ink uruchomione (przycisk GPIO%d)", pin_button);
+}
+
+void display_eink_pause(void) {
+    s_eink_paused = true;
+    // Usun taski (przed OTA) - zwalnia ich stos i zatrzymuje aktywnosc SPI.
+    if (s_refresh_task_h) { vTaskDelete(s_refresh_task_h); s_refresh_task_h = NULL; }
+    if (s_btn_task_h)     { vTaskDelete(s_btn_task_h);     s_btn_task_h = NULL; }
+    ESP_LOGI(TAG, "Taski e-ink wstrzymane (OTA)");
 }

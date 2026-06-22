@@ -39,6 +39,10 @@ void display_eink_first_page(void);
 // pin_button - GPIO przycisku BOOT (aktywny w stanie niskim).
 void display_eink_start_tasks(int pin_button);
 
+// Wstrzymaj taski e-ink (przed OTA - zwalnia magistrale SPI i redukuje
+// aktywnosc/fragmentacje heap). Taski same nie wznawiaja sie - po OTA restart.
+void display_eink_pause(void);
+
 #ifdef __cplusplus
 }
 #endif

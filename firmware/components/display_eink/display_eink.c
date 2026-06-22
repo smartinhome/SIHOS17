@@ -460,7 +460,7 @@ static int  s_cur_page = 0;
 
 // Etykieta i jednostka wg rodzaju licznika (kind: 1=woda,2=prad,3=gaz).
 static const char* kind_title(int kind) {
-    switch (kind) { case 1: return "Woda"; case 2: return "Elektrycznosc"; case 3: return "Gaz"; default: return "Licznik"; }
+    switch (kind) { case 1: return "Woda"; case 2: return "Elektryczność"; case 3: return "Gaz"; default: return "Licznik"; }
 }
 static const char* kind_unit(int kind) {
     switch (kind) { case 1: return "m\u00b3"; case 2: return "kWh"; case 3: return "m\u00b3"; default: return ""; }
@@ -477,12 +477,12 @@ static void fmt_val(char *buf, int cap, double v, const char *unit, int decimals
 static const char* field_label(const char *field) {
     if (strstr(field, "energia")) return "energia";
     if (strstr(field, "produkcja")) return "produkcja";
-    if (strstr(field, "total_m3")) return "zuzycie";
+    if (strstr(field, "total_m3")) return "zużycie";
     if (strstr(field, "moc_produkcji")) return "moc prod.";
     if (strstr(field, "moc")) return "moc";
-    if (strstr(field, "napiecie_l1")) return "napiecie L1";
-    if (strstr(field, "napiecie_l2")) return "napiecie L2";
-    if (strstr(field, "napiecie_l3")) return "napiecie L3";
+    if (strstr(field, "napiecie_l1")) return "napięcie L1";
+    if (strstr(field, "napiecie_l2")) return "napięcie L2";
+    if (strstr(field, "napiecie_l3")) return "napięcie L3";
     return field;
 }
 
@@ -528,7 +528,7 @@ static void draw_meter_page(const char *id, int page_no, int total_pages) {
     fb_draw_text_inv(&F14, LCD_W - pgw - 4, 0, pg);
 
     if (nkeys == 0) {
-        fb_draw_text(&F14, 6, 50, "Brak sledzonych pol");
+        fb_draw_text(&F14, 6, 50, "Brak śledzonych pól");
         char idline[40];
         snprintf(idline, sizeof(idline), "ID: %s", id);
         fb_draw_text(&F14, 6, 70, idline);
@@ -547,7 +547,7 @@ static void draw_meter_page(const char *id, int page_no, int total_pages) {
         if (main_s.has_today) fmt_val(big, sizeof(big), main_s.today, unit, 3);
         else snprintf(big, sizeof(big), "--.- %s", unit);
         fb_draw_text(&F24, 3, 18, big);
-        fb_draw_text(&F14, 3, 44, "zuzycie dzis");
+        fb_draw_text(&F14, 3, 44, "zużycie dziś");
 
         // POLA CHWILOWE (moc, napiecia) - jesli sledzone, w prawej czesci ekranu.
         // Moc -> prawy gorny rog w W (jak ESPHome akt. pobor). Napiecia -> lista.
@@ -565,8 +565,8 @@ static void draw_meter_page(const char *id, int page_no, int total_pages) {
                 int pw_x = LCD_W - pw_w - 4;
                 fb_fill_rect(pw_x - 4, 17, LCD_W - pw_x + 4, 26, 1);
                 fb_draw_text_inv(&F24, pw_x, 18, pw);
-                int lbl_w = fb_text_width(&F14, "akt. pobor");
-                fb_draw_text(&F14, LCD_W - lbl_w - 4, 44, "akt. pobor");
+                int lbl_w = fb_text_width(&F14, "akt. pobór");
+                fb_draw_text(&F14, LCD_W - lbl_w - 4, 44, "akt. pobór");
             } else if (strstr(f, "napiecie") || strstr(f, "_v")) {
                 // Napiecie - w prawej czesci ramki statystyk.
                 char v[16];
@@ -637,7 +637,7 @@ static void draw_diag(void) {
 
     char line[64];
     int nt = history_tracked_count();
-    snprintf(line, sizeof(line), "Sledzonych pol: %d", nt);
+    snprintf(line, sizeof(line), "Śledzonych pól: %d", nt);
     fb_draw_text(&F14, 4, 22, line);
 
     char first[28]; history_tracked_first(first, sizeof(first));
@@ -646,7 +646,7 @@ static void draw_diag(void) {
         fb_draw_text(&F14, 4, 40, line);
     } else {
         fb_draw_text(&F14, 4, 40, "Brak - oznacz pole w UI");
-        fb_draw_text(&F14, 4, 56, "(Liczniki -> + przy wartosci)");
+        fb_draw_text(&F14, 4, 56, "(Liczniki -> + przy wartości)");
     }
 
     // Status czasu (SNTP) - bez czasu historia nie zapisuje.

@@ -97,6 +97,23 @@ static const uint8_t FULL_LUT[] = {
     0x00,0x00,0x00,0x00,0x22,0x22,0x22,0x22,0x22,0x22,0x00,0x00,0x00,
 };
 
+// LUT czesciowego odswiezania (partial) - bez migania/inwersji calego ekranu.
+static const uint8_t PARTIAL_LUT[] = {
+    0x32,
+    0x00,0x40,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x80,0x80,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x40,0x40,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x80,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x0F,0x00,0x00,0x00,0x00,0x00,0x00,0x04,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x22,0x22,0x22,0x22,0x22,0x22,0x00,0x00,0x00,
+};
+
+// Licznik odswiezen: co ile partial wykonac pelne (czyszczenie artefaktow).
+#define FULL_REFRESH_EVERY 30
+static int s_refresh_counter = 0;
+
 static void eink_panel_init(void) {
     // Podwojny reset jak ESPHome (reset_ + send_reset_)
     eink_reset();
@@ -182,8 +199,60 @@ static void eink_full_refresh(void) {
     spi_device_release_bus(s_spi);
 }
 
-// (panel nie usypia miedzy odswiezeniami - po deep sleep nie odpowiada,
-// co powodowalo BUSY timeout przy kolejnym refresh)
+// Czesciowe odswiezanie - szybkie, bez migania. Wymaga wczesniejszego full
+// (ktory ustawil base buffer 0x26 jako referencje).
+static void eink_partial_refresh(void) {
+    spi_device_acquire_bus(s_spi, portMAX_DELAY);
+
+    // Krotki reset (jak send_reset_ w ESPHome partial_update_).
+    gpio_set_level(s_cfg.pin_rst, 0);
+    vTaskDelay(pdMS_TO_TICKS(2));
+    gpio_set_level(s_cfg.pin_rst, 1);
+    vTaskDelay(pdMS_TO_TICKS(100));
+    eink_wait_busy();
+
+    // Po resecie RST przywroc ustawienia obszaru RAM (data entry + window).
+    eink_cmd(0x11); eink_data(0x03);                       // data entry mode
+    eink_cmd(0x44); eink_data(0x00); eink_data(121 / 8);   // RAM X start/end
+    eink_cmd(0x45); eink_data(0x00); eink_data(0x00); eink_data((PANEL_H - 1) & 0xFF); eink_data(0x00);
+
+    // LUT czesciowy + komendy.
+    eink_cmd(PARTIAL_LUT[0]);
+    eink_data_buf(PARTIAL_LUT + 1, sizeof(PARTIAL_LUT) - 1);
+    eink_cmd(0x3F); eink_data(0x22);
+    eink_cmd(0x03); eink_data(0x17);
+    eink_cmd(0x04); eink_data(0x41); eink_data(0x0C); eink_data(0x32);
+    eink_cmd(0x2C); eink_data(0x36);
+
+    // BORDER_PART {0x3C,0x80} + UPSEQ {0x22,0xC0} + ACTIVATE.
+    eink_cmd(0x3C); eink_data(0x80);
+    eink_cmd(0x22); eink_data(0xC0);
+    eink_cmd(0x20);
+    eink_wait_busy();
+
+    // Pisz tylko bufor obrazu (0x24) - panel odswiezy roznice wzgledem base.
+    eink_set_cursor();
+    eink_cmd(0x24);
+    eink_data_buf(s_fb, FB_SIZE);
+
+    // ON_PARTIAL {0x22,0x0F} + ACTIVATE.
+    eink_cmd(0x22); eink_data(0x0F);
+    eink_cmd(0x20);
+    eink_wait_busy();
+
+    spi_device_release_bus(s_spi);
+}
+
+// Dyspozytor: pierwsze odswiezenie i co FULL_REFRESH_EVERY = pelne (ustawia base
+// i czysci artefakty), pozostale = czesciowe (szybkie, bez migania).
+static void eink_refresh(void) {
+    if (s_refresh_counter == 0) {
+        eink_full_refresh();
+    } else {
+        eink_partial_refresh();
+    }
+    s_refresh_counter = (s_refresh_counter + 1) % FULL_REFRESH_EVERY;
+}
 
 
 // ---------- framebuffer / rysowanie ----------
@@ -378,7 +447,7 @@ void display_eink_show_splash(void) {
     fb_fill_rect(qr_x - 4, qr_y - 4, qr_px + 8, qr_px + 8, 0);
     fb_draw_bitmap(qr_x, qr_y, &QR_DATA[0][0], QR_SIZE, QR_BYTES_PER_ROW, qr_scale);
 
-    eink_full_refresh();
+    eink_refresh();
     ESP_LOGI(TAG, "Splash (logo + napis + QR) wyswietlony");
 }
 
@@ -561,7 +630,7 @@ static void draw_diag(void) {
     }
 
     fb_draw_text(&F14, 4, 96, "www.smartinhome.pl");
-    eink_full_refresh();
+    eink_refresh();
 }
 
 static void rebuild_pages(void) {
@@ -577,7 +646,7 @@ void display_eink_refresh_pages(void) {
     }
     if (s_cur_page < 0 || s_cur_page >= s_page_count) s_cur_page = 0;
     draw_meter_page(s_page_ids[s_cur_page], s_cur_page + 1, s_page_count);
-    eink_full_refresh();
+    eink_refresh();
 }
 
 void display_eink_next_page(void) {
@@ -585,7 +654,7 @@ void display_eink_next_page(void) {
     if (s_page_count == 0) { draw_diag(); return; }
     s_cur_page = (s_cur_page + 1) % s_page_count;
     draw_meter_page(s_page_ids[s_cur_page], s_cur_page + 1, s_page_count);
-    eink_full_refresh();
+    eink_refresh();
 }
 
 void display_eink_first_page(void) {
@@ -593,7 +662,7 @@ void display_eink_first_page(void) {
     if (s_page_count == 0) { draw_diag(); return; }
     s_cur_page = 0;
     draw_meter_page(s_page_ids[s_cur_page], s_cur_page + 1, s_page_count);
-    eink_full_refresh();
+    eink_refresh();
 }
 
 // ---------- przycisk BOOT + auto-odswiezanie ----------

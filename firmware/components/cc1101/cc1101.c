@@ -362,10 +362,21 @@ static void rx_task(void *arg) {
         memcpy(rxbuf, header, 4);
         rxlen = 4;
 
-        // ---- Przelacz na FIXED length gdy znamy dlugosc ----
+        // ---- Ustaw tryb dlugosci ----
+        // Ramki < 256 B: fixed length od razu (PKTLEN = expected).
+        // Ramki >= 256 B (np. Amiplus 326B): PKTLEN to rejestr 8-bit (max 255),
+        // wiec zostajemy w infinite i przelaczymy na fixed gdy zostanie < 256 B.
+        // Wtedy PKTLEN = expected % 256 (chip dolicza do wielokrotnosci 256).
+        bool length_fixed = false;
         if (expected < 256) {
             write_reg(R_PKTLEN, (uint8_t)expected);
             write_reg(R_PKTCTRL0, 0x00); // fixed
+            length_fixed = true;
+        } else {
+            // PKTLEN ustaw juz teraz na docelowe modulo 256 - chip uzyje go
+            // gdy przelaczymy na fixed ponizej granicy 256.
+            write_reg(R_PKTLEN, (uint8_t)(expected % 256));
+            // pozostajemy w infinite (0x02 ustawione w INIT_RX)
         }
         write_reg(R_FIFOTHR, RX_FIFO_THRESHOLD);
 
@@ -373,7 +384,7 @@ static void rx_task(void *arg) {
         int8_t rssi = convert_rssi(read_status(ST_RSSI));
         int guard = 0;
         bool complete = false;
-        while (guard++ < 200) {
+        while (guard++ < 300) {
             uint8_t st = read_status(ST_RXBYTES);
             if (st == 0xFF) break;
             if (st & 0x80) { strobe(S_SFRX); break; } // overflow -> porzuc
@@ -381,6 +392,13 @@ static void rx_task(void *arg) {
             uint8_t marc  = read_status(ST_MARCSTATE) & 0x1F;
 
             size_t remaining = expected - rxlen;
+
+            // Dla dlugich ramek: gdy zostanie < 256 B, przelacz infinite->fixed,
+            // by chip sam zakonczyl odbior na PKTLEN (expected % 256).
+            if (!length_fixed && remaining < 256) {
+                write_reg(R_PKTCTRL0, 0x00); // fixed
+                length_fixed = true;
+            }
 
             if (nfifo > 0) {
                 // Zostaw 1 bajt w FIFO podczas odbioru (errata), chyba ze to koniec
@@ -412,11 +430,14 @@ static void rx_task(void *arg) {
                 if (rxlen >= expected) complete = true;
                 break;
             }
-            // Przy FreeRTOS 1000Hz tick=1ms: oddajemy CPU co 1ms.
-            // W 1ms przychodzi ~12B (przy 100kbps), FIFO 64B ma duzy zapas.
-            // Czytamy co iteracje (powyzej), tu tylko oddajemy CPU - bez busy-wait,
-            // bez ryzyka overflow, serwer HTTP pozostaje responsywny.
-            vTaskDelay(1);
+            // Opoznienie adaptacyjne: gdy FIFO sie zapelnia (>32/64 B),
+            // nie czekaj pelnego ticka - czytaj szybciej by uniknac overflow
+            // przy dlugich ramkach (Amiplus 326B). Przy malym FIFO oddaj CPU.
+            if (nfifo >= 32) {
+                esp_rom_delay_us(300);   // krotka pauza, zaraz znow czytamy
+            } else {
+                vTaskDelay(1);            // oddaj CPU (HTTP responsywny)
+            }
         }
         strobe(S_SFRX);
 

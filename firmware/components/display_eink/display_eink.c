@@ -749,8 +749,8 @@ void display_eink_start_tasks(int pin_button) {
         .pin_bit_mask = (1ULL << pin_button),
     };
     gpio_config(&btn);
-    xTaskCreate(button_task, "eink_btn", 3072, NULL, 5, &s_btn_task_h);
-    xTaskCreate(refresh_task, "eink_refresh", 4096, NULL, 4, &s_refresh_task_h);
+    xTaskCreate(button_task, "eink_btn", 3072, NULL, 3, &s_btn_task_h);
+    xTaskCreate(refresh_task, "eink_refresh", 4096, NULL, 2, &s_refresh_task_h);
     ESP_LOGI(TAG, "Tasks e-ink uruchomione (przycisk GPIO%d)", pin_button);
 }
 

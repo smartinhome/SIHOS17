@@ -74,9 +74,11 @@ static esp_err_t handle_history(httpd_req_t *req) {
             strlcpy(res, val, sizeof(res));
     }
     if (strlen(id) == 0) { resp_err(req, "brak id"); return ESP_OK; }
-    static char buf[8192];
-    history_get_json(id, res, buf, sizeof(buf));
+    char *buf = malloc(8192);
+    if (!buf) { httpd_resp_send_500(req); return ESP_OK; }
+    history_get_json(id, res, buf, 8192);
     resp_json(req, buf);
+    free(buf);
     return ESP_OK;
 }
 
@@ -688,11 +690,14 @@ static esp_err_t handle_backup_post(httpd_req_t *req) {
 
 
 static esp_err_t handle_logs(httpd_req_t *req) {
-    static char logbuf[16384];
-    size_t n = log_buffer_dump(logbuf, sizeof(logbuf));
+    // Bufor alokowany dynamicznie tylko na czas zadania (zamiast 16KB na stale w RAM).
+    char *logbuf = malloc(16384);
+    if (!logbuf) { httpd_resp_send_500(req); return ESP_OK; }
+    size_t n = log_buffer_dump(logbuf, 16384);
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     httpd_resp_send(req, logbuf, n);
+    free(logbuf);
     return ESP_OK;
 }
 

@@ -142,7 +142,7 @@ void led_status_init(bool enabled, uint8_t brightness) {
     }
     rmt_enable(s_chan);
     led_show(255, 0, 0);   // start: czerwony (brak polaczenia)
-    xTaskCreate(led_status_task, "led_status", 3072, NULL, 4, NULL);
+    xTaskCreate(led_status_task, "led_status", 2560, NULL, 2, NULL);
     ESP_LOGI(TAG, "Dioda RGB status na GPIO%d: %s, jasnosc %d%%",
              LED_GPIO, s_enabled ? "wlaczona" : "wylaczona", s_brightness);
 }

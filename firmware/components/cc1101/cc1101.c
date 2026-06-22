@@ -446,6 +446,13 @@ static void rx_task(void *arg) {
 
         if (frame.len >= 10 && s_callback)
             s_callback(&frame);
+
+        // Diagnostyka stosu rx_task co 50 ramek (weryfikacja zapasu po zmniejszeniu).
+        static int s_frame_cnt = 0;
+        if (++s_frame_cnt % 50 == 0) {
+            UBaseType_t hw = uxTaskGetStackHighWaterMark(NULL);
+            ESP_LOGI(TAG, "rx_task min. wolny stos: %u B", (unsigned)(hw * sizeof(StackType_t)));
+        }
     }
 }
 
@@ -485,7 +492,7 @@ void cc1101_init(const cc1101_config_t *cfg) {
 void cc1101_start_receive(wmbus_frame_cb_t callback) {
     s_callback = callback;
     s_rx_stop = false;
-    xTaskCreate(rx_task, "cc1101_rx", 12288, NULL, 6, &s_rx_task);
+    xTaskCreate(rx_task, "cc1101_rx", 10240, NULL, 7, &s_rx_task);
     ESP_LOGI(TAG, "Odbior wMbus uruchomiony");
 }
 

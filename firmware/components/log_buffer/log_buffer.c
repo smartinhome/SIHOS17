@@ -6,7 +6,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 
-#define LOG_BUF_SIZE 16384   // 8 KB bufor kolowy
+#define LOG_BUF_SIZE 8192   // 8 KB bufor kolowy
 
 static char              s_buf[LOG_BUF_SIZE];
 static size_t            s_head = 0;     // pozycja zapisu

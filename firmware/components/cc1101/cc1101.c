@@ -242,6 +242,8 @@ static size_t wmbus_frame_size(uint8_t l_field) {
     return l_field + 1 + 2 * nrBlocks;
 }
 
+static int s_decode_err_seg = -1;  // diagnostyka: segment na ktorym pekl dekoder
+
 static int decode_3of6(const uint8_t *coded, size_t coded_len,
                        uint8_t *out, size_t out_max) {
     static const int8_t lut[64] = {
@@ -280,7 +282,7 @@ static int decode_3of6(const uint8_t *coded, size_t coded_len,
         code >>= 2;
 
         int8_t nibble = lut_valid[code & 0x3F];
-        if (nibble < 0) return 0; // nieprawidłowy kod
+        if (nibble < 0) { s_decode_err_seg = (int)i; return 0; } // nieprawidlowy kod
 
         if (i % 2 == 0) {
             if (out_len >= (int)out_max) break;
@@ -430,13 +432,17 @@ static void rx_task(void *arg) {
                 if (rxlen >= expected) complete = true;
                 break;
             }
-            // Opoznienie adaptacyjne: gdy FIFO sie zapelnia (>32/64 B),
-            // nie czekaj pelnego ticka - czytaj szybciej by uniknac overflow
-            // przy dlugich ramkach (Amiplus 326B). Przy malym FIFO oddaj CPU.
-            if (nfifo >= 32) {
-                esp_rom_delay_us(300);   // krotka pauza, zaraz znow czytamy
+
+            // Opoznienie zalezne od tego ile jeszcze zostalo i jak pelne FIFO.
+            // FIFO 64B zapelnia sie w ~5ms (12.5 B/ms). Dla dlugich ramek NIE uzywamy
+            // vTaskDelay (1 tick = do 1ms+, ryzyko overflow przy wywlaszczeniu) -
+            // tylko krotki busy-wait, by zdazyc oproznic FIFO przed przepelnieniem.
+            if (remaining > 64) {
+                // Dluga ramka wciaz w toku - czytaj czesto, krotka pauza.
+                esp_rom_delay_us(nfifo >= 32 ? 200 : 1500);
             } else {
-                vTaskDelay(1);            // oddaj CPU (HTTP responsywny)
+                // Koncowka ramki - oddaj CPU normalnie (juz nie grozi overflow).
+                vTaskDelay(1);
             }
         }
         strobe(S_SFRX);
@@ -448,9 +454,16 @@ static void rx_task(void *arg) {
         }
 
         // ---- Dekoduj cala ramke 3of6 ----
+        s_decode_err_seg = -1;
         int dlen = decode_3of6(rxbuf, rxlen, decoded, sizeof(decoded));
         if (dlen <= 0) {
-            ESP_LOGW(TAG, "T1: blad 3of6 po odbiorze (L=%d rxlen=%d)", l_field, (int)rxlen);
+            // Diagnostyka: na ktorym segmencie/bajcie pekl dekoder.
+            // Segment 6-bitowy -> bajt zrodlowy = seg*6/8. Jesli blad blisko konca,
+            // to prawdopodobnie overflow/zgubione bajty; jesli rozproszony - bledy radiowe.
+            int errbyte = s_decode_err_seg >= 0 ? (s_decode_err_seg * 6 / 8) : -1;
+            ESP_LOGW(TAG, "T1: blad 3of6 (L=%d rxlen=%d) seg=%d/~%d bajt=%d/%d rssi=%d",
+                     l_field, (int)rxlen, s_decode_err_seg, (int)(rxlen*8/6),
+                     errbyte, (int)rxlen, rssi);
             continue;
         }
 

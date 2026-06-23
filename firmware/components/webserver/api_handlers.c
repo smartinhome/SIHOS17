@@ -108,6 +108,8 @@ static temperature_sensor_handle_t s_temp_sensor = NULL;
 static bool s_temp_ready = false;
 
 static void system_temp_init(void) {
+    // Wycisz jednorazowy log "Range [-10C ~ 80C]" z komponentu ESP-IDF.
+    esp_log_level_set("temperature_sensor", ESP_LOG_WARN);
     temperature_sensor_config_t cfg = TEMPERATURE_SENSOR_CONFIG_DEFAULT(-10, 80);
     if (temperature_sensor_install(&cfg, &s_temp_sensor) == ESP_OK &&
         temperature_sensor_enable(s_temp_sensor) == ESP_OK) {
@@ -352,7 +354,6 @@ static esp_err_t handle_dashboard(httpd_req_t *req) {
         }
     }
     snprintf(buf + pos, sizeof(buf) - pos, "]}");
-    ESP_LOGI(TAG, "DASH GET: zwracam %s", buf);
     resp_json(req, buf);
     return ESP_OK;
 }

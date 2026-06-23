@@ -358,8 +358,41 @@ static esp_err_t handle_dashboard(httpd_req_t *req) {
     return ESP_OK;
 }
 
-static esp_err_t handle_led(httpd_req_t *req) {
+// GET  /api/meter/names -> {"id1":"nazwa1","id2":"nazwa2",...}
+// POST /api/meter/name  body {"id":"56989134","name":"Licznik glowny"}
+//   pusta nazwa kasuje wpis (powrot do ID).
+static esp_err_t handle_meter_name(httpd_req_t *req) {
+    if (req->method == HTTP_POST) {
+        char body[160];
+        read_body(req, body, sizeof(body));
+        char id[12] = {0};
+        char name[32] = {0};
+        char *p = strstr(body, "\"id\":\"");
+        if (p) { p += 6; int n = 0; while (*p && *p != '"' && n < 11) id[n++] = *p++; id[n] = 0; }
+        p = strstr(body, "\"name\":\"");
+        if (p) { p += 8; int n = 0; while (*p && *p != '"' && n < 31) name[n++] = *p++; name[n] = 0; }
+        if (!valid_meter_id(id)) { resp_err(req, "zle id"); return ESP_OK; }
+        nvs_config_set_meter_name(id, name);
+        ESP_LOGI(TAG, "NAZWA: id='%s' name='%s'", id, name);
+        resp_ok(req);
+        return ESP_OK;
+    }
+    // GET - zwroc mape ID -> nazwa (tylko wpisy z nazwa).
     sih_config_t cfg = nvs_config_get();
+    char buf[MAX_METERS * 48 + 4];
+    int pos = snprintf(buf, sizeof(buf), "{");
+    bool first = true;
+    for (int i = 0; i < MAX_METERS; i++) {
+        if (cfg.meter_names[i].id_hex[0] && cfg.meter_names[i].name[0]) {
+            pos += snprintf(buf + pos, sizeof(buf) - pos, "%s\"%s\":\"%s\"",
+                            first ? "" : ",", cfg.meter_names[i].id_hex, cfg.meter_names[i].name);
+            first = false;
+        }
+    }
+    snprintf(buf + pos, sizeof(buf) - pos, "}");
+    resp_json(req, buf);
+    return ESP_OK;
+}
     if (req->method == HTTP_POST) {
         char body[96];
         read_body(req, body, sizeof(body));
@@ -718,6 +751,8 @@ void api_register_handlers(httpd_handle_t server) {
         { .uri="/api/led-status",  .method=HTTP_POST, .handler=handle_led_status,  .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/dashboard",   .method=HTTP_GET,  .handler=handle_dashboard,   .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/dashboard",   .method=HTTP_POST, .handler=handle_dashboard,   .user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/meter/names", .method=HTTP_GET,  .handler=handle_meter_name,  .user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/meter/name",  .method=HTTP_POST, .handler=handle_meter_name,  .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/system",      .method=HTTP_GET,  .handler=handle_system,      .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/history/list", .method=HTTP_GET,  .handler=handle_history_list, .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/history",      .method=HTTP_GET,  .handler=handle_history,      .user_ctx=NULL, .is_websocket=false },

@@ -26,7 +26,17 @@ typedef struct {
     char           dashboard_ids[MAX_METERS][12]; // ID licznikow przypietych do dashboard (niezalezne od meters[])
     bool           led_status_enabled;     // dioda RGB statusu WiFi (GPIO8)
     uint8_t        led_status_brightness;  // jasnosc 0-100 (%)
+    // Wlasne nazwy licznikow (niezalezne od meters[]) - ID -> nazwa.
+    // Pozwala nazwac dowolny wykryty licznik bez dodawania go do meters[].
+    struct {
+        char id_hex[12];
+        char name[32];
+    } meter_names[MAX_METERS];
 } sih_config_t;
+
+// Pobierz/ustaw wlasna nazwe licznika po ID. Zwraca "" gdy brak.
+const char *nvs_config_meter_name(const char *id_hex);
+void        nvs_config_set_meter_name(const char *id_hex, const char *name);
 
 void         nvs_config_init(void);
 sih_config_t nvs_config_get(void);

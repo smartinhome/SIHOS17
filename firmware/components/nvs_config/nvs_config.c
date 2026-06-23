@@ -94,3 +94,44 @@ void nvs_config_reset(void) {
     set_defaults(&g_cfg);
     ESP_LOGW(TAG, "Konfiguracja zresetowana do domyślnej");
 }
+
+// Zwraca wlasna nazwe licznika po ID (case-insensitive) lub "" gdy brak.
+const char *nvs_config_meter_name(const char *id_hex) {
+    if (!id_hex || !id_hex[0]) return "";
+    for (int i = 0; i < MAX_METERS; i++) {
+        if (g_cfg.meter_names[i].id_hex[0] &&
+            strcasecmp(g_cfg.meter_names[i].id_hex, id_hex) == 0) {
+            return g_cfg.meter_names[i].name;
+        }
+    }
+    return "";
+}
+
+// Ustawia wlasna nazwe licznika po ID. Pusta nazwa kasuje wpis.
+void nvs_config_set_meter_name(const char *id_hex, const char *name) {
+    if (!id_hex || !id_hex[0]) return;
+    int idx = -1, free_idx = -1;
+    for (int i = 0; i < MAX_METERS; i++) {
+        if (g_cfg.meter_names[i].id_hex[0]) {
+            if (strcasecmp(g_cfg.meter_names[i].id_hex, id_hex) == 0) { idx = i; break; }
+        } else if (free_idx < 0) {
+            free_idx = i;
+        }
+    }
+    bool empty = (!name || !name[0]);
+    if (idx >= 0) {
+        if (empty) {
+            // Kasuj wpis (pusta nazwa = powrot do ID).
+            memset(&g_cfg.meter_names[idx], 0, sizeof(g_cfg.meter_names[idx]));
+        } else {
+            strlcpy(g_cfg.meter_names[idx].name, name, sizeof(g_cfg.meter_names[idx].name));
+        }
+    } else if (!empty && free_idx >= 0) {
+        strlcpy(g_cfg.meter_names[free_idx].id_hex, id_hex, sizeof(g_cfg.meter_names[free_idx].id_hex));
+        strlcpy(g_cfg.meter_names[free_idx].name, name, sizeof(g_cfg.meter_names[free_idx].name));
+    } else if (!empty) {
+        ESP_LOGW(TAG, "Brak miejsca na nazwe licznika %s", id_hex);
+        return;
+    }
+    nvs_config_save(&g_cfg);
+}

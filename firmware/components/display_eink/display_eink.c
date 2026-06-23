@@ -3,6 +3,7 @@
 #include "logo_data.h"
 #include "font_data.h"
 #include "history.h"
+#include "nvs_config.h"
 #include <stdio.h>
 #include <time.h>
 #include <string.h>
@@ -518,10 +519,13 @@ static void draw_meter_page(const char *id, int page_no, int total_pages) {
             main_idx = i; main_s = s; main_ok = true; break;
         }
     }
-    // Tytul i numer strony.
+    // Tytul i numer strony. Wlasna nazwa uzytkownika ma pierwszenstwo przed
+    // tytulem typu (Elektrycznosc/Woda/Gaz); gdy brak nazwy - tytul typu.
     int kind = main_ok ? main_s.kind : 0;
     fb_fill_rect(0, 0, LCD_W, 16, 1);
-    fb_draw_text_inv(&F14, 3, 0, kind ? kind_title(kind) : "Licznik");
+    const char *cust = nvs_config_meter_name(id);
+    const char *title = (cust && cust[0]) ? cust : (kind ? kind_title(kind) : "Licznik");
+    fb_draw_text_inv(&F14, 3, 0, title);
     char pg[12];
     snprintf(pg, sizeof(pg), "%d/%d", page_no, total_pages);
     int pgw = fb_text_width(&F14, pg);

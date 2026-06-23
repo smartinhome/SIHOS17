@@ -243,6 +243,7 @@ static size_t wmbus_frame_size(uint8_t l_field) {
 }
 
 static int s_decode_err_seg = -1;  // diagnostyka: segment na ktorym pekl dekoder
+static int s_decode_partial_len = 0; // ile bajtow zdekodowano przed bledem
 
 static int decode_3of6(const uint8_t *coded, size_t coded_len,
                        uint8_t *out, size_t out_max) {
@@ -282,7 +283,11 @@ static int decode_3of6(const uint8_t *coded, size_t coded_len,
         code >>= 2;
 
         int8_t nibble = lut_valid[code & 0x3F];
-        if (nibble < 0) { s_decode_err_seg = (int)i; return 0; } // nieprawidlowy kod
+        if (nibble < 0) {
+            s_decode_err_seg = (int)i;
+            s_decode_partial_len = out_len;  // ile bajtow zdazylo sie zdekodowac
+            return 0;
+        } // nieprawidlowy kod
 
         if (i % 2 == 0) {
             if (out_len >= (int)out_max) break;
@@ -449,15 +454,32 @@ static void rx_task(void *arg) {
 
         // ---- Dekoduj cala ramke 3of6 ----
         s_decode_err_seg = -1;
+        s_decode_partial_len = 0;
         int dlen = decode_3of6(rxbuf, rxlen, decoded, sizeof(decoded));
         if (dlen <= 0) {
             // Diagnostyka: na ktorym segmencie/bajcie pekl dekoder.
             // Segment 6-bitowy -> bajt zrodlowy = seg*6/8. Jesli blad blisko konca,
             // to prawdopodobnie overflow/zgubione bajty; jesli rozproszony - bledy radiowe.
             int errbyte = s_decode_err_seg >= 0 ? (s_decode_err_seg * 6 / 8) : -1;
-            ESP_LOGW(TAG, "T1: blad 3of6 (L=%d rxlen=%d) seg=%d/~%d bajt=%d/%d rssi=%d",
-                     l_field, (int)rxlen, s_decode_err_seg, (int)(rxlen*8/6),
-                     errbyte, (int)rxlen, rssi);
+
+            // Jesli naglowek (>=8 bajtow) zdekodowal sie przed bledem, pokaz manufacturer
+            // i ID - by odroznic ramki wlasnych licznikow od obcych/zakloconych.
+            if (s_decode_partial_len >= 8) {
+                uint16_t mfct = decoded[2] | (decoded[3] << 8);
+                char mstr[4] = {
+                    (char)(((mfct >> 10) & 0x1F) + 64),
+                    (char)(((mfct >> 5) & 0x1F) + 64),
+                    (char)((mfct & 0x1F) + 64), 0
+                };
+                ESP_LOGW(TAG, "T1: blad 3of6 (L=%d rxlen=%d) %s id=%02X%02X%02X%02X bajt=%d/%d rssi=%d",
+                         l_field, (int)rxlen, mstr,
+                         decoded[7], decoded[6], decoded[5], decoded[4],
+                         errbyte, (int)rxlen, rssi);
+            } else {
+                // Blad za wczesnie by odczytac ID - pokaz tylko pozycje.
+                ESP_LOGW(TAG, "T1: blad 3of6 (L=%d rxlen=%d) bajt=%d/%d rssi=%d (naglowek nieczytelny)",
+                         l_field, (int)rxlen, errbyte, (int)rxlen, rssi);
+            }
             continue;
         }
 

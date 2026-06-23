@@ -79,7 +79,7 @@ static const char *TAG = "CC1101";
 #define ST_PKTSTATUS  0x38
 
 // Stale strumieniowego odbioru
-#define RX_FIFO_THRESHOLD 10
+#define RX_FIFO_THRESHOLD 0x07 // 32B w FIFO (jak ESPHome)
 #define MAX_FRAME_SIZE    450   // bylo 290; Amiplus 3-faz zakodowany 3of6 = 326B
 #define MARC_RETRY        5
 
@@ -100,7 +100,7 @@ static const uint8_t WMBUS_CFG[][2] = {
     {R_IOCFG2,   0x06}, // GDO2: sync word sent/received
     {R_IOCFG1,   0x2E},
     {R_IOCFG0,   0x00}, // GDO0: RX FIFO threshold
-    {R_FIFOTHR,  0x0A},
+    {R_FIFOTHR,  0x07}, // 32B zapas przed overflow (jak ESPHome, bylo 0x0A=20B)
     {R_SYNC1,    0x54}, // SYNC word high
     {R_SYNC0,    0x3D}, // SYNC word low
     {R_PKTLEN,   0xFF},
@@ -332,7 +332,7 @@ static void rx_task(void *arg) {
         strobe(S_SIDLE);
         strobe(S_SFTX);
         strobe(S_SFRX);
-        write_reg(R_FIFOTHR, 0x0A);
+        write_reg(R_FIFOTHR, 0x07); // jak ESPHome
         write_reg(R_PKTCTRL0, 0x02);   // infinite length na start
         size_t  rxlen = 0, expected = 0;
         uint8_t l_field = 0;

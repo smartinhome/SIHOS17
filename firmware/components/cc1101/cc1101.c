@@ -433,17 +433,11 @@ static void rx_task(void *arg) {
                 break;
             }
 
-            // Opoznienie zalezne od tego ile jeszcze zostalo i jak pelne FIFO.
-            // FIFO 64B zapelnia sie w ~5ms (12.5 B/ms). Dla dlugich ramek NIE uzywamy
-            // vTaskDelay (1 tick = do 1ms+, ryzyko overflow przy wywlaszczeniu) -
-            // tylko krotki busy-wait, by zdazyc oproznic FIFO przed przepelnieniem.
-            if (remaining > 64) {
-                // Dluga ramka wciaz w toku - czytaj czesto, krotka pauza.
-                esp_rom_delay_us(nfifo >= 32 ? 200 : 1500);
-            } else {
-                // Koncowka ramki - oddaj CPU normalnie (juz nie grozi overflow).
-                vTaskDelay(1);
-            }
+            // Oddaj CPU przez vTaskDelay - to pozwala radiu nasluchiwac kolejnych
+            // ramek i nie glodzi systemu (busy-wait z esp_rom_delay_us pogarszal
+            // ogolny zasieg/czestotliwosc odbioru). Przy 1000Hz tick = ~1ms,
+            // w 1ms przychodzi ~12B, FIFO 64B ma zapas. Czytamy co iteracje wyzej.
+            vTaskDelay(1);
         }
         strobe(S_SFRX);
 

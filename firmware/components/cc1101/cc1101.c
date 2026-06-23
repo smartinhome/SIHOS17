@@ -124,9 +124,9 @@ static const uint8_t WMBUS_CFG[][2] = {
     {R_MCSM0,    0x18},
     {R_FOCCFG,   0x2E},
     {R_BSCFG,    0xBF},
-    {R_AGCCTRL2, 0x07}, // pelne wzmocnienie LNA dla slabych sygnalow (bylo 0x43)
-    {R_AGCCTRL1, 0x00}, // czulszy prog (bylo 0x09)
-    {R_AGCCTRL0, 0x91}, // wolniejszy filtr AGC, stabilniejszy (bylo 0xB5)
+    {R_AGCCTRL2, 0x43},
+    {R_AGCCTRL1, 0x09},
+    {R_AGCCTRL0, 0xB5},
     {R_WOREVT1,  0x87},
     {R_WOREVT0,  0x6B},
     {R_WORCTRL,  0xFB},

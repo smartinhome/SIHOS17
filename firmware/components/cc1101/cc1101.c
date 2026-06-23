@@ -424,6 +424,23 @@ static void rx_task(void *arg) {
 
             size_t remaining = expected - rxlen;
 
+            // Wykrycie konca ramki przez GDO2 (jak fork bodek85): GDO2 jest HIGH
+            // podczas odbioru ramki (sync word), a spada na LOW gdy ramka sie konczy.
+            // Gdy GDO2 LOW i mamy juz dane - doczytaj reszte z FIFO i zakoncz.
+            // To precyzyjniejsze niz zgadywanie przez MARCSTATE/RXBYTES.
+            if (rxlen > 4 && gpio_get_level(s_cfg.pin_gdo2) == 0) {
+                uint8_t fin = read_status(ST_RXBYTES) & 0x7F;
+                if (fin > 0) {
+                    size_t td = (remaining < fin) ? remaining : fin;
+                    if (td > 0 && rxlen + td <= MAX_FRAME_SIZE) {
+                        rx_fifo_read(rxbuf + rxlen, td);
+                        rxlen += td;
+                    }
+                }
+                if (rxlen >= expected) complete = true;
+                break;
+            }
+
             // Dla dlugich ramek: gdy zostanie < 256 B, przelacz infinite->fixed,
             // by chip sam zakonczyl odbior na PKTLEN (expected % 256).
             if (!length_fixed && remaining < 256) {

@@ -549,18 +549,18 @@ static void draw_meter_page(const char *id, int page_no, int total_pages) {
         fb_draw_text(&F24, 3, 18, big);
         fb_draw_text(&F14, 3, 44, "zużycie dziś");
 
-        // Dla wody: stan licznika w litrach w prawym gornym rogu (analogicznie do
+        // Dla wody: zuzycie DZIS w litrach w prawym gornym rogu (analogicznie do
         // aktualnego poboru W przy energii). m3 zostaja w glownym widoku, litry to
-        // dodatkowa informacja (czytelniejsza dla malych wartosci).
-        if (kind == 1) {
+        // dodatkowa informacja (czytelniejsza dla malych dziennych wartosci).
+        if (kind == 1 && main_s.has_today) {
             char lt[20];
-            snprintf(lt, sizeof(lt), "%.0f L", main_s.last_total * 1000.0);
+            snprintf(lt, sizeof(lt), "%.0f L", main_s.today * 1000.0);
             int lt_w = fb_text_width(&F24, lt);
             int lt_x = LCD_W - lt_w - 4;
             fb_fill_rect(lt_x - 4, 17, LCD_W - lt_x + 4, 26, 1);
             fb_draw_text_inv(&F24, lt_x, 18, lt);
-            int lbl_w = fb_text_width(&F14, "licznik L");
-            fb_draw_text(&F14, LCD_W - lbl_w - 4, 44, "licznik L");
+            int lbl_w = fb_text_width(&F14, "dziś L");
+            fb_draw_text(&F14, LCD_W - lbl_w - 4, 44, "dziś L");
         }
 
         // POLA CHWILOWE (moc, napiecia) - jesli sledzone, w prawej czesci ekranu.

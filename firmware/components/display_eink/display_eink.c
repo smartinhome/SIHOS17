@@ -473,6 +473,23 @@ static void fmt_val(char *buf, int cap, double v, const char *unit, int decimals
     else snprintf(buf, cap, "%.3f %s", v, unit);
 }
 
+// Czy to pole wody w m3 (do pokazania w litrach na ekranie). Gaz (kind==3)
+// zostaje w m3 - tylko liczniki wody (kind==1) pokazujemy w litrach.
+static bool is_water_m3(const char *unit, int kind) {
+    return kind == 1 && unit && (strstr(unit, "m") != NULL);
+}
+
+// Formatuj wartosc na ekran: dla wody przelicz m3->litry (x1000, bez miejsc),
+// dla pozostalych uzyj standardowego fmt_val z podana liczba miejsc.
+static void fmt_val_disp(char *buf, int cap, double v, const char *unit,
+                         int decimals, int kind) {
+    if (is_water_m3(unit, kind)) {
+        snprintf(buf, cap, "%.0f L", v * 1000.0);
+    } else {
+        fmt_val(buf, cap, v, unit, decimals);
+    }
+}
+
 // Ladniejsza nazwa pola do wyswietlenia.
 static const char* field_label(const char *field) {
     if (strstr(field, "energia")) return "energia";
@@ -544,8 +561,8 @@ static void draw_meter_page(const char *id, int page_no, int total_pages) {
 
         // ZUZYCIE DZIS duza czcionka.
         char big[24];
-        if (main_s.has_today) fmt_val(big, sizeof(big), main_s.today, unit, 3);
-        else snprintf(big, sizeof(big), "--.- %s", unit);
+        if (main_s.has_today) fmt_val_disp(big, sizeof(big), main_s.today, unit, 3, kind);
+        else snprintf(big, sizeof(big), "--.- %s", is_water_m3(unit, kind) ? "L" : unit);
         fb_draw_text(&F24, 3, 18, big);
         fb_draw_text(&F14, 3, 44, "zużycie dziś");
 
@@ -584,16 +601,16 @@ static void draw_meter_page(const char *id, int page_no, int total_pages) {
         fb_rect(2, 58, LCD_W - 4, 48);
         char line[32];
         if (main_s.has_yesterday) {
-            fmt_val(line, sizeof(line), main_s.yesterday, unit, 3);
+            fmt_val_disp(line, sizeof(line), main_s.yesterday, unit, 3, kind);
             fb_draw_text(&F14, 7, 60, "wczoraj:");
             fb_draw_text(&F14, 80, 60, line);
         } else fb_draw_text(&F14, 7, 60, "wczoraj:   --");
         if (main_s.has_day_before) {
-            fmt_val(line, sizeof(line), main_s.day_before, unit, 3);
+            fmt_val_disp(line, sizeof(line), main_s.day_before, unit, 3, kind);
             fb_draw_text(&F14, 7, 74, "przedwcz:");
             fb_draw_text(&F14, 80, 74, line);
         } else fb_draw_text(&F14, 7, 74, "przedwcz:  --");
-        fmt_val(line, sizeof(line), main_s.last_total, unit, 3);
+        fmt_val_disp(line, sizeof(line), main_s.last_total, unit, 3, kind);
         fb_draw_text(&F14, 7, 90, "licznik:");
         fb_draw_text(&F14, 80, 90, line);
     } else {
@@ -608,7 +625,7 @@ static void draw_meter_page(const char *id, int page_no, int total_pages) {
             snprintf(line, sizeof(line), "%s:", field_label(f));
             fb_draw_text(&F14, 6, y, line);
             char val[24];
-            fmt_val(val, sizeof(val), s.last_total, unit, s.cumulative ? 3 : 0);
+            fmt_val_disp(val, sizeof(val), s.last_total, unit, s.cumulative ? 3 : 0, s.kind);
             fb_draw_text(&F14, 130, y, val);
             if (s.last_ts > last_ts) last_ts = s.last_ts;
             y += 16;

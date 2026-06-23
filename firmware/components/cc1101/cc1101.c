@@ -79,7 +79,7 @@ static const char *TAG = "CC1101";
 #define ST_PKTSTATUS  0x38
 
 // Stale strumieniowego odbioru
-#define RX_FIFO_THRESHOLD 0x07 // 32B w FIFO (jak ESPHome)
+#define RX_FIFO_THRESHOLD 10
 #define MAX_FRAME_SIZE    450   // bylo 290; Amiplus 3-faz zakodowany 3of6 = 326B
 #define MARC_RETRY        5
 
@@ -100,7 +100,7 @@ static const uint8_t WMBUS_CFG[][2] = {
     {R_IOCFG2,   0x06}, // GDO2: sync word sent/received
     {R_IOCFG1,   0x2E},
     {R_IOCFG0,   0x00}, // GDO0: RX FIFO threshold
-    {R_FIFOTHR,  0x07}, // 32B zapas przed overflow (jak ESPHome, bylo 0x0A=20B)
+    {R_FIFOTHR,  0x0A},
     {R_SYNC1,    0x54}, // SYNC word high
     {R_SYNC0,    0x3D}, // SYNC word low
     {R_PKTLEN,   0xFF},
@@ -147,6 +147,13 @@ static const uint8_t WMBUS_CFG[][2] = {
 };
 
 // ── SPI helpers ────────────────────────────────────────────
+// Maks. liczba ponowien odczytu gdy status byte = 0xFF (chip/SPI niegotowy).
+// Wzorowane na dzialajacym forku bodek85/esphome-components - kluczowe dla
+// niezawodnego odbioru, zwlaszcza dlugich ramek (Amiplus): gdy chip jest zajety
+// odbiorem, pierwszy bajt SPI bywa 0xFF; bez retry bralismy to za blad i ucinali ramke.
+#define SPI_MAX_RETRIES     5
+#define SPI_RETRY_DELAY_US  50
+
 static uint8_t spi_rw(uint8_t addr, uint8_t val) {
     spi_transaction_t t = {
         .flags   = SPI_TRANS_USE_TXDATA | SPI_TRANS_USE_RXDATA,
@@ -157,14 +164,31 @@ static uint8_t spi_rw(uint8_t addr, uint8_t val) {
     return t.rx_data[1];
 }
 
+// Odczyt z ponowieniem gdy status byte (rx_data[0]) == 0xFF (chip niegotowy).
+// Zwraca wartosc rejestru; po wyczerpaniu prob zwraca 0xFF.
+static uint8_t spi_read_retry(uint8_t addr, uint8_t val) {
+    for (uint8_t attempt = 0; attempt < SPI_MAX_RETRIES; attempt++) {
+        spi_transaction_t t = {
+            .flags   = SPI_TRANS_USE_TXDATA | SPI_TRANS_USE_RXDATA,
+            .length  = 16,
+            .tx_data = {addr, val},
+        };
+        ESP_ERROR_CHECK(spi_device_transmit(s_spi, &t));
+        if (t.rx_data[0] != 0xFF)   // status byte != 0xFF -> chip gotowy
+            return t.rx_data[1];
+        esp_rom_delay_us(SPI_RETRY_DELAY_US);
+    }
+    return 0xFF;  // chip naprawde niegotowy po wszystkich probach
+}
+
 static void write_reg(uint8_t addr, uint8_t val) { spi_rw(addr, val); }
 
 static uint8_t read_reg(uint8_t addr) {
-    return spi_rw(addr | READ_SINGLE, 0x00);
+    return spi_read_retry(addr | READ_SINGLE, 0x00);
 }
 
 static uint8_t read_status(uint8_t addr) {
-    return spi_rw(addr | READ_BURST, 0x00);
+    return spi_read_retry(addr | READ_BURST, 0x00);
 }
 
 static uint8_t strobe(uint8_t cmd) {
@@ -332,7 +356,7 @@ static void rx_task(void *arg) {
         strobe(S_SIDLE);
         strobe(S_SFTX);
         strobe(S_SFRX);
-        write_reg(R_FIFOTHR, 0x07); // jak ESPHome
+        write_reg(R_FIFOTHR, 0x0A);
         write_reg(R_PKTCTRL0, 0x02);   // infinite length na start
         size_t  rxlen = 0, expected = 0;
         uint8_t l_field = 0;

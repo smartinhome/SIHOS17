@@ -393,6 +393,9 @@ static esp_err_t handle_meter_name(httpd_req_t *req) {
     resp_json(req, buf);
     return ESP_OK;
 }
+
+static esp_err_t handle_led(httpd_req_t *req) {
+    sih_config_t cfg = nvs_config_get();
     if (req->method == HTTP_POST) {
         char body[96];
         read_body(req, body, sizeof(body));

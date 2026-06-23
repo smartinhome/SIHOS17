@@ -20,6 +20,23 @@ static uint16_t crc16(const uint8_t *d, int off, int len) {
 
 // ---------- removeBlockCrc: usuwa CRC blokow formatu A ----------
 // Zwraca dlugosc wyniku (zapisuje do out), lub kopiuje 1:1 gdy brak CRC.
+// Usuwa CRC blokow bez walidacji (gdy struktura pasuje do mode A z CRC).
+static int strip_block_crc(const uint8_t *d, int len, uint8_t *out, int out_cap) {
+    int n = 0;
+    for (int i = 0; i < 10 && n < out_cap; i++) out[n++] = d[i];
+    int pos = 12;
+    while (pos + 18 <= len) {
+        for (int i = 0; i < 16 && n < out_cap; i++) out[n++] = d[pos + i];
+        pos += 18;
+    }
+    if (pos < len - 2) {
+        int dl = (len - 2) - pos;
+        for (int i = 0; i < dl && n < out_cap; i++) out[n++] = d[pos + i];
+    }
+    if (n > 0) out[0] = n - 1;
+    return n;
+}
+
 static int remove_block_crc(const uint8_t *d, int len, uint8_t *out, int out_cap) {
     // Jesli CI juz na [10] (ramka bez CRC z telegramow testowych) - kopiuj 1:1
     if (len > 10 && (d[10] == 0x7A || d[10] == 0x72)) {
@@ -32,7 +49,16 @@ static int remove_block_crc(const uint8_t *d, int len, uint8_t *out, int out_cap
     int n = 0;
     // blok 1: 10 bajtow + 2 CRC
     if (crc16(d, 0, 10) != ((d[10] << 8) | d[11])) {
-        // CRC sie nie zgadza - zwroc oryginal (bezpieczny fallback)
+        // CRC naglowka niezgodne. Sprawdz czy to format mode-A z CRC (np. Amiplus CI=0xB1):
+        // dlugosc = (L+1) + 2 + nblk*2, a po usunieciu CRC na [10] pojawia sie 0x7A/0x72.
+        int L = d[0];
+        int nblk = (L + 1 - 10 + 15) / 16;  // ceil
+        int exp_len = (L + 1) + 2 + nblk * 2;
+        if (len == exp_len) {
+            int m = strip_block_crc(d, len, out, out_cap);
+            if (m > 10 && (out[10] == 0x7A || out[10] == 0x72)) return m;
+        }
+        // fallback - zwroc oryginal
         if (len > out_cap) len = out_cap;
         memcpy(out, d, len);
         return len;

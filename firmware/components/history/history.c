@@ -87,6 +87,52 @@ static void meter_path(const char *id, char *out, int cap) {
     snprintf(out, cap, "/spiffs/h_%s.bin", safe);
 }
 
+// Sciezka archiwum godzinowego (miesiac) - tylko na flash, nie w RAM.
+static void archive_path(const char *id, char *out, int cap) {
+    char safe[28];
+    int j = 0;
+    for (int i = 0; id[i] && j < (int)sizeof(safe) - 1; i++)
+        safe[j++] = (id[i] == ':') ? '_' : id[i];
+    safe[j] = 0;
+    snprintf(out, cap, "/spiffs/ha_%s.bin", safe);
+}
+
+// Wspolny bufor roboczy archiwum (5.8KB .bss) - uzywany przez append i get_day.
+static hist_bucket_t s_arc_buf[HIST_ARCHIVE_HOURS];
+
+// Dopisz/zaktualizuj punkt godzinowy w archiwum miesiecznym (ring buffer w pliku).
+// Plik: [int count][hist_bucket_t x count] (max HIST_ARCHIVE_HOURS).
+// Gdy ta sama godzina co ostatnia - aktualizuje total; inaczej dopisuje (z rotacja).
+static void archive_append_hour(const char *id, uint32_t hour_ts, float total) {
+    if (!s_fs_ok) return;
+    char path[48]; archive_path(id, path, sizeof(path));
+    int count = 0;
+    FILE *f = fopen(path, "rb");
+    if (f) {
+        if (fread(&count, sizeof(int), 1, f) != 1) count = 0;
+        if (count < 0 || count > HIST_ARCHIVE_HOURS) count = 0;
+        if (count > 0) fread(s_arc_buf, sizeof(hist_bucket_t), count, f);
+        fclose(f);
+    }
+    if (count > 0 && s_arc_buf[count-1].ts == hour_ts) {
+        s_arc_buf[count-1].total = total;  // ta sama godzina - aktualizuj
+    } else {
+        if (count >= HIST_ARCHIVE_HOURS) {
+            // rotacja - usun najstarszy
+            memmove(s_arc_buf, s_arc_buf + 1, (HIST_ARCHIVE_HOURS - 1) * sizeof(hist_bucket_t));
+            count = HIST_ARCHIVE_HOURS - 1;
+        }
+        s_arc_buf[count].ts = hour_ts;
+        s_arc_buf[count].total = total;
+        count++;
+    }
+    f = fopen(path, "wb");
+    if (!f) { ESP_LOGW(TAG, "nie moge zapisac archiwum %s", path); return; }
+    fwrite(&count, sizeof(int), 1, f);
+    fwrite(s_arc_buf, sizeof(hist_bucket_t), count, f);
+    fclose(f);
+}
+
 static void save_meter(meter_hist_t *m) {
     if (!s_fs_ok) return;
     char path[48]; meter_path(m->id, path, sizeof(path));
@@ -326,6 +372,9 @@ void history_on_field(const char *id_hex, const char *field, double value,
     series_update(m->years,  &m->n_years,  HIST_YEARS,  floor_year(ts_unix),  ft);
     rt_update(m, ts_unix, ft);
 
+    // Archiwum godzinowe (miesiac) na flash dla sledzonego pola.
+    archive_append_hour(m->id, bh, ft);
+
     if (hour_closed) save_meter(m);
     if (s_mutex) xSemaphoreGive(s_mutex);
 }
@@ -375,7 +424,54 @@ int history_get_json(const char *id_hex, const char *res, char *buf, int buf_cap
     return n;
 }
 
-int history_list_json(char *buf, int buf_cap) {
+// Zwraca godzinowe zuzycie z konkretnego dnia z archiwum miesiecznego (flash).
+// Czyta plik archiwum, filtruje punkty z wybranej doby, liczy zuzycie jako roznice
+// kolejnych totali (dla kumulacyjnych) lub wartosc (dla chwilowych).
+int history_get_day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf_cap) {
+    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
+    // Pobierz metadane (kind, cumulative) z RAM jesli licznik zaladowany.
+    meter_hist_t *m = get_or_load(id_hex, false);
+    int kind = m ? m->kind : 0;
+    int cumulative = m ? m->cumulative : 1;
+
+    uint32_t d0 = floor_day(day_ts);          // poczatek wybranej doby
+    uint32_t d1 = d0 + 86400;                  // poczatek nastepnej doby
+
+    int n = snprintf(buf, buf_cap, "{\"id\":\"%s\",\"kind\":%d,\"cumulative\":%d,\"points\":[",
+                     id_hex ? id_hex : "", kind, cumulative);
+
+    char path[48]; archive_path(id_hex, path, sizeof(path));
+    FILE *f = s_fs_ok ? fopen(path, "rb") : NULL;
+    if (f) {
+        int count = 0;
+        if (fread(&count, sizeof(int), 1, f) != 1) count = 0;
+        if (count < 0 || count > HIST_ARCHIVE_HOURS) count = 0;
+        if (count > 0) fread(s_arc_buf, sizeof(hist_bucket_t), count, f);
+        fclose(f);
+        bool first = true;
+        for (int i = 0; i < count && n < buf_cap - 60; i++) {
+            if (s_arc_buf[i].ts < d0 || s_arc_buf[i].ts >= d1) continue;  // tylko wybrany dzien
+            float v;
+            if (cumulative) {
+                // zuzycie = roznica wzgledem poprzedniej godziny (jesli ciagla)
+                if (i > 0 && s_arc_buf[i-1].ts == s_arc_buf[i].ts - 3600) {
+                    v = s_arc_buf[i].total - s_arc_buf[i-1].total;
+                    if (v < 0) v = 0;
+                } else {
+                    v = 0;  // brak odniesienia - pierwsza godzina dnia bez poprzedniej
+                }
+            } else {
+                v = s_arc_buf[i].total;  // chwilowe (moc/napiecie)
+            }
+            n += snprintf(buf + n, buf_cap - n, "%s{\"t\":%u,\"v\":%.3f}",
+                          first ? "" : ",", (unsigned)s_arc_buf[i].ts, v);
+            first = false;
+        }
+    }
+    n += snprintf(buf + n, buf_cap - n, "]}");
+    if (s_mutex) xSemaphoreGive(s_mutex);
+    return n;
+}
     if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
     int n = snprintf(buf, buf_cap, "[");
     bool first = true;

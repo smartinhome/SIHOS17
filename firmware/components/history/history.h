@@ -4,7 +4,8 @@
 #include <stddef.h>
 
 // Liczba kubelkow per rozdzielczosc (jak HA Energy, z zapasem)
-#define HIST_HOURS   168   // 7 dni godzinowo
+#define HIST_HOURS   168   // 7 dni godzinowo (w RAM)
+#define HIST_ARCHIVE_HOURS 744  // 31 dni godzinowo (tylko na flash, archiwum)
 #define HIST_DAYS    90    // 90 dni
 #define HIST_MONTHS  24    // 24 miesiace
 #define HIST_YEARS   10    // 10 lat
@@ -39,6 +40,11 @@ void history_on_field(const char *id_hex, const char *field, double value,
 // res: "rt"|"hour"|"day"|"month"|"year". Zapisuje do buf (zwraca dlugosc).
 // Zwraca zuzycie (roznice) miedzy kolejnymi kubelkami - styl HA Energy.
 int history_get_json(const char *id_hex, const char *res, char *buf, int buf_cap);
+
+// Zwraca godzinowe zuzycie z konkretnego dnia (archiwum miesieczne na flash).
+// day_ts: dowolny unix timestamp z wybranego dnia (uzywany jest floor do doby).
+// Format JSON jak history_get_json: {"id":..,"kind":..,"cumulative":..,"points":[{"t":..,"v":..}]}
+int history_get_day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf_cap);
 
 // Lista licznikow ktore maja historie (dla zakladki). JSON tablica.
 int history_list_json(char *buf, int buf_cap);

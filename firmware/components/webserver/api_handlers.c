@@ -1,4 +1,5 @@
 #include "api_handlers.h"
+#include <time.h>
 #include "wmbus_decoder.h"
 #include "nvs_config.h"
 #include "wifi_manager.h"
@@ -77,6 +78,34 @@ static esp_err_t handle_history(httpd_req_t *req) {
     char *buf = malloc(8192);
     if (!buf) { httpd_resp_send_500(req); return ESP_OK; }
     history_get_json(id, res, buf, 8192);
+    resp_json(req, buf);
+    free(buf);
+    return ESP_OK;
+}
+
+// GET /api/history/day?id=...&date=YYYY-MM-DD -> godzinowe zuzycie z danego dnia
+static esp_err_t handle_history_day(httpd_req_t *req) {
+    char id[40] = {0};
+    char date[16] = {0};
+    char query[96];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        char val[40];
+        if (httpd_query_key_value(query, "id", val, sizeof(val)) == ESP_OK)
+            strlcpy(id, val, sizeof(id));
+        if (httpd_query_key_value(query, "date", val, sizeof(val)) == ESP_OK)
+            strlcpy(date, val, sizeof(date));
+    }
+    if (strlen(id) == 0) { resp_err(req, "brak id"); return ESP_OK; }
+    // Parsuj YYYY-MM-DD na unix timestamp (poludnie lokalne, by floor_day trafil w dzien).
+    struct tm tmd = {0};
+    int y, mo, d;
+    if (sscanf(date, "%d-%d-%d", &y, &mo, &d) != 3) { resp_err(req, "zla data"); return ESP_OK; }
+    tmd.tm_year = y - 1900; tmd.tm_mon = mo - 1; tmd.tm_mday = d;
+    tmd.tm_hour = 12; tmd.tm_min = 0; tmd.tm_sec = 0;
+    uint32_t day_ts = (uint32_t)mktime(&tmd);
+    char *buf = malloc(8192);
+    if (!buf) { httpd_resp_send_500(req); return ESP_OK; }
+    history_get_day_json(id, day_ts, buf, 8192);
     resp_json(req, buf);
     free(buf);
     return ESP_OK;
@@ -759,6 +788,7 @@ void api_register_handlers(httpd_handle_t server) {
         { .uri="/api/system",      .method=HTTP_GET,  .handler=handle_system,      .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/history/list", .method=HTTP_GET,  .handler=handle_history_list, .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/history",      .method=HTTP_GET,  .handler=handle_history,      .user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/history/day",  .method=HTTP_GET,  .handler=handle_history_day,  .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/history/track",.method=HTTP_POST, .handler=handle_history_track,.user_ctx=NULL, .is_websocket=false },
         { .uri="/api/history/tracked",.method=HTTP_GET, .handler=handle_history_tracked,.user_ctx=NULL, .is_websocket=false },
         { .uri="/api/meters",      .method=HTTP_GET,  .handler=handle_meters,      .user_ctx=NULL, .is_websocket=false },

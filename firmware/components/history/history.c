@@ -472,6 +472,8 @@ int history_get_day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf
     if (s_mutex) xSemaphoreGive(s_mutex);
     return n;
 }
+
+int history_list_json(char *buf, int buf_cap) {
     if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
     int n = snprintf(buf, buf_cap, "[");
     bool first = true;

@@ -266,9 +266,10 @@ void history_set_tracked(const char *id_hex, bool tracked) {
     if (s_mutex) xSemaphoreGive(s_mutex);
 }
 
+static meter_hist_t *get_or_load(const char *id, bool create_if_missing);
+
 void history_init(void) {
     s_mutex = xSemaphoreCreateMutex();
-
     esp_vfs_spiffs_conf_t conf = {
         .base_path = "/spiffs",
         .partition_label = "littlefs",   // partycja z subtype spiffs
@@ -288,10 +289,15 @@ void history_init(void) {
     tracked_load();
     ESP_LOGI(TAG, "Sledzonych licznikow: %d", s_tracked_count);
 
-    // Wczytaj historie wszystkich plikow h_*.bin
-    // (proste: probujemy wczytac dla wszystkich slotow przez liste katalogu)
-    // SPIFFS nie ma katalogow - listujemy przez opendir na /spiffs
-    // Wczytanie nastapi leniwie przy pierwszym odczycie/zapisie kazdego licznika.
+    // Wczytaj od razu z flash wszystkie sledzone liczniki (eager load), zeby
+    // dane historyczne i ostatni stan byly dostepne natychmiast po restarcie -
+    // bez czekania na pierwsza ramke. Inaczej s_meters[].used=false i historia
+    // oraz karty dashboardu pokazuja "oczekiwanie" mimo danych na flash.
+    int loaded = 0;
+    for (int i = 0; i < s_tracked_count; i++) {
+        if (get_or_load(s_tracked[i], false)) loaded++;
+    }
+    ESP_LOGI(TAG, "Wczytano historie z flash dla %d/%d licznikow", loaded, s_tracked_count);
 }
 
 // znajdz w RAM, lub wczytaj z dysku WPROST do slotu (bez kopii na stosie!)

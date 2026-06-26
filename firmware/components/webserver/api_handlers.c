@@ -635,7 +635,7 @@ static esp_err_t handle_factory_reset(httpd_req_t *req) {
 //     [1B len nazwy][nazwa][4B len danych][dane]
 //   [1B 0x00 = koniec listy plikow]
 #define BACKUP_MAGIC "SBAK"
-#define BACKUP_VER   1
+#define BACKUP_VER   2
 
 // helper: dopisz do bufora z kontrola pojemnosci
 static int buf_append(char *buf, int *pos, int cap, const void *data, int len) {
@@ -654,11 +654,15 @@ static esp_err_t handle_backup_get(httpd_req_t *req) {
     buf_append(buf, &pos, cap, BACKUP_MAGIC, 4);
     uint8_t ver = BACKUP_VER;
     buf_append(buf, &pos, cap, &ver, 1);
-    // config
+    // tylko definicje licznikow (meters[] + meter_count) - bez WiFi, diod, AP,
+    // czestotliwosci, przypiec do dashboard i nazw. Kopia = liczniki + historia.
     sih_config_t cfg = nvs_config_get();
-    uint32_t clen = sizeof(sih_config_t);
-    buf_append(buf, &pos, cap, &clen, 4);
-    buf_append(buf, &pos, cap, &cfg, clen);
+    uint8_t mc = cfg.meter_count;
+    if (mc > MAX_METERS) mc = MAX_METERS;
+    buf_append(buf, &pos, cap, &mc, 1);
+    uint32_t mlen = (uint32_t)mc * sizeof(meter_config_t);
+    buf_append(buf, &pos, cap, &mlen, 4);
+    buf_append(buf, &pos, cap, cfg.meters, mlen);
     // pliki historii z /spiffs (h_*.bin oraz tracked)
     DIR *dir = opendir("/spiffs");
     if (dir) {
@@ -715,15 +719,21 @@ static esp_err_t handle_backup_post(httpd_req_t *req) {
     int p = 4;
     uint8_t ver = (uint8_t)buf[p]; p += 1;
     if (ver != BACKUP_VER) { resp_err(req, "zla wersja kopii"); free(buf); return ESP_OK; }
-    // config
-    uint32_t clen; memcpy(&clen, buf + p, 4); p += 4;
-    if (clen != sizeof(sih_config_t) || p + (int)clen > total) {
-        resp_err(req, "niezgodny config");
+    // tylko definicje licznikow - wczytaj do ISTNIEJACEJ konfiguracji, nie ruszajac
+    // WiFi, diod, AP, czestotliwosci, przypiec ani nazw.
+    uint8_t mc = (uint8_t)buf[p]; p += 1;
+    if (mc > MAX_METERS) { resp_err(req, "za duzo licznikow w kopii"); free(buf); return ESP_OK; }
+    uint32_t mlen; memcpy(&mlen, buf + p, 4); p += 4;
+    if (mlen != (uint32_t)mc * sizeof(meter_config_t) || p + (int)mlen > total) {
+        resp_err(req, "niezgodne dane licznikow");
         free(buf);
         return ESP_OK;
     }
-    sih_config_t cfg;
-    memcpy(&cfg, buf + p, clen); p += clen;
+    sih_config_t cfg = nvs_config_get();   // zachowaj biezaca konfiguracje
+    memset(cfg.meters, 0, sizeof(cfg.meters));
+    memcpy(cfg.meters, buf + p, mlen);     // podmien tylko liczniki
+    cfg.meter_count = mc;
+    p += mlen;
     nvs_config_save(&cfg);
     // pliki historii
     int restored = 0;
@@ -746,7 +756,7 @@ static esp_err_t handle_backup_post(httpd_req_t *req) {
         }
         p += dlen;
     }
-    ESP_LOGI(TAG, "Backup przywrocony: config + %d plikow historii", restored);
+    ESP_LOGI(TAG, "Backup przywrocony: %d licznikow + %d plikow historii", mc, restored);
     free(buf);
     resp_ok(req);
     vTaskDelay(pdMS_TO_TICKS(500));

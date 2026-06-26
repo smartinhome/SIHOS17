@@ -98,38 +98,80 @@ static void archive_path(const char *id, char *out, int cap) {
 }
 
 // Wspolny bufor roboczy archiwum (5.8KB .bss) - uzywany przez append i get_day.
-static hist_bucket_t s_arc_buf[HIST_ARCHIVE_HOURS];
+// Format pliku archiwum (ring buffer na flash, BEZ wczytywania calosci do RAM):
+//   naglowek: [int count][int head]  (count=ile rekordow, head=indeks najstarszego)
+//   dane: HIST_ARCHIVE_HOURS rekordow hist_bucket_t (ring)
+// Rekord logiczny i (0=najstarszy) jest fizycznie na pozycji (head+i)%cap.
+// Maly bufor roboczy do czytania dnia (max ~2 doby) - nie caly ring.
+#define ARC_HDR_BYTES (2 * (int)sizeof(int))
+#define ARC_DAY_BUF 64   // rekordow do bufora dnia (doba=24, zapas)
+static hist_bucket_t s_day_buf[ARC_DAY_BUF];
 
-// Dopisz/zaktualizuj punkt godzinowy w archiwum miesiecznym (ring buffer w pliku).
-// Plik: [int count][hist_bucket_t x count] (max HIST_ARCHIVE_HOURS).
-// Gdy ta sama godzina co ostatnia - aktualizuje total; inaczej dopisuje (z rotacja).
+// Odczyt naglowka archiwum. Zwraca true gdy plik istnieje i poprawny.
+static bool arc_read_header(FILE *f, int *count, int *head) {
+    if (fseek(f, 0, SEEK_SET) != 0) return false;
+    if (fread(count, sizeof(int), 1, f) != 1) return false;
+    if (fread(head, sizeof(int), 1, f) != 1) return false;
+    if (*count < 0 || *count > HIST_ARCHIVE_HOURS) { *count = 0; *head = 0; return false; }
+    if (*head < 0 || *head >= HIST_ARCHIVE_HOURS) *head = 0;
+    return true;
+}
+
+// Pozycja w pliku (bajty) rekordu fizycznego o indeksie phys.
+static long arc_rec_off(int phys) {
+    return (long)ARC_HDR_BYTES + (long)phys * (long)sizeof(hist_bucket_t);
+}
+
+// Dopisz/zaktualizuj punkt godzinowy w archiwum (ring buffer, strumieniowo).
+// NIE wczytuje calego pliku do RAM - tylko naglowek + ostatni rekord.
 static void archive_append_hour(const char *id, uint32_t hour_ts, float total) {
     if (!s_fs_ok) return;
     char path[48]; archive_path(id, path, sizeof(path));
-    int count = 0;
-    FILE *f = fopen(path, "rb");
-    if (f) {
-        if (fread(&count, sizeof(int), 1, f) != 1) count = 0;
-        if (count < 0 || count > HIST_ARCHIVE_HOURS) count = 0;
-        if (count > 0) fread(s_arc_buf, sizeof(hist_bucket_t), count, f);
-        fclose(f);
-    }
-    if (count > 0 && s_arc_buf[count-1].ts == hour_ts) {
-        s_arc_buf[count-1].total = total;  // ta sama godzina - aktualizuj
+
+    FILE *f = fopen(path, "r+b");
+    int count = 0, head = 0;
+    if (!f) {
+        // nowy plik - utworz z naglowkiem
+        f = fopen(path, "w+b");
+        if (!f) { ESP_LOGW(TAG, "nie moge utworzyc archiwum %s", path); return; }
+        count = 0; head = 0;
+        fwrite(&count, sizeof(int), 1, f);
+        fwrite(&head, sizeof(int), 1, f);
     } else {
-        if (count >= HIST_ARCHIVE_HOURS) {
-            // rotacja - usun najstarszy
-            memmove(s_arc_buf, s_arc_buf + 1, (HIST_ARCHIVE_HOURS - 1) * sizeof(hist_bucket_t));
-            count = HIST_ARCHIVE_HOURS - 1;
+        if (!arc_read_header(f, &count, &head)) { count = 0; head = 0; }
+    }
+
+    // Czy ostatnia zapisana godzina == hour_ts? (aktualizacja biezacej godziny)
+    if (count > 0) {
+        int last_phys = (head + count - 1) % HIST_ARCHIVE_HOURS;
+        hist_bucket_t last;
+        if (fseek(f, arc_rec_off(last_phys), SEEK_SET) == 0 &&
+            fread(&last, sizeof(last), 1, f) == 1 && last.ts == hour_ts) {
+            // ta sama godzina - nadpisz total
+            last.total = total;
+            fseek(f, arc_rec_off(last_phys), SEEK_SET);
+            fwrite(&last, sizeof(last), 1, f);
+            fclose(f);
+            return;
         }
-        s_arc_buf[count].ts = hour_ts;
-        s_arc_buf[count].total = total;
+    }
+
+    // Nowa godzina - dopisz rekord. Gdy pelne, przesun head (nadpisz najstarszy).
+    int write_phys;
+    if (count >= HIST_ARCHIVE_HOURS) {
+        write_phys = head;                       // nadpisz najstarszy
+        head = (head + 1) % HIST_ARCHIVE_HOURS;   // przesun okno
+    } else {
+        write_phys = (head + count) % HIST_ARCHIVE_HOURS;
         count++;
     }
-    f = fopen(path, "wb");
-    if (!f) { ESP_LOGW(TAG, "nie moge zapisac archiwum %s", path); return; }
+    hist_bucket_t rec = { hour_ts, total };
+    fseek(f, arc_rec_off(write_phys), SEEK_SET);
+    fwrite(&rec, sizeof(rec), 1, f);
+    // zaktualizuj naglowek
+    fseek(f, 0, SEEK_SET);
     fwrite(&count, sizeof(int), 1, f);
-    fwrite(s_arc_buf, sizeof(hist_bucket_t), count, f);
+    fwrite(&head, sizeof(int), 1, f);
     fclose(f);
 }
 
@@ -492,30 +534,45 @@ int history_get_day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf
     char path[48]; archive_path(id_hex, path, sizeof(path));
     FILE *f = s_fs_ok ? fopen(path, "rb") : NULL;
     if (f) {
-        int count = 0;
-        if (fread(&count, sizeof(int), 1, f) != 1) count = 0;
-        if (count < 0 || count > HIST_ARCHIVE_HOURS) count = 0;
-        if (count > 0) fread(s_arc_buf, sizeof(hist_bucket_t), count, f);
-        fclose(f);
-        bool first = true;
-        for (int i = 0; i < count && n < buf_cap - 60; i++) {
-            if (s_arc_buf[i].ts < d0 || s_arc_buf[i].ts >= d1) continue;  // tylko wybrany dzien
-            float v;
-            if (cumulative) {
-                // zuzycie = roznica wzgledem poprzedniej godziny (jesli ciagla)
-                if (i > 0 && s_arc_buf[i-1].ts == s_arc_buf[i].ts - 3600) {
-                    v = s_arc_buf[i].total - s_arc_buf[i-1].total;
-                    if (v < 0) v = 0;
-                } else {
-                    v = 0;  // brak odniesienia - pierwsza godzina dnia bez poprzedniej
+        int count = 0, head = 0;
+        if (arc_read_header(f, &count, &head)) {
+            // Zbierz do malego bufora godziny wybranej doby + 1 poprzednia (dla roznicy).
+            // Skan logiczny od najstarszego (head) do najnowszego, czytajac pojedyncze
+            // rekordy - bez wczytywania calego ringu do RAM.
+            int nb = 0;
+            hist_bucket_t prev; bool has_prev = false;
+            for (int i = 0; i < count && nb < ARC_DAY_BUF; i++) {
+                int phys = (head + i) % HIST_ARCHIVE_HOURS;
+                hist_bucket_t rec;
+                if (fseek(f, arc_rec_off(phys), SEEK_SET) != 0) break;
+                if (fread(&rec, sizeof(rec), 1, f) != 1) break;
+                if (rec.ts >= d0 && rec.ts < d1) {
+                    // godzina nalezy do wybranej doby
+                    s_day_buf[nb++] = rec;
+                } else if (rec.ts < d0) {
+                    prev = rec; has_prev = true;  // zapamietaj ostatnia przed doba
                 }
-            } else {
-                v = s_arc_buf[i].total;  // chwilowe (moc/napiecie)
             }
-            n += snprintf(buf + n, buf_cap - n, "%s{\"t\":%u,\"v\":%.3f}",
-                          first ? "" : ",", (unsigned)s_arc_buf[i].ts, v);
-            first = false;
+            fclose(f);
+            f = NULL;
+            bool first = true;
+            for (int i = 0; i < nb && n < buf_cap - 60; i++) {
+                float v;
+                if (cumulative) {
+                    hist_bucket_t *ref = NULL;
+                    if (i > 0 && s_day_buf[i-1].ts == s_day_buf[i].ts - 3600) ref = &s_day_buf[i-1];
+                    else if (i == 0 && has_prev && prev.ts == s_day_buf[i].ts - 3600) ref = &prev;
+                    if (ref) { v = s_day_buf[i].total - ref->total; if (v < 0) v = 0; }
+                    else v = 0;  // brak ciaglego odniesienia
+                } else {
+                    v = s_day_buf[i].total;  // chwilowe (moc/napiecie)
+                }
+                n += snprintf(buf + n, buf_cap - n, "%s{\"t\":%u,\"v\":%.3f}",
+                              first ? "" : ",", (unsigned)s_day_buf[i].ts, v);
+                first = false;
+            }
         }
+        if (f) fclose(f);
     }
     n += snprintf(buf + n, buf_cap - n, "]}");
     if (s_mutex) xSemaphoreGive(s_mutex);

@@ -5,7 +5,7 @@
 
 // Liczba kubelkow per rozdzielczosc (jak HA Energy, z zapasem)
 #define HIST_HOURS   168   // 7 dni godzinowo (w RAM)
-#define HIST_ARCHIVE_HOURS 744  // 31 dni godzinowo (tylko na flash, archiwum)
+#define HIST_ARCHIVE_HOURS 17520  // 2 lata godzinowo (tylko na flash, ring buffer)
 #define HIST_DAYS    90    // 90 dni
 #define HIST_MONTHS  24    // 24 miesiace
 #define HIST_YEARS   10    // 10 lat

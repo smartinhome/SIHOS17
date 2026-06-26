@@ -589,48 +589,62 @@ int history_get_day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf
     int n = snprintf(buf, buf_cap, "{\"id\":\"%s\",\"kind\":%d,\"cumulative\":%d,\"points\":[",
                      id_hex ? id_hex : "", kind, cumulative);
 
-    char path[48]; archive_path(id_hex, path, sizeof(path));
-    FILE *f = s_fs_ok ? fopen(path, "rb") : NULL;
-    if (f) {
-        int count = 0, head = 0;
-        if (arc_read_header(f, &count, &head)) {
-            // Zbierz do malego bufora godziny wybranej doby + 1 poprzednia (dla roznicy).
-            // Skan logiczny od najstarszego (head) do najnowszego, czytajac pojedyncze
-            // rekordy - bez wczytywania calego ringu do RAM.
-            int nb = 0;
-            hist_bucket_t prev; bool has_prev = false;
-            for (int i = 0; i < count && nb < ARC_DAY_BUF; i++) {
-                int phys = (head + i) % HIST_ARCHIVE_HOURS;
-                hist_bucket_t rec;
-                if (fseek(f, arc_rec_off(phys), SEEK_SET) != 0) break;
-                if (fread(&rec, sizeof(rec), 1, f) != 1) break;
-                if (rec.ts >= d0 && rec.ts < d1) {
-                    // godzina nalezy do wybranej doby
-                    s_day_buf[nb++] = rec;
-                } else if (rec.ts < d0) {
-                    prev = rec; has_prev = true;  // zapamietaj ostatnia przed doba
+    // Zbierz godziny wybranej doby (+1 poprzednia dla roznicy) do malego bufora.
+    // ZRODLO 1: bufor hours[] w RAM (ostatnie 7 dni) - niezawodne, te same dane co
+    // res=hour. Pokrywa Dzis/Wczoraj/caly tydzien.
+    // ZRODLO 2 (fallback): archiwum ha_ na flash - dla dni starszych niz 7 dni.
+    int nb = 0;
+    hist_bucket_t prev; bool has_prev = false;
+
+    if (m) {
+        for (int i = 0; i < m->n_hours && nb < ARC_DAY_BUF; i++) {
+            if (m->hours[i].ts >= d0 && m->hours[i].ts < d1) {
+                s_day_buf[nb++] = m->hours[i];
+            } else if (m->hours[i].ts < d0) {
+                prev = m->hours[i]; has_prev = true;
+            }
+        }
+    }
+
+    // Fallback do archiwum tylko gdy w RAM nie znaleziono godzin tej doby (starszy dzien).
+    if (nb == 0) {
+        char path[48]; archive_path(id_hex, path, sizeof(path));
+        FILE *f = s_fs_ok ? fopen(path, "rb") : NULL;
+        if (f) {
+            int count = 0, head = 0;
+            if (arc_read_header(f, &count, &head)) {
+                for (int i = 0; i < count && nb < ARC_DAY_BUF; i++) {
+                    int phys = (head + i) % HIST_ARCHIVE_HOURS;
+                    hist_bucket_t rec;
+                    if (fseek(f, arc_rec_off(phys), SEEK_SET) != 0) break;
+                    if (fread(&rec, sizeof(rec), 1, f) != 1) break;
+                    if (rec.ts >= d0 && rec.ts < d1) {
+                        s_day_buf[nb++] = rec;
+                    } else if (rec.ts < d0) {
+                        prev = rec; has_prev = true;
+                    }
                 }
             }
             fclose(f);
-            f = NULL;
-            bool first = true;
-            for (int i = 0; i < nb && n < buf_cap - 60; i++) {
-                float v;
-                if (cumulative) {
-                    hist_bucket_t *ref = NULL;
-                    if (i > 0 && s_day_buf[i-1].ts == s_day_buf[i].ts - 3600) ref = &s_day_buf[i-1];
-                    else if (i == 0 && has_prev && prev.ts == s_day_buf[i].ts - 3600) ref = &prev;
-                    if (ref) { v = s_day_buf[i].total - ref->total; if (v < 0) v = 0; }
-                    else v = 0;  // brak ciaglego odniesienia
-                } else {
-                    v = s_day_buf[i].total;  // chwilowe (moc/napiecie)
-                }
-                n += snprintf(buf + n, buf_cap - n, "%s{\"t\":%u,\"v\":%.3f}",
-                              first ? "" : ",", (unsigned)s_day_buf[i].ts, v);
-                first = false;
-            }
         }
-        if (f) fclose(f);
+    }
+
+    // Wypisz punkty (zuzycie = roznica wzgledem poprzedniej godziny dla kumulacyjnych).
+    bool first = true;
+    for (int i = 0; i < nb && n < buf_cap - 60; i++) {
+        float v;
+        if (cumulative) {
+            hist_bucket_t *ref = NULL;
+            if (i > 0 && s_day_buf[i-1].ts == s_day_buf[i].ts - 3600) ref = &s_day_buf[i-1];
+            else if (i == 0 && has_prev && prev.ts == s_day_buf[i].ts - 3600) ref = &prev;
+            if (ref) { v = s_day_buf[i].total - ref->total; if (v < 0) v = 0; }
+            else v = 0;  // brak ciaglego odniesienia
+        } else {
+            v = s_day_buf[i].total;  // chwilowe (moc/napiecie)
+        }
+        n += snprintf(buf + n, buf_cap - n, "%s{\"t\":%u,\"v\":%.3f}",
+                      first ? "" : ",", (unsigned)s_day_buf[i].ts, v);
+        first = false;
     }
     n += snprintf(buf + n, buf_cap - n, "]}");
     if (s_mutex) xSemaphoreGive(s_mutex);

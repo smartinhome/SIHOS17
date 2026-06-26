@@ -598,8 +598,16 @@ static esp_err_t handle_ota_upload(httpd_req_t *req) {
 }
 
 static esp_err_t handle_ota_github(httpd_req_t *req) {
+    // ?channel=beta -> kanal beta; domyslnie (lub channel=stable) -> oficjalny
+    bool beta = false;
+    char query[64];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        char val[16];
+        if (httpd_query_key_value(query, "channel", val, sizeof(val)) == ESP_OK)
+            beta = (strcmp(val, "beta") == 0);
+    }
     resp_ok(req);
-    ota_start_from_github();
+    ota_start_from_github(beta);
     return ESP_OK;
 }
 

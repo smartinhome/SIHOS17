@@ -1,4 +1,5 @@
 #include "ota_manager.h"
+#include <stdint.h>
 #include "cc1101.h"
 #include "display_eink.h"
 #include <stdlib.h>
@@ -184,7 +185,7 @@ cleanup:
 // dla sih-wmbus-reader.bin. Zwraca true + wypelnia out_url.
 #define GITHUB_API_URL "https://api.github.com/repos/smartinhome/SIHOS17/releases?per_page=15"
 
-static bool github_get_latest_bin_url(char *out_url, size_t out_max) {
+static bool github_get_latest_bin_url(char *out_url, size_t out_max, bool beta_channel) {
     ESP_LOGI(TAG, "GitHub: wolny heap = %lu B, najwiekszy blok = %lu B",
              (unsigned long)esp_get_free_heap_size(),
              (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
@@ -289,22 +290,35 @@ static bool github_get_latest_bin_url(char *out_url, size_t out_max) {
             ESP_LOGI(TAG, "GitHub: asset[%d]: %s", found_count, tmp);
             if (strstr(tmp, "sih-wmbus-reader.bin") && ulen < out_max) {
                 // wyciagnij numer beta z URL ".../v1.0.0-betaN/..."
-                int beta = 0;
                 char *bp = strstr(tmp, "beta");
-                if (bp) beta = atoi(bp + 4);
-                // bez 'beta' w nazwie (stabilny release) traktuj jako najwyzszy
-                if (!bp) beta = 1000000;
-                if (beta > best_beta) {
-                    best_beta = beta;
+                bool is_beta = (bp != NULL);
+                // Filtruj wg kanalu: oficjalna = tylko stabilne (bez beta),
+                // beta = tylko beta. Kanaly sie nie mieszaja.
+                if (beta_channel != is_beta) { p = end; continue; }
+                int ver;
+                if (is_beta) {
+                    ver = atoi(bp + 4);            // numer beta
+                } else {
+                    // stabilne: numer z "vX.Y.Z" -> X*10000+Y*100+Z dla porownania
+                    char *vp = strstr(tmp, "/v");
+                    int a = 0, b = 0, cc = 0;
+                    if (vp) sscanf(vp + 2, "%d.%d.%d", &a, &b, &cc);
+                    ver = a * 10000 + b * 100 + cc;
+                }
+                if (ver > best_beta) {
+                    best_beta = ver;
                     strlcpy(out_url, tmp, out_max);
                     result = true;
-                    ESP_LOGI(TAG, "GitHub: kandydat beta%d -> %s", beta, out_url);
+                    ESP_LOGI(TAG, "GitHub: kandydat %s (%s) -> %s",
+                             is_beta ? "beta" : "stable",
+                             is_beta ? "beta" : "oficjalna", out_url);
                 }
             }
         }
         p = end;
     }
-    if (result) ESP_LOGI(TAG, "GitHub: WYBRANO najwyzszy beta%d: %s", best_beta, out_url);
+    if (result) ESP_LOGI(TAG, "GitHub: WYBRANO %s, wersja=%d: %s",
+                         beta_channel ? "beta" : "oficjalna", best_beta, out_url);
 
     ESP_LOGI(TAG, "GitHub: znaleziono %d assetow, firmware %s",
              found_count, result ? "OK" : "NIE ZNALEZIONO");
@@ -325,9 +339,11 @@ static void ota_github_task(void *arg) {
     vTaskDelay(pdMS_TO_TICKS(100));
 
     char url[480] = {0};
-    if (!github_get_latest_bin_url(url, sizeof(url))) {
-        strlcpy(s_status.error, "Nie znaleziono firmware na GitHub",
-                sizeof(s_status.error));
+    bool beta_channel = (bool)(intptr_t)arg;   // kanal przekazany przez arg taska
+    if (!github_get_latest_bin_url(url, sizeof(url), beta_channel)) {
+        snprintf(s_status.error, sizeof(s_status.error),
+                 "Nie znaleziono firmware (%s) na GitHub",
+                 beta_channel ? "beta" : "oficjalny");
         s_status.state = OTA_STATE_FAILED;
         vTaskDelete(NULL);
         return;
@@ -339,7 +355,7 @@ static void ota_github_task(void *arg) {
     vTaskDelete(NULL);
 }
 
-void ota_start_from_github(void) {
+void ota_start_from_github(bool beta_channel) {
     if (s_status.state == OTA_STATE_DOWNLOADING ||
         s_status.state == OTA_STATE_WRITING) {
         ESP_LOGW(TAG, "OTA juz w toku");
@@ -347,7 +363,8 @@ void ota_start_from_github(void) {
     }
     s_status.state    = OTA_STATE_IDLE;
     s_status.error[0] = 0;
-    xTaskCreate(ota_github_task, "ota_github", 24576, NULL, 6, NULL);
+    xTaskCreate(ota_github_task, "ota_github", 24576,
+                (void *)(intptr_t)beta_channel, 6, NULL);
 }
 
 void ota_manager_init(void) {

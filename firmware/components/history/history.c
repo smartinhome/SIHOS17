@@ -235,6 +235,7 @@ static void save_meter(meter_hist_t *m) {
     fwrite(&m->n_days, sizeof(int), 1, f);   fwrite(m->days, sizeof(hist_bucket_t), m->n_days, f);
     fwrite(&m->n_months, sizeof(int), 1, f); fwrite(m->months, sizeof(hist_bucket_t), m->n_months, f);
     fwrite(&m->n_years, sizeof(int), 1, f);  fwrite(m->years, sizeof(hist_bucket_t), m->n_years, f);
+    fwrite(&m->cumulative, sizeof(int), 1, f);  // na koncu (kompatybilnosc starych plikow)
     fclose(f);
 }
 
@@ -262,6 +263,12 @@ static bool load_meter(meter_hist_t *m, const char *id) {
     fread(&m->n_years, sizeof(int), 1, f);
     if (m->n_years < 0 || m->n_years > HIST_YEARS) m->n_years = 0;
     fread(m->years, sizeof(hist_bucket_t), m->n_years, f);
+    // cumulative na koncu (nowe pliki). Stary plik go nie ma - fread zwroci 0,
+    // wtedy wnioskujemy z pola id: napiecie/moc = chwilowe, reszta = kumulacyjne.
+    if (fread(&m->cumulative, sizeof(int), 1, f) != 1) {
+        bool instant = (strstr(id, "napiecie") || strstr(id, "moc"));
+        m->cumulative = instant ? 0 : 1;
+    }
     fclose(f);
     return true;
 }

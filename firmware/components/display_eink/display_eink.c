@@ -111,9 +111,10 @@ static const uint8_t PARTIAL_LUT[] = {
     0x00,0x00,0x00,0x00,0x22,0x22,0x22,0x22,0x22,0x22,0x00,0x00,0x00,
 };
 
-// Licznik odswiezen: co ile partial wykonac pelne (czyszczenie artefaktow).
-#define FULL_REFRESH_EVERY 30
-static int s_refresh_counter = 0;
+// Pelne odswiezenie: przy pierwszym odswiezeniu po starcie (restart programowy lub
+// sprzetowy) oraz raz na dobe o godzinie 3:00. Pomiedzy - tylko czesciowe.
+static bool s_did_first_refresh = false;   // false do pierwszego odswiezenia po starcie
+static int  s_last_full_yday = -1;         // dzien roku ostatniego pelnego o 3:00 (-1 = brak)
 
 static void eink_panel_init(void) {
     // Podwojny reset jak ESPHome (reset_ + send_reset_)
@@ -244,15 +245,30 @@ static void eink_partial_refresh(void) {
     spi_device_release_bus(s_spi);
 }
 
-// Dyspozytor: pierwsze odswiezenie i co FULL_REFRESH_EVERY = pelne (ustawia base
-// i czysci artefakty), pozostale = czesciowe (szybkie, bez migania).
+// Dyspozytor: pelne odswiezenie (ustawia base, czysci artefakty) przy pierwszym
+// odswiezeniu po starcie oraz raz na dobe o godzinie 3:00; pozostale czesciowe.
 static void eink_refresh(void) {
-    if (s_refresh_counter == 0) {
+    bool do_full = false;
+
+    if (!s_did_first_refresh) {
+        do_full = true;                 // pierwsze po restarcie (programowym/sprzetowym)
+        s_did_first_refresh = true;
+    } else {
+        time_t now = time(NULL);
+        struct tm tm;
+        localtime_r(&now, &tm);
+        // O 3:00 (godzina 3, dowolna minuta tego cyklu) raz na dobe.
+        if (tm.tm_hour == 3 && s_last_full_yday != tm.tm_yday) {
+            do_full = true;
+            s_last_full_yday = tm.tm_yday;
+        }
+    }
+
+    if (do_full) {
         eink_full_refresh();
     } else {
         eink_partial_refresh();
     }
-    s_refresh_counter = (s_refresh_counter + 1) % FULL_REFRESH_EVERY;
 }
 
 

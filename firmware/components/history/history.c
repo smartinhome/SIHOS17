@@ -188,6 +188,40 @@ static void archive_append_hour(const char *id, uint32_t hour_ts, float total) {
     fclose(f);
 }
 
+// Odbuduj archiwum godzinowe (ha_) z bufora hours[] w RAM (7 dni godzin wczytanych
+// z h_). Wolane przy starcie gdy archiwum jest puste/stare/niezgodne - dzieki temu
+// tryb Dzis/Wczoraj pokazuje dane natychmiast po restarcie, bez czekania na ramke.
+// Zapisuje tylko gdy archiwum nie ma juz wiecej danych niz hours[] (nie nadpisuje
+// pelnego 2-letniego archiwum swiezo zebranego).
+static void archive_rebuild_from_hours(meter_hist_t *m) {
+    if (!s_fs_ok || m->n_hours == 0) return;
+    char path[48]; archive_path(m->id, path, sizeof(path));
+
+    // Sprawdz istniejace archiwum - ile ma poprawnych rekordow.
+    int existing = -1;  // -1 = brak/niezgodne
+    FILE *f = fopen(path, "rb");
+    if (f) {
+        int count, head;
+        if (arc_read_header(f, &count, &head)) existing = count;  // poprawny nowy format
+        fclose(f);
+    }
+    // Odbuduj tylko gdy archiwum puste, niezgodne (stary format) lub ma mniej
+    // rekordow niz mamy godzin w RAM (nie psujemy bogatszego archiwum).
+    if (existing >= m->n_hours) return;
+
+    // Zapisz na nowo: naglowek + godziny z RAM (chronologicznie, jak w hours[]).
+    f = fopen(path, "w+b");
+    if (!f) { ESP_LOGW(TAG, "nie moge odbudowac archiwum %s", path); return; }
+    int count = m->n_hours, head = 0;
+    fwrite(&count, sizeof(int), 1, f);
+    fwrite(&head, sizeof(int), 1, f);
+    for (int i = 0; i < m->n_hours; i++) {
+        fwrite(&m->hours[i], sizeof(hist_bucket_t), 1, f);
+    }
+    fclose(f);
+    ESP_LOGI(TAG, "Archiwum godzinowe odbudowane z RAM (%d godz) dla %s", count, m->id);
+}
+
 static void save_meter(meter_hist_t *m) {
     if (!s_fs_ok) return;
     char path[48]; meter_path(m->id, path, sizeof(path));
@@ -350,7 +384,11 @@ void history_init(void) {
     // oraz karty dashboardu pokazuja "oczekiwanie" mimo danych na flash.
     int loaded = 0;
     for (int i = 0; i < s_tracked_count; i++) {
-        if (get_or_load(s_tracked[i], false)) loaded++;
+        meter_hist_t *m = get_or_load(s_tracked[i], false);
+        if (m) {
+            loaded++;
+            archive_rebuild_from_hours(m);  // odbuduj archiwum ha_ z godzin w RAM
+        }
     }
     ESP_LOGI(TAG, "Wczytano historie z flash dla %d/%d licznikow", loaded, s_tracked_count);
 }

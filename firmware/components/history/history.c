@@ -380,6 +380,25 @@ void history_on_field(const char *id_hex, const char *field, double value,
 }
 
 // ---------- JSON historii (zuzycie = roznice) ----------
+// Najwczesniejszy znany stan licznika w danym okresie (lub tuz przed nim) - baza
+// do policzenia przyrostu pierwszego/biezacego okresu, ktory nie ma poprzednika.
+// Szuka w buforach od najdrobniejszego (godziny->dni->miesiace) pierwszego punktu
+// o ts >= period_start. Zwraca true gdy znaleziono.
+static bool earliest_total_in(meter_hist_t *m, uint32_t period_start, float *out) {
+    float best = 0; uint32_t best_ts = 0xFFFFFFFF; bool found = false;
+    hist_bucket_t *series[3] = { m->hours, m->days, m->months };
+    int counts[3] = { m->n_hours, m->n_days, m->n_months };
+    for (int s = 0; s < 3; s++) {
+        for (int i = 0; i < counts[s]; i++) {
+            if (series[s][i].ts >= period_start && series[s][i].ts < best_ts) {
+                best_ts = series[s][i].ts; best = series[s][i].total; found = true;
+            }
+        }
+    }
+    if (found) *out = best;
+    return found;
+}
+
 int history_get_json(const char *id_hex, const char *res, char *buf, int buf_cap) {
     if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
     meter_hist_t *m = get_or_load(id_hex, false);
@@ -406,10 +425,22 @@ int history_get_json(const char *id_hex, const char *res, char *buf, int buf_cap
             first = false;
         }
     } else {
-        for (int i = 1; i < cnt && n < buf_cap - 60; i++) {
+        for (int i = 0; i < cnt && n < buf_cap - 60; i++) {
             float v;
             if (m->cumulative) {
-                v = arr[i].total - arr[i-1].total;  // zuzycie = roznica
+                if (i > 0) {
+                    v = arr[i].total - arr[i-1].total;  // zuzycie = roznica
+                } else {
+                    // Pierwszy/biezacy okres bez poprzednika: policz przyrost od
+                    // najwczesniejszego znanego stanu w tym okresie (czesciowe naliczenie).
+                    float base;
+                    uint32_t pstart = arr[i].ts;
+                    if (earliest_total_in(m, pstart, &base) && arr[i].total >= base) {
+                        v = arr[i].total - base;
+                    } else {
+                        continue;  // brak odniesienia - pomin
+                    }
+                }
                 if (v < 0) v = 0;
             } else {
                 v = arr[i].total;  // chwilowe (moc/napiecie) = wartosc

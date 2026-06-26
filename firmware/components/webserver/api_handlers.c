@@ -246,15 +246,18 @@ static esp_err_t handle_status(httpd_req_t *req) {
     wifi_manager_get_ip(ip, sizeof(ip));
     wifi_state_t ws = wifi_manager_get_state();
     const char *wifi_str[] = {"disconnected","connecting","connected","ap_mode"};
+    sih_config_t scfg = nvs_config_get();
     char buf[512];
     snprintf(buf, sizeof(buf),
         "{\"version\":\"%s\",\"uptime_ms\":%" PRId64 ","
         "\"wifi_state\":\"%s\",\"wifi_rssi\":%d,"
+        "\"ssid\":\"%s\","
         "\"ip\":\"%s\",\"meter_count\":%d,\"partition\":\"%s\"}",
         ota_get_running_version(),
         esp_timer_get_time() / 1000,
         wifi_str[ws],
         wifi_manager_get_rssi(),
+        scfg.wifi_ssid,
         ip,
         wmbus_decoder_get_count(),
         ota_get_partition_label()

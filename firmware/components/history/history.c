@@ -384,18 +384,30 @@ void history_on_field(const char *id_hex, const char *field, double value,
 // do policzenia przyrostu pierwszego/biezacego okresu, ktory nie ma poprzednika.
 // Szuka w buforach od najdrobniejszego (godziny->dni->miesiace) pierwszego punktu
 // o ts >= period_start. Zwraca true gdy znaleziono.
-static bool earliest_total_in(meter_hist_t *m, uint32_t period_start, float *out) {
-    float best = 0; uint32_t best_ts = 0xFFFFFFFF; bool found = false;
-    hist_bucket_t *series[3] = { m->hours, m->days, m->months };
-    int counts[3] = { m->n_hours, m->n_days, m->n_months };
+static bool earliest_total_in(meter_hist_t *m, uint32_t period_start,
+                              float cur_total, float *out) {
+    // 1. Najmniejszy (najwczesniejszy) stan licznika w okresie [period_start, teraz].
+    float best = 1e30f; bool found = false;
+    hist_bucket_t *series[4] = { m->hours, m->days, m->months, m->years };
+    int counts[4] = { m->n_hours, m->n_days, m->n_months, m->n_years };
     for (int s = 0; s < 3; s++) {
         for (int i = 0; i < counts[s]; i++) {
-            if (series[s][i].ts >= period_start && series[s][i].ts < best_ts) {
-                best_ts = series[s][i].ts; best = series[s][i].total; found = true;
+            if (series[s][i].ts >= period_start && series[s][i].total < best) {
+                best = series[s][i].total; found = true;
             }
         }
     }
-    if (found) *out = best;
+    // 2. Gdy brak punktu w okresie LUB baza rowna biezacemu stanowi (pierwsza ramka
+    //    ustawila wszystkie bufory na ten sam total) - wez globalnie najmniejszy
+    //    znany stan (poczatek zbierania danych) = rzeczywiste naliczenie do teraz.
+    if (!found || best >= cur_total - 0.0001f) {
+        float gmin = cur_total;
+        for (int s = 0; s < 4; s++)
+            for (int i = 0; i < counts[s]; i++)
+                if (series[s][i].total < gmin) gmin = series[s][i].total;
+        best = gmin; found = true;
+    }
+    *out = best;
     return found;
 }
 
@@ -435,7 +447,7 @@ int history_get_json(const char *id_hex, const char *res, char *buf, int buf_cap
                     // najwczesniejszego znanego stanu w tym okresie (czesciowe naliczenie).
                     float base;
                     uint32_t pstart = arr[i].ts;
-                    if (earliest_total_in(m, pstart, &base) && arr[i].total >= base) {
+                    if (earliest_total_in(m, pstart, arr[i].total, &base) && arr[i].total >= base) {
                         v = arr[i].total - base;
                     } else {
                         continue;  // brak odniesienia - pomin

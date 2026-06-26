@@ -112,8 +112,13 @@ static bool arc_read_header(FILE *f, int *count, int *head) {
     if (fseek(f, 0, SEEK_SET) != 0) return false;
     if (fread(count, sizeof(int), 1, f) != 1) return false;
     if (fread(head, sizeof(int), 1, f) != 1) return false;
+    // Wykryj stary/niezgodny format (sprzed ring buffera): w starym pliku drugi
+    // int to timestamp (~1.78e9), nie head (0..cap). Gdy count lub head poza
+    // zakresem - plik niezgodny, traktuj jako pusty (zostanie nadpisany w nowym
+    // formacie przy najblizszym zapisie godziny). Stare archiwum godzinowe i tak
+    // trzymalo tylko 31 dni; glowna historia (h_) jest nietknieta.
     if (*count < 0 || *count > HIST_ARCHIVE_HOURS) { *count = 0; *head = 0; return false; }
-    if (*head < 0 || *head >= HIST_ARCHIVE_HOURS) *head = 0;
+    if (*head < 0 || *head >= HIST_ARCHIVE_HOURS) { *count = 0; *head = 0; return false; }
     return true;
 }
 
@@ -138,7 +143,15 @@ static void archive_append_hour(const char *id, uint32_t hour_ts, float total) {
         fwrite(&count, sizeof(int), 1, f);
         fwrite(&head, sizeof(int), 1, f);
     } else {
-        if (!arc_read_header(f, &count, &head)) { count = 0; head = 0; }
+        if (!arc_read_header(f, &count, &head)) {
+            // Stary/niezgodny format - zresetuj plik do nowego formatu (pusty ring).
+            fclose(f);
+            f = fopen(path, "w+b");
+            if (!f) { ESP_LOGW(TAG, "nie moge zresetowac archiwum %s", path); return; }
+            count = 0; head = 0;
+            fwrite(&count, sizeof(int), 1, f);
+            fwrite(&head, sizeof(int), 1, f);
+        }
     }
 
     // Czy ostatnia zapisana godzina == hour_ts? (aktualizacja biezacej godziny)

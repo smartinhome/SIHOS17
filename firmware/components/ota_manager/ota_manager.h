@@ -9,6 +9,7 @@ typedef enum {
     OTA_STATE_WRITING,
     OTA_STATE_SUCCESS,
     OTA_STATE_FAILED,
+    OTA_STATE_UPTODATE,
 } ota_state_t;
 
 typedef struct {

@@ -613,7 +613,7 @@ static esp_err_t handle_ota_github(httpd_req_t *req) {
 
 static esp_err_t handle_ota_status(httpd_req_t *req) {
     ota_status_t st = ota_get_status();
-    const char *states[] = {"idle","downloading","writing","success","failed"};
+    const char *states[] = {"idle","downloading","writing","success","failed","uptodate"};
     char buf[200];
     snprintf(buf, sizeof(buf),
         "{\"state\":\"%s\",\"progress\":%d,\"error\":\"%s\"}",

@@ -1,6 +1,7 @@
 #include "ota_manager.h"
 #include <stdint.h>
 #include "cc1101.h"
+#include "wmbus_decoder.h"
 #include "display_eink.h"
 #include <stdlib.h>
 #include "esp_ota_ops.h"
@@ -73,11 +74,22 @@ static void ota_url_task(void *arg) {
              run_p ? run_p->label : "?", (unsigned long)(run_p ? run_p->address : 0),
              next_p ? next_p->label : "?", (unsigned long)(next_p ? next_p->address : 0));
 
-    // Ostrzezenie gdy pobierana wersja == biezaca (np. zepsuty build na CI)
+    // Gdy pobierana wersja == zainstalowana - nie pobieraj, poinformuj ze aktualne.
+    // esp_https_ota_begin pobiera tylko naglowek z wersja, wiec przerywamy zanim
+    // sciagniemy caly firmware.
     const esp_app_desc_t *cur = esp_app_get_description();
     if (cur && strcmp(cur->version, desc.version) == 0) {
-        ESP_LOGW(TAG, "OTA: UWAGA pobierana wersja (%s) == biezaca! "
-                      "Build na CI moze byc nieaktualny.", desc.version);
+        ESP_LOGI(TAG, "OTA: zainstalowana wersja (%s) jest aktualna - pomijam pobieranie",
+                 desc.version);
+        snprintf(s_status.error, sizeof(s_status.error),
+                 "Zainstalowana wersja (%s) jest aktualna", desc.version);
+        s_status.state = OTA_STATE_UPTODATE;
+        esp_https_ota_abort(handle);
+        cc1101_start_receive(wmbus_decoder_on_frame);  // wznow radio
+        display_eink_resume();                          // wznow e-ink
+        free(url);
+        vTaskDelete(NULL);
+        return;
     }
 
     s_status.state = OTA_STATE_WRITING;

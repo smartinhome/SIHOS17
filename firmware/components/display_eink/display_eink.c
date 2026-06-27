@@ -795,3 +795,15 @@ void display_eink_pause(void) {
     if (s_btn_task_h)     { vTaskDelete(s_btn_task_h);     s_btn_task_h = NULL; }
     ESP_LOGI(TAG, "Taski e-ink wstrzymane (OTA)");
 }
+
+// Wznow e-ink po wstrzymaniu (np. gdy OTA przerwane bo wersja aktualna).
+// Odtwarza taski przyciskow i odswiezania uzywajac zapamietanego pinu.
+void display_eink_resume(void) {
+    if (s_btn_task_h || s_refresh_task_h) return;  // juz dzialaja
+    s_eink_paused = false;
+    if (s_btn_pin >= 0) {
+        xTaskCreate(button_task, "eink_btn", 3072, NULL, 3, &s_btn_task_h);
+    }
+    xTaskCreate(refresh_task, "eink_refresh", 4096, NULL, 2, &s_refresh_task_h);
+    ESP_LOGI(TAG, "Taski e-ink wznowione");
+}

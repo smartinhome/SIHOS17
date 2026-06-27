@@ -82,7 +82,7 @@ static void ota_url_task(void *arg) {
         ESP_LOGI(TAG, "OTA: zainstalowana wersja (%s) jest aktualna - pomijam pobieranie",
                  desc.version);
         snprintf(s_status.error, sizeof(s_status.error),
-                 "Zainstalowana wersja (%s) jest aktualna", desc.version);
+                 "Wersja %s jest aktualna", desc.version);
         s_status.state = OTA_STATE_UPTODATE;
         esp_https_ota_abort(handle);
         cc1101_start_receive(wmbus_decoder_on_frame);  // wznow radio

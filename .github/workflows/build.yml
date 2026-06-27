@@ -15,6 +15,19 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Ustaw wersje firmware z nazwy tagu
+        # ESP-IDF czyta firmware/version.txt zamiast 'git describe'. Dzieki temu
+        # build z tagu vX.Y.Z zawsze zaszywa dokladnie te wersje, nawet gdy na
+        # tym samym commicie wisi tez tag beta (git describe wybralby zly).
+        # Dla pushu na branch (bez tagu) zostaje git describe (brak version.txt).
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "${{ github.ref_name }}" > firmware/version.txt
+            echo "version.txt = ${{ github.ref_name }}"
+          else
+            echo "push na branch - wersja z git describe"
+          fi
+
       - name: Setup ESP-IDF
         uses: espressif/esp-idf-ci-action@v1
         with:

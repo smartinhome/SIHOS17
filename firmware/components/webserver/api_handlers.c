@@ -162,6 +162,10 @@ static const char *reset_reason_str(void) {
 }
 
 static esp_err_t handle_system(httpd_req_t *req) {
+    // IP biezacego polaczenia (do informacji systemowych)
+    char sys_ip[16];
+    wifi_manager_get_ip(sys_ip, sizeof(sys_ip));
+
     // Chip info
     esp_chip_info_t chip;
     esp_chip_info(&chip);
@@ -221,6 +225,7 @@ static esp_err_t handle_system(httpd_req_t *req) {
         "\"flash_size\":%u,\"app_part_size\":%u,"
         "\"temp_c\":%.1f,\"temp_ok\":%s,"
         "\"mac\":\"%s\",\"task_count\":%u,\"uptime_s\":%lld,"
+        "\"wifi_rssi\":%d,\"ip\":\"%s\",\"meter_count\":%d,"
         "\"reset_reason\":\"%s\","
         "\"idf_ver\":\"%s\",\"compile_time\":\"%s %s\",\"app_ver\":\"%s\""
         "}",
@@ -234,6 +239,7 @@ static esp_err_t handle_system(httpd_req_t *req) {
         (unsigned)flash_size, (unsigned)app_part_size,
         temp_ok ? temp_c : 0.0f, temp_ok ? "true" : "false",
         mac_str, (unsigned)task_count, (long long)uptime_s,
+        wifi_manager_get_rssi(), sys_ip, wmbus_decoder_get_count(),
         reset_reason_str(),
         app->idf_ver, app->date, app->time, app->version
     );

@@ -630,21 +630,54 @@ int history_get_day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf
     }
 
     // Wypisz punkty (zuzycie = roznica wzgledem poprzedniej godziny dla kumulacyjnych).
+    // Gdy miedzy odczytami jest luka (np. restart przy aktualizacji) krotsza niz
+    // GAP_FILL_MAX_H godzin, rozkladamy przyrost rownomiernie na godziny luki i
+    // emitujemy punkt dla kazdej brakujacej godziny (mieszczacej sie w dobie) -
+    // eliminuje artefakt jednego mikroskopijnego slupka po restarcie.
+    const uint32_t GAP_FILL_MAX_H = 6;
     bool first = true;
     for (int i = 0; i < nb && n < buf_cap - 60; i++) {
-        float v;
         if (cumulative) {
             hist_bucket_t *ref = NULL;
-            if (i > 0 && s_day_buf[i-1].ts == s_day_buf[i].ts - 3600) ref = &s_day_buf[i-1];
-            else if (i == 0 && has_prev && prev.ts == s_day_buf[i].ts - 3600) ref = &prev;
-            if (ref) { v = s_day_buf[i].total - ref->total; if (v < 0) v = 0; }
-            else v = 0;  // brak ciaglego odniesienia
+            if (i > 0) ref = &s_day_buf[i-1];
+            else if (has_prev) ref = &prev;
+
+            if (ref && s_day_buf[i].ts > ref->ts) {
+                uint32_t gap_h = (s_day_buf[i].ts - ref->ts) / 3600;
+                float delta = s_day_buf[i].total - ref->total;
+                if (delta < 0) delta = 0;
+                if (gap_h <= 1) {
+                    n += snprintf(buf + n, buf_cap - n, "%s{\"t\":%u,\"v\":%.3f}",
+                                  first ? "" : ",", (unsigned)s_day_buf[i].ts, delta);
+                    first = false;
+                } else if (gap_h <= GAP_FILL_MAX_H) {
+                    // Rozloz rownomiernie; emituj punkt dla kazdej godziny luki
+                    // ktora wpada w wybrana dobe [d0,d1).
+                    float per = delta / (float)gap_h;
+                    for (uint32_t g = 1; g <= gap_h && n < buf_cap - 60; g++) {
+                        uint32_t tg = ref->ts + g * 3600;
+                        if (tg < d0 || tg >= d1) continue;
+                        n += snprintf(buf + n, buf_cap - n, "%s{\"t\":%u,\"v\":%.3f}",
+                                      first ? "" : ",", (unsigned)tg, per);
+                        first = false;
+                    }
+                } else {
+                    // Luka za dluga (np. modul wylaczony) - nie rozkladaj, jeden punkt.
+                    n += snprintf(buf + n, buf_cap - n, "%s{\"t\":%u,\"v\":%.3f}",
+                                  first ? "" : ",", (unsigned)s_day_buf[i].ts, delta);
+                    first = false;
+                }
+            } else {
+                n += snprintf(buf + n, buf_cap - n, "%s{\"t\":%u,\"v\":%.3f}",
+                              first ? "" : ",", (unsigned)s_day_buf[i].ts, 0.0f);
+                first = false;
+            }
         } else {
-            v = s_day_buf[i].total;  // chwilowe (moc/napiecie)
+            // Chwilowe (moc/napiecie) - wartosc bezposrednia, bez rozkladu.
+            n += snprintf(buf + n, buf_cap - n, "%s{\"t\":%u,\"v\":%.3f}",
+                          first ? "" : ",", (unsigned)s_day_buf[i].ts, s_day_buf[i].total);
+            first = false;
         }
-        n += snprintf(buf + n, buf_cap - n, "%s{\"t\":%u,\"v\":%.3f}",
-                      first ? "" : ",", (unsigned)s_day_buf[i].ts, v);
-        first = false;
     }
     n += snprintf(buf + n, buf_cap - n, "]}");
     if (s_mutex) xSemaphoreGive(s_mutex);

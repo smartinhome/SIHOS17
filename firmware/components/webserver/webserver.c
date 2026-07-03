@@ -270,7 +270,7 @@ static const char *ROOT_HTML =
 "function renderLogs(){\n"
 "  return sysHead('Logi')+\n"
 "    '<div style=\"display:flex;justify-content:flex-end;margin-bottom:12px;\"><button data-do=\"clearLogs\" style=\"padding:10px 18px;border:1px solid #E7E9ED;border-radius:11px;background:#fff;font:600 13px Manrope,sans-serif;color:#3A414B;cursor:pointer;\">Wyczyść</button></div>'+\n"
-"    '<div id=\"logs-box\" style=\"background:#F6F7F9;border:1px solid #EEF0F3;border-radius:14px;padding:8px 18px;min-height:200px;font:500 12.5px monospace;color:#5A616C;\">Ładowanie...</div>';\n"
+"    '<div id=\"log-output\" style=\"background:#F6F7F9;border:1px solid #EEF0F3;border-radius:14px;padding:16px 18px;min-height:200px;max-height:440px;overflow:auto;font:500 12px monospace;color:#5A616C;white-space:pre-wrap;\">Ładowanie...</div>';\n"
 "}\n"
 "\n"
 "// ===== GŁÓWNY RENDER =====\n"

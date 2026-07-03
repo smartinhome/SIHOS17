@@ -9,11 +9,13 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include <string.h>
+#include <stdlib.h>
 
 static const char *TAG = "WIFI";
 static EventGroupHandle_t s_wifi_eg;
 static wifi_state_t       s_state = WIFI_STATE_DISCONNECTED;
 static int                s_rssi  = 0;
+static int                s_last_disc_reason = 0;  // powod ostatniego rozlaczenia STA
 static char               s_ip[16] = "0.0.0.0";
 static esp_netif_t       *s_sta_netif = NULL;
 static esp_netif_t       *s_ap_netif  = NULL;
@@ -29,7 +31,7 @@ static void event_handler(void *arg, esp_event_base_t base,
         s_state = WIFI_STATE_CONNECTING;
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         wifi_event_sta_disconnected_t *dis = (wifi_event_sta_disconnected_t *)data;
-        if (dis) ESP_LOGW(TAG, "Rozlaczono z WiFi, powod = %d", dis->reason);
+        if (dis) { ESP_LOGW(TAG, "Rozlaczono z WiFi, powod = %d", dis->reason); s_last_disc_reason = dis->reason; }
         if (s_retry < MAX_RETRY) {
             esp_wifi_connect();
             s_retry++;
@@ -44,6 +46,7 @@ static void event_handler(void *arg, esp_event_base_t base,
         snprintf(s_ip, sizeof(s_ip), IPSTR, IP2STR(&ev->ip_info.ip));
         s_retry = 0;
         s_state = WIFI_STATE_CONNECTED;
+        s_last_disc_reason = 0;  // polaczono - wyczysc powod bledu
         xEventGroupSetBits(s_wifi_eg, WIFI_CONNECTED_BIT);
         ESP_LOGI(TAG, "Połączono: %s", s_ip);
         // Synchronizacja czasu (SNTP) - dla timestampow HH:MM:SS w logach
@@ -133,4 +136,82 @@ void wifi_manager_reconnect(const char *ssid, const char *pass) {
     strlcpy(cfg.wifi_pass, pass, sizeof(cfg.wifi_pass));
     nvs_config_save(&cfg);
     esp_restart();
+}
+
+// ---- Skanowanie sieci WiFi ----
+// Dziala w STA i AP. W trybie AP tymczasowo wlacza APSTA (skan wymaga interfejsu STA),
+// po skanie wraca do czystego AP.
+int wifi_manager_scan(char *json_buf, int cap) {
+    wifi_mode_t prev_mode = WIFI_MODE_NULL;
+    esp_wifi_get_mode(&prev_mode);
+    bool switched = false;
+
+    // Skanowanie wymaga interfejsu STA. Jesli jestesmy w czystym AP, wlacz APSTA.
+    if (prev_mode == WIFI_MODE_AP) {
+        if (!s_sta_netif) s_sta_netif = esp_netif_create_default_wifi_sta();
+        if (esp_wifi_set_mode(WIFI_MODE_APSTA) != ESP_OK) {
+            ESP_LOGW(TAG, "scan: nie udalo sie wlaczyc APSTA");
+            snprintf(json_buf, cap, "[]");
+            return -1;
+        }
+        switched = true;
+    }
+
+    wifi_scan_config_t scan_cfg = {
+        .ssid = NULL, .bssid = NULL, .channel = 0, .show_hidden = false,
+        .scan_type = WIFI_SCAN_TYPE_ACTIVE,
+    };
+    esp_err_t err = esp_wifi_scan_start(&scan_cfg, true /* blokujaco */);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_wifi_scan_start blad: %d", err);
+        if (switched) esp_wifi_set_mode(WIFI_MODE_AP);
+        snprintf(json_buf, cap, "[]");
+        return -1;
+    }
+
+    uint16_t ap_count = 0;
+    esp_wifi_scan_get_ap_num(&ap_count);
+    if (ap_count > 20) ap_count = 20; // ogranicz
+    wifi_ap_record_t *recs = calloc(ap_count, sizeof(wifi_ap_record_t));
+    if (!recs) {
+        if (switched) esp_wifi_set_mode(WIFI_MODE_AP);
+        snprintf(json_buf, cap, "[]");
+        return -1;
+    }
+    uint16_t got = ap_count;
+    esp_wifi_scan_get_ap_records(&got, recs);
+
+    // Zbuduj JSON, pomijajac duplikaty SSID (najsilniejszy wygrywa) i puste SSID
+    int n = snprintf(json_buf, cap, "[");
+    int written = 0;
+    for (int i = 0; i < got; i++) {
+        const char *ssid = (const char *)recs[i].ssid;
+        if (strlen(ssid) == 0) continue;
+        // duplikat?
+        bool dup = false;
+        for (int j = 0; j < i; j++) {
+            if (strcmp((const char *)recs[j].ssid, ssid) == 0) { dup = true; break; }
+        }
+        if (dup) continue;
+        // escapowanie cudzyslowu w SSID
+        char esc[65]; int e = 0;
+        for (int k = 0; ssid[k] && e < 63; k++) {
+            if (ssid[k] == '"' || ssid[k] == '\\') esc[e++] = '\\';
+            esc[e++] = ssid[k];
+        }
+        esc[e] = 0;
+        n += snprintf(json_buf + n, cap - n, "%s{\"ssid\":\"%s\",\"rssi\":%d,\"auth\":%d}",
+                      written ? "," : "", esc, recs[i].rssi, recs[i].authmode);
+        written++;
+        if (n > cap - 80) break;
+    }
+    snprintf(json_buf + n, cap - n, "]");
+    free(recs);
+
+    if (switched) esp_wifi_set_mode(WIFI_MODE_AP);
+    return written;
+}
+
+int wifi_manager_last_disc_reason(void) {
+    return s_last_disc_reason;
 }

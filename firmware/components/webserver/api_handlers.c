@@ -258,12 +258,14 @@ static esp_err_t handle_status(httpd_req_t *req) {
         "{\"version\":\"%s\",\"uptime_ms\":%" PRId64 ","
         "\"wifi_state\":\"%s\",\"wifi_rssi\":%d,"
         "\"ssid\":\"%s\","
+        "\"wifi_disc_reason\":%d,"
         "\"ip\":\"%s\",\"meter_count\":%d,\"partition\":\"%s\"}",
         ota_get_running_version(),
         esp_timer_get_time() / 1000,
         wifi_str[ws],
         wifi_manager_get_rssi(),
         scfg.wifi_ssid,
+        wifi_manager_last_disc_reason(),
         ip,
         wmbus_decoder_get_count(),
         ota_get_partition_label()
@@ -800,6 +802,19 @@ static esp_err_t handle_logs_clear(httpd_req_t *req) {
     return ESP_OK;
 }
 
+static esp_err_t handle_wifi_scan(httpd_req_t *req) {
+    static char buf[1536];
+    int n = wifi_manager_scan(buf, sizeof(buf));
+    if (n < 0) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "[]");
+        return ESP_OK;
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, buf);
+    return ESP_OK;
+}
+
 void api_register_handlers(httpd_handle_t server) {
     system_temp_init();   // czujnik temperatury ESP32-C6
     const httpd_uri_t handlers[] = {
@@ -823,6 +838,7 @@ void api_register_handlers(httpd_handle_t server) {
         { .uri="/api/config",      .method=HTTP_GET,  .handler=handle_config_get,  .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/config/meter",.method=HTTP_POST, .handler=handle_config_meter,.user_ctx=NULL, .is_websocket=false },
         { .uri="/api/config/wifi", .method=HTTP_POST, .handler=handle_config_wifi, .user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/wifi/scan",   .method=HTTP_GET,  .handler=handle_wifi_scan,   .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/ota/url",     .method=HTTP_POST, .handler=handle_ota_url,     .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/ota/github",  .method=HTTP_POST, .handler=handle_ota_github,  .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/ota/upload",  .method=HTTP_POST, .handler=handle_ota_upload,  .user_ctx=NULL, .is_websocket=false },

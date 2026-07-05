@@ -201,10 +201,17 @@ static uint8_t strobe(uint8_t cmd) {
     return t.rx_data[0];
 }
 
+// Odczyt burst z RX FIFO. Bufory statyczne (wolane tylko z rx_task) -
+// bez calloc/free w goracej sciezce odbioru (poprzednio brak testu NULL
+// groził crashem przy fragmentacji sterty). FIFO ma 64 B; licznik RXBYTES
+// jest 7-bitowy, wiec 128+1 pokrywa kazda mozliwa wartosc.
+#define FIFO_BURST_MAX 128
 static void read_fifo_burst(uint8_t *buf, size_t len) {
+    static uint8_t tx[FIFO_BURST_MAX + 1];
+    static uint8_t rx[FIFO_BURST_MAX + 1];
     if (len == 0) return;
-    uint8_t *tx = calloc(1, len + 1);
-    uint8_t *rx = calloc(1, len + 1);
+    if (len > FIFO_BURST_MAX) len = FIFO_BURST_MAX;
+    memset(tx, 0, len + 1);
     tx[0] = RXFIFO | READ_BURST;
     spi_transaction_t t = {
         .length    = (len + 1) * 8,
@@ -213,8 +220,6 @@ static void read_fifo_burst(uint8_t *buf, size_t len) {
     };
     ESP_ERROR_CHECK(spi_device_transmit(s_spi, &t));
     memcpy(buf, rx + 1, len);
-    free(tx);
-    free(rx);
 }
 
 static int8_t convert_rssi(uint8_t raw) {
@@ -258,25 +263,11 @@ static size_t encoded_size_3of6(size_t decoded_size) {
     return (3 * decoded_size + 1) / 2;
 }
 
-// Oblicz pelna dlugosc ramki wMbus (z CRC) na podstawie L-field
-static size_t wmbus_frame_size(uint8_t l_field) {
-    // 2 pierwsze bloki = 25 bajtow (bez CRC i L), kolejne po 16
-    size_t nrBlocks = (l_field < 26) ? 2 : ((l_field - 26) / 16 + 3);
-    // L-field + 1 (samo L) + 2 bajty CRC na kazdy blok
-    return l_field + 1 + 2 * nrBlocks;
-}
-
 static int s_decode_err_seg = -1;  // diagnostyka: segment na ktorym pekl dekoder
 static int s_decode_partial_len = 0; // ile bajtow zdekodowano przed bledem
 
 static int decode_3of6(const uint8_t *coded, size_t coded_len,
                        uint8_t *out, size_t out_max) {
-    static const int8_t lut[64] = {
-        [0b010110]=0x0, [0b001101]=0x1, [0b001110]=0x2, [0b001011]=0x3,
-        [0b011100]=0x4, [0b011001]=0x5, [0b011010]=0x6, [0b010011]=0x7,
-        [0b101100]=0x8, [0b100101]=0x9, [0b100110]=0xA, [0b100011]=0xB,
-        [0b110100]=0xC, [0b110001]=0xD, [0b110010]=0xE, [0b101001]=0xF,
-    };
     // Tablica: domyślnie 0 to też 0x0, więc oznaczmy nieprawidłowe jako -1
     static int8_t lut_valid[64];
     static bool lut_init = false;
@@ -292,7 +283,6 @@ static int decode_3of6(const uint8_t *coded, size_t coded_len,
         lut_valid[0b110010]=0xE; lut_valid[0b101001]=0xF;
         lut_init = true;
     }
-    (void)lut;
 
     size_t segments = coded_len * 8 / 6;
     int out_len = 0;

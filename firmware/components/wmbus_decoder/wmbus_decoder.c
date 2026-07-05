@@ -46,6 +46,7 @@ static void store_raw_frame(const wmbus_frame_t *frame) {
 
 // Parsuj ID licznika z ramki wMbus (bajty 4-7, little-endian BCD)
 static void parse_meter_id(const uint8_t *data, char *out, size_t out_len) {
+    if (out_len > 0) out[0] = 0;   // wynik zawsze zdefiniowany (strlen u wolajacego)
     if (data[0] < 0x0C) return; // za krótka ramka
     snprintf(out, out_len, "%02x%02x%02x%02x",
              data[7], data[6], data[5], data[4]);
@@ -133,24 +134,12 @@ void wmbus_decoder_init(void) {
 
 // Sprawdza czy ramka jest zaszyfrowana (na podstawie CI-field i tpl-cfg)
 // oraz czy dla danego ID jest zapisany klucz w konfiguracji.
+// UWAGA: ramka z eteru zawiera CRC blokow (CI jest na [12], nie [10]),
+// a tryb szyfrowania to bity 8-12 slowa CFG - cala logika (usuwanie CRC,
+// naglowek krotki/dlugi, wykrywanie payloadu juz jawnego 2F2F) jest
+// w meter_total_needs_key(), przetestowanym na wektorach wmbusmeters.
 static void check_encryption_key(const uint8_t *data, size_t len, const char *id) {
-    if (len < 16) return;
-    // Znajdz CI-field: po naglowku DLL (10 bajtow) - bajt [10]
-    uint8_t ci = data[10];
-    bool encrypted = false;
-    // 0x7A = short tpl header: [11]=ACC [12]=STS [13..14]=CFG
-    if (ci == 0x7A && len >= 15) {
-        uint8_t cfg_hi = data[14];  // gorny bajt konfiguracji
-        // tryb szyfrowania w bitach: !=0 oznacza szyfrowanie (AES_CBC=5, AES_CTR itp)
-        uint8_t mode = (cfg_hi >> 4) & 0x0F;
-        if (mode != 0) encrypted = true;
-    } else if (ci == 0x72 && len >= 19) {
-        // long tpl header - cfg dalej
-        uint8_t cfg_hi = data[18];
-        uint8_t mode = (cfg_hi >> 4) & 0x0F;
-        if (mode != 0) encrypted = true;
-    }
-    if (!encrypted) return;
+    if (!meter_total_needs_key(data, len)) return;
 
     // Sprawdz czy jest klucz w konfiguracji dla tego ID
     sih_config_t cfg = nvs_config_get();

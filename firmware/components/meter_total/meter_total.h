@@ -14,6 +14,10 @@ bool meter_total_extract(const uint8_t *data, size_t len,
                          const char *key_hex,
                          double *out_total, int *out_kind);
 
+// Czy ramka (surowa, z CRC blokow) jest zaszyfrowana (tryb != 0) i wymaga klucza?
+// Zwraca false dla ramek jawnych lub juz odszyfrowanych (payload 2F2F).
+bool meter_total_needs_key(const uint8_t *data, size_t len);
+
 // --- Wielopolowa ekstrakcja (dla licznika energii: energia, moc, napiecia) ---
 #define MTF_MAX_FIELDS 16
 typedef struct {

@@ -415,7 +415,16 @@ void ota_start_from_url(const char *url) {
 void ota_start_from_buffer(const uint8_t *data, size_t len) {
     typedef struct { uint8_t *data; size_t len; } buf_arg_t;
     buf_arg_t *ba = malloc(sizeof(buf_arg_t));
+    if (!ba) {
+        ESP_LOGE(TAG, "OTA: brak pamieci na argumenty");
+        return;
+    }
     ba->data = malloc(len);
+    if (!ba->data) {
+        ESP_LOGE(TAG, "OTA: brak pamieci na bufor %d B", (int)len);
+        free(ba);
+        return;
+    }
     ba->len  = len;
     memcpy(ba->data, data, len);
     s_status.state    = OTA_STATE_IDLE;

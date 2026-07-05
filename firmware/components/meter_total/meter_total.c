@@ -126,19 +126,160 @@ static void manuf3(const uint8_t *d, char out[4]) {
     out[3] = 0;
 }
 
+// ================================================================
+//  Warstwa TPL (EN 13757-3/-7): naglowek, tryb szyfrowania, payload
+// ================================================================
+typedef struct {
+    int     ci_pos;      // pozycja bajtu CI
+    int     enc_start;   // pierwszy bajt danych (szyfrowanych lub jawnych)
+    int     mode;        // tryb bezpieczenstwa (0=jawny, 5=AES-CBC)
+    int     nblocks;     // liczba szyfrowanych blokow 16B (0 = nieznana)
+    uint8_t acc;         // access number (do IV)
+    bool    long_hdr;    // true = CI 0x72 (dlugi naglowek TPL)
+} tpl_info_t;
+
+// Znajdz naglowek TPL w ramce bez CRC blokow. CI powinno byc na [10];
+// okno wyszukiwania zostawione dla ramek z dodatkowymi warstwami (ELL).
+static bool find_tpl(const uint8_t *b, int len, tpl_info_t *t) {
+    if (!b || len < 15) return false;
+    int ci = -1;
+    if (b[10] == 0x7A || b[10] == 0x72) ci = 10;
+    else for (int i = 10; i < 20 && i < len; i++)
+        if (b[i] == 0x7A || b[i] == 0x72) { ci = i; break; }
+    if (ci < 0) return false;
+
+    memset(t, 0, sizeof(*t));
+    t->ci_pos = ci;
+    if (b[ci] == 0x7A) {                       // krotki naglowek: ACC STS CFG(2)
+        if (ci + 5 > len) return false;
+        t->acc       = b[ci + 1];
+        uint16_t cfg = b[ci + 3] | (b[ci + 4] << 8);
+        t->mode      = (cfg >> 8) & 0x1F;      // bity 8-12 slowa CFG
+        t->nblocks   = (cfg >> 4) & 0x0F;      // liczba szyfrowanych blokow
+        t->enc_start = ci + 5;
+        t->long_hdr  = false;
+    } else {                                   // 0x72, dlugi: ID(4) M(2) V T ACC STS CFG(2)
+        if (ci + 13 > len) return false;
+        t->acc       = b[ci + 9];
+        uint16_t cfg = b[ci + 11] | (b[ci + 12] << 8);
+        t->mode      = (cfg >> 8) & 0x1F;
+        t->nblocks   = (cfg >> 4) & 0x0F;
+        t->enc_start = ci + 13;
+        t->long_hdr  = true;
+    }
+    return true;
+}
+
+// Zwraca payload TPL (jawny lub odszyfrowany) do out. Wynik moze zaczynac sie
+// markerem 2F2F. Zwraca dlugosc lub -1 (brak naglowka / zly klucz / zly tryb).
+// Zgodnie z wmbusmeters: payload zaczynajacy sie 2F2F traktujemy jako juz jawny
+// niezaleznie od trybu w CFG (telegramy wczesniej odszyfrowane / testowe).
+static int tpl_payload(const uint8_t *b, int len,
+                       const uint8_t key[16], bool have_key,
+                       uint8_t *out, int out_cap, tpl_info_t *out_tpl) {
+    tpl_info_t t;
+    if (!find_tpl(b, len, &t)) return -1;
+    if (out_tpl) *out_tpl = t;
+    int avail = len - t.enc_start;
+    if (avail <= 0) return -1;
+
+    // Jawny payload: tryb 0 albo marker 2F2F juz na poczatku
+    if (t.mode == 0 ||
+        (avail >= 2 && b[t.enc_start] == 0x2F && b[t.enc_start + 1] == 0x2F)) {
+        int n = avail;
+        if (n > out_cap) n = out_cap;
+        memcpy(out, b + t.enc_start, n);
+        return n;
+    }
+
+    if (t.mode != 5 || !have_key) return -1;   // obslugujemy tylko AES-CBC (tryb 5)
+
+    int encLen = (avail / 16) * 16;
+    if (t.nblocks > 0 && t.nblocks * 16 < encLen) encLen = t.nblocks * 16;
+    if (encLen <= 0 || encLen > 240) return -1;
+
+    // IV trybu 5: M(2) + A(6) + ACC x8. Dla dlugiego naglowka adres z TPL.
+    uint8_t iv[16];
+    if (t.long_hdr) {
+        int c = t.ci_pos;
+        iv[0] = b[c + 5]; iv[1] = b[c + 6];               // M-field z TPL
+        for (int i = 0; i < 4; i++) iv[2 + i] = b[c + 1 + i]; // ID
+        iv[6] = b[c + 7]; iv[7] = b[c + 8];               // wersja, typ
+    } else {
+        for (int i = 0; i < 8; i++) iv[i] = b[2 + i];     // M+A z warstwy DLL
+    }
+    for (int i = 8; i < 16; i++) iv[i] = t.acc;
+
+    uint8_t dec[240];
+    if (!aes_cbc(key, iv, b + t.enc_start, encLen, dec)) return -1;
+    if (!(dec[0] == 0x2F && dec[1] == 0x2F)) return -1;   // weryfikacja klucza
+
+    int n = encLen;
+    if (n > out_cap) n = out_cap;
+    memcpy(out, dec, n);
+    // dolacz jawna koncowke po szyfrowanych blokach (dozwolone przez norme)
+    int trail = avail - encLen;
+    if (trail > 0 && n == encLen) {
+        int td = trail;
+        if (n + td > out_cap) td = out_cap - n;
+        if (td > 0) { memcpy(out + n, b + t.enc_start + encLen, td); n += td; }
+    }
+    return n;
+}
+
+// Czy ramka (surowa, z CRC blokow) jest zaszyfrowana i wymaga klucza?
+bool meter_total_needs_key(const uint8_t *data, size_t len) {
+    if (!data || len < 15) return false;
+    uint8_t clean[300];
+    int clen = remove_block_crc(data, (int)len, clean, sizeof(clean));
+    tpl_info_t t;
+    if (!find_tpl(clean, clen, &t)) return false;
+    if (t.mode == 0) return false;
+    int avail = clen - t.enc_start;
+    if (avail >= 2 && clean[t.enc_start] == 0x2F && clean[t.enc_start + 1] == 0x2F)
+        return false;   // juz jawny
+    return true;
+}
+
 // ---------- Apator: rozmiar rejestru ----------
+// Pelna tabela wg gramatyki wmbusmeters drivers/src/apator162.xmq.
+// Zwraca liczbe bajtow danych po bajcie rejestru, lub -1 gdy nieznany.
 static int apator_reg_size(uint8_t c) {
     switch (c) {
-        case 0x0F: return -1; // marker, obsluga osobno
-        case 0x10: return 4;
-        case 0x11: return 2;
-        case 0x40: return 6; case 0x41: return 2; case 0x42: return 4;
-        case 0x43: return 2; case 0x44: return 3;
-        case 0x7B: return 49;
-        case 0xA0: return 4;
+        case 0x00: return 4;                  // data
+        case 0x01: return 3;                  // usterki
+        case 0x0F: return -1;                 // marker, obsluga osobno
+        case 0x10: return 4;                  // TOTAL (uint32 LE, litry)
+        case 0x11: return 2;                  // przeplyw
+        case 0x40: return 6;
+        case 0x41: return 2;
+        case 0x42: return 4;
+        case 0x43: return 2;
+        case 0x44: return 3;
+        case 0xA0: case 0xA1: case 0xA4: case 0xF0: return 4;
+        case 0xA2: case 0xA5: case 0xA9: case 0xAF: return 1;
+        case 0xA3: return 7;
+        case 0xA6: return 3;
+        case 0xA7: case 0xA8: case 0xAA: case 0xAB: case 0xAC: case 0xAD:
+            return 2;
+        case 0x8A: return 9;                  // quad+quad+byte
+        case 0x8B: case 0x8C: return 6;       // triplet+triplet
+        case 0x8E: return 7;                  // quad+triplet
+        case 0xB0: return 5;
+        case 0xB1: case 0xB3: return 8;
+        case 0xB2: case 0xB5: return 16;
+        case 0xB4: return 2;
         default:
-            if (c >= 0x80 && c <= 0x8F) return 10;
-            if (c >= 0xB0 && c <= 0xBF) return 3;
+            // 0x71..0x7C: byte + (c - 0x6F) quadow = 1 + 4*(c-0x6F)
+            if (c >= 0x71 && c <= 0x7C) return 1 + 4 * (c - 0x6F);
+            // 0x80-0x84, 0x86, 0x87: quad+quad+word = 10
+            if (c == 0x80 || c == 0x81 || c == 0x82 || c == 0x83 ||
+                c == 0x84 || c == 0x86 || c == 0x87) return 10;
+            // 0x85, 0x88, 0x8F: quad+quad+triplet = 11
+            if (c == 0x85 || c == 0x88 || c == 0x8F) return 11;
+            if (c >= 0xB6 && c <= 0xBF) return 3;
+            if (c >= 0xC0 && c <= 0xC7) return 3;
+            if (c == 0xD0 || c == 0xD3) return 3;
             return -1;
     }
 }
@@ -151,7 +292,11 @@ static uint32_t u32be(const uint8_t *d, int o) {
            ((uint32_t)d[o+2] << 8) | d[o+3];
 }
 
+// Dekoder Diehl PRIOS. frame = ramka BEZ CRC blokow (CI na [10]).
+// Offsety zgodne z wmbusmeters manufacturer_specificities.cc:
+// klucz XOR bajty [2..5], [6..9], [10..13]; payload od [15].
 static bool izar_decode(const uint8_t *frame, int len, double *out_total) {
+    if (len < 20) return false;
     for (int ki = 0; ki < 2; ki++) {
         uint8_t kb[8];
         const char *kh = IZAR_KEYS[ki];
@@ -166,8 +311,8 @@ static bool izar_decode(const uint8_t *frame, int len, double *out_total) {
         uint32_t k = u32be(kb, 0) ^ u32be(kb, 4);
         k = (k ^ u32be(frame, 2));
         k = (k ^ u32be(frame, 6));
-        k = (k ^ u32be(frame, 12));
-        int size = len - 17;
+        k = (k ^ u32be(frame, 10));
+        int size = len - 15;
         if (size <= 0) continue;
         uint8_t dec[64];
         if (size > 64) size = 64;
@@ -178,7 +323,8 @@ static bool izar_decode(const uint8_t *frame, int len, double *out_total) {
                                 ((kk >> 11) & 1) ^ ((kk >> 31) & 1)) & 1;
                 kk = (kk << 1) | bit;
             }
-            dec[i] = frame[i + 17] ^ (kk & 0xFF);
+            dec[i] = frame[i + 15] ^ (kk & 0xFF);
+            if (i == 0 && dec[0] != 0x4B) break;   // bajt kontrolny PRIOS
         }
         if (dec[0] == 0x4B) {
             uint32_t t = dec[1] | (dec[2] << 8) | (dec[3] << 16) | ((uint32_t)dec[4] << 24);
@@ -189,56 +335,84 @@ static bool izar_decode(const uint8_t *frame, int len, double *out_total) {
     return false;
 }
 
-// ---------- DIF/VIF: szukaj Volume (m3) lub Energy (kWh) ----------
-// Zwraca true gdy znaleziono. Tylko glowny total (pierwszy pasujacy DIF 0x0C/0x04).
+// ---------- pomocnik DIF/VIF: dlugosc danych wg dolnego nibbla DIF ----------
+static int dif_data_len(uint8_t dif) {
+    switch (dif & 0x0F) {
+        case 0x00: return 0;
+        case 0x01: return 1;
+        case 0x02: return 2;
+        case 0x03: return 3;
+        case 0x04: return 4;
+        case 0x05: return 4;   // real 32b
+        case 0x06: return 6;
+        case 0x07: return 8;
+        case 0x08: return 0;   // selection for readout
+        case 0x09: return 1;   // BCD2
+        case 0x0A: return 2;   // BCD4
+        case 0x0B: return 3;   // BCD6
+        case 0x0C: return 4;   // BCD8
+        case 0x0D: return -1;  // LVAR - dlugosc w pierwszym bajcie danych
+        case 0x0E: return 6;   // BCD12
+        default:   return 0;   // 0x0F obslugiwane wyzej jako koniec
+    }
+}
+
+// Dlugosc rekordu LVAR (DIF 0x0D) na podstawie bajtu LVAR (EN 13757-3).
+// Zwracana wartosc NIE obejmuje samego bajtu LVAR.
+static int lvar_data_len(uint8_t lvar) {
+    if (lvar <= 0xBF) return lvar;             // ASCII
+    if (lvar <= 0xCF) return lvar - 0xC0;      // BCD dodatnie
+    if (lvar <= 0xDF) return lvar - 0xD0;      // BCD ujemne
+    if (lvar <= 0xEF) return lvar - 0xE0;      // binarne
+    if (lvar == 0xF8) return 8;                // float64 wg rozszerzen
+    return -1;                                 // niezdefiniowane - przerwij parsowanie
+}
+
+// ---------- DIF/VIF: szukaj glownego total - Volume (m3) lub Energy (kWh) ----------
+// Akceptuje tylko rekord chwilowy, biezacy (funkcja=0, storage=0, bez taryfy).
 static bool difvif_total(const uint8_t *p, int len, double *out_total, int *out_kind) {
     int i = 0;
     while (i < len) {
         uint8_t dif = p[i++];
-        if (dif == 0x2F) continue;        // wypelniacz
-        if (dif == 0x0F || dif == 0x1F) break; // koniec / producent
-        int dn = 0;                        // dlugosc danych wg DIF
-        switch (dif & 0x0F) {
-            case 0x00: dn = 0; break;
-            case 0x01: dn = 1; break;
-            case 0x02: dn = 2; break;
-            case 0x03: dn = 3; break;
-            case 0x04: dn = 4; break;
-            case 0x05: dn = 4; break;      // real
-            case 0x06: dn = 6; break;
-            case 0x07: dn = 8; break;
-            case 0x09: dn = 1; break;      // BCD 2 cyfry
-            case 0x0A: dn = 2; break;
-            case 0x0B: dn = 3; break;
-            case 0x0C: dn = 4; break;      // BCD 8 cyfr
-            case 0x0E: dn = 6; break;
-            default: dn = 0; break;
+        if (dif == 0x2F) continue;             // wypelniacz
+        if (dif == 0x0F || dif == 0x1F) break; // dane producenta / koniec
+        int dn = dif_data_len(dif);
+        // funkcja (bity 4-5): 0=wartosc chwilowa; storage LSB (bit 6)
+        bool current = ((dif & 0x70) == 0);
+        // pomin DIFE; taryfa != 0 dyskwalifikuje rekord jako glowny total
+        while (i < len && (p[i-1] & 0x80)) {
+            if (((p[i] >> 4) & 0x03) != 0 || (p[i] & 0x0F) != 0) current = false;
+            i++;
         }
-        // pomin DIFE
-        while (i < len && (p[i-1] & 0x80)) i++;
         if (i >= len) break;
         uint8_t vif = p[i++];
         while (i < len && (p[i-1] & 0x80)) i++;  // pomin VIFE
+        if (dn < 0) {                            // LVAR
+            if (i >= len) break;
+            dn = lvar_data_len(p[i]);
+            if (dn < 0) break;
+            i++;                                 // bajt LVAR
+        }
         if (i + dn > len) break;
 
         // skala wg VIF
         double scale = 0; int kind = 0;
         uint8_t v = vif & 0x7F;
         if (v >= 0x10 && v <= 0x17) {      // Volume m3, 10^(n-6)
-            scale = 1.0; int e = (v & 0x07) - 6;
+            int e = (v & 0x07) - 6;
             double m = 1; for (int z=0; z<(e<0?-e:e); z++) m *= 10;
             scale = (e < 0) ? 1.0/m : m; kind = 1;
-        } else if (v >= 0x00 && v <= 0x07) { // Energy Wh, 10^(n-3) -> kWh
+        } else if (v <= 0x07) {            // Energy Wh, 10^(n-3) -> kWh
             int e = (v & 0x07) - 3;
             double m = 1; for (int z=0; z<(e<0?-e:e); z++) m *= 10;
             scale = ((e < 0) ? 1.0/m : m) / 1000.0; kind = 2;
         }
 
-        if (kind != 0) {
+        if (kind != 0 && current && dn > 0) {
             // odczytaj wartosc
             double val = 0;
-            if ((dif & 0x0F) == 0x0C || (dif & 0x0F) == 0x09 ||
-                (dif & 0x0F) == 0x0A || (dif & 0x0F) == 0x0B || (dif & 0x0F) == 0x0E) {
+            int lo = dif & 0x0F;
+            if (lo >= 0x09 && lo <= 0x0E && lo != 0x0D) {
                 // BCD
                 double mult = 1;
                 for (int b = 0; b < dn; b++) {
@@ -260,42 +434,23 @@ static bool difvif_total(const uint8_t *p, int len, double *out_total, int *out_
     return false;
 }
 
-// ---------- Apator woda: AES + rejestry ----------
+// ---------- Apator woda: TPL/AES + rejestry ----------
 static bool apator_total(const uint8_t *b, int len, const uint8_t key[16],
                          bool have_key, double *out_total) {
-    int ci = -1;
-    for (int i = 10; i < 20 && i < len; i++) if (b[i] == 0x7A) { ci = i; break; }
-    if (ci < 0) return false;
-    uint8_t content[256]; int clen = 0;
+    uint8_t payload[256];
+    int plen = tpl_payload(b, len, key, have_key, payload, sizeof(payload), NULL);
+    if (plen <= 0) return false;
 
-    if (have_key) {
-        uint8_t iv[16];
-        for (int i = 0; i < 8; i++) iv[i] = b[2+i];
-        for (int i = 8; i < 16; i++) iv[i] = b[ci+1];
-        int encStart = ci + 5;
-        int encLen = ((len - encStart) / 16) * 16;
-        if (encLen > 0 && encLen <= 240) {
-            uint8_t dec[240];
-            if (aes_cbc(key, iv, b + encStart, encLen, dec)) {
-                if (dec[0] == 0x2F && dec[1] == 0x2F) {
-                    clen = encLen - 2;
-                    memcpy(content, dec + 2, clen);
-                }
-            }
-        }
-    }
-    if (clen == 0) {
-        int cs = ci + 5;
-        if (cs+1 < len && b[cs] == 0x2F && b[cs+1] == 0x2F) cs += 2;
-        clen = len - cs;
-        if (clen > 256) clen = 256;
-        if (clen > 0) memcpy(content, b + cs, clen);
-    }
-    // rejestry: pomin pierwsze 8 bajtow, szukaj 0x10 (total uint32 LE /1000)
+    const uint8_t *content = payload;
+    int clen = plen;
+    if (clen >= 2 && content[0] == 0x2F && content[1] == 0x2F) { content += 2; clen -= 2; }
+
+    // struktura (wmbusmeters apator162): 1 bajt wiodacy (0x0F lub 0x80),
+    // 7 bajtow statusu, potem rejestry; 0x10 = total uint32 LE w litrach
     int i = 8;
     while (i < clen) {
         uint8_t c = content[i];
-        if (c == 0xFF) break;
+        if (c == 0xFF) break;                 // wypelnienie przed suma kontrolna
         int sz = apator_reg_size(c);
         i++;
         if (sz == -1 || i + sz > clen) break;
@@ -309,23 +464,15 @@ static bool apator_total(const uint8_t *b, int len, const uint8_t key[16],
     return false;
 }
 
-// ---------- Amiplus/Unismart: AES + DIF/VIF ----------
+// ---------- Liczniki DIF/VIF (Amiplus/Unismart/generyczne): TPL/AES + total ----------
 static bool difvif_meter(const uint8_t *b, int len, const uint8_t key[16],
                          bool have_key, double *out_total, int *out_kind) {
-    if (!have_key) return false;
-    int ci = -1;
-    for (int i = 10; i < 20 && i < len; i++) if (b[i] == 0x7A) { ci = i; break; }
-    if (ci < 0) return false;
-    uint8_t iv[16];
-    for (int i = 0; i < 8; i++) iv[i] = b[2+i];
-    for (int i = 8; i < 16; i++) iv[i] = b[ci+1];
-    int encStart = ci + 5;
-    int encLen = ((len - encStart) / 16) * 16;
-    if (encLen <= 0 || encLen > 240) return false;
-    uint8_t dec[240];
-    if (!aes_cbc(key, iv, b + encStart, encLen, dec)) return false;
-    if (!(dec[0] == 0x2F && dec[1] == 0x2F)) return false;
-    return difvif_total(dec + 2, encLen - 2, out_total, out_kind);
+    uint8_t payload[256];
+    int plen = tpl_payload(b, len, key, have_key, payload, sizeof(payload), NULL);
+    if (plen <= 0) return false;
+    const uint8_t *p = payload;
+    if (plen >= 2 && p[0] == 0x2F && p[1] == 0x2F) { p += 2; plen -= 2; }
+    return difvif_total(p, plen, out_total, out_kind);
 }
 
 // ---------- Glowna funkcja ----------
@@ -359,15 +506,10 @@ static int difvif_fields(const uint8_t *p, int len, mtf_field_t *out, int max_fi
         uint8_t dif = p[i];
         if (dif == 0x2F) { i++; continue; }
         if (dif == 0x0F || dif == 0x1F) break;
-        int dn = 0;
-        switch (dif & 0x0F) {
-            case 0x01: dn=1; break; case 0x02: dn=2; break; case 0x03: dn=3; break;
-            case 0x04: dn=4; break; case 0x05: dn=4; break; case 0x06: dn=6; break;
-            case 0x07: dn=8; break; case 0x09: dn=1; break; case 0x0A: dn=2; break;
-            case 0x0B: dn=3; break; case 0x0C: dn=4; break; case 0x0E: dn=6; break;
-            default: dn=0; break;
-        }
+        int dn = dif_data_len(dif);
         int isbcd = ((dif & 0x0F) >= 0x09 && (dif & 0x0F) <= 0x0E && (dif & 0x0F) != 0x0D);
+        int func = (dif >> 4) & 0x03;      // 0=chwilowa, 1=max, 2=min, 3=blad
+        bool storage = (dif & 0x40) != 0;  // wartosc z poprzedniego okresu
         i++;
         // odczyt DIFE - wyciagnij numer taryfy z bitow 4-5 pierwszego DIFE
         int tariff = 0;
@@ -378,8 +520,19 @@ static int difvif_fields(const uint8_t *p, int len, mtf_field_t *out, int max_fi
         }
         if (i >= len) break;
         uint8_t vif = p[i]; i++;
-        uint8_t vife = 0;
-        while (i < len && (p[i-1] & 0x80)) { vife = p[i]; i++; }
+        uint8_t vife_first = 0, vife = 0;
+        bool have_vife = false;
+        while (i < len && (p[i-1] & 0x80)) {
+            vife = p[i];
+            if (!have_vife) { vife_first = vife; have_vife = true; }
+            i++;
+        }
+        if (dn < 0) {                      // LVAR
+            if (i >= len) break;
+            dn = lvar_data_len(p[i]);
+            if (dn < 0) break;
+            i++;
+        }
         if (i + dn > len) break;
 
         double val = 0;
@@ -396,10 +549,12 @@ static int difvif_fields(const uint8_t *p, int len, mtf_field_t *out, int max_fi
         }
 
         uint8_t v = vif & 0x7F;
-        bool backflow = (vife == 0x3C);
+        // "energia wsteczna" (produkcja): VIFE 0x3C w lancuchu (Amiplus: 83 3C)
+        bool backflow = (vife == 0x3C || vife_first == 0x3C);
 
-        if ((v >= 0x00 && v <= 0x07) || vif == 0x83) {
-            int e = (v <= 0x07) ? ((v & 0x07) - 3) : 0;
+        if (v <= 0x07 && func == 0 && !storage) {
+            // Energia Wh, 10^(n-3) -> kWh
+            int e = (v & 0x07) - 3;
             double m = 1; for (int z=0; z<(e<0?-e:e); z++) m *= 10;
             double kwh = val * ((e < 0) ? 1.0/m : m) / 1000.0;
             if (tariff == 0) {
@@ -414,16 +569,28 @@ static int difvif_fields(const uint8_t *p, int len, mtf_field_t *out, int max_fi
                 mtf_put(out, &nf, max_fields, name, kwh, "kWh", 1);
             }
         }
-        else if ((v >= 0x28 && v <= 0x2F) || vif == 0xAB || vif == 0xFB) {
-            int e = (v >= 0x28 && v <= 0x2F) ? ((v & 0x07) - 3) : 0;  // AB/FB: wartosc w W
+        else if (v >= 0x28 && v <= 0x2F && !storage) {
+            // Moc W, 10^(n-3) -> kW; funkcja 1 = wartosc maksymalna
+            int e = (v & 0x07) - 3;
             double m = 1; for (int z=0; z<(e<0?-e:e); z++) m *= 10;
             double kw = val * ((e < 0) ? 1.0/m : m) / 1000.0;
-            if (!backflow) mtf_put(out, &nf, max_fields, "moc_kw", kw, "kW", 0);
-            else           mtf_put(out, &nf, max_fields, "moc_produkcji_kw", kw, "kW", 0);
+            if (func == 0) {
+                if (!backflow) mtf_put(out, &nf, max_fields, "moc_kw", kw, "kW", 0);
+                else           mtf_put(out, &nf, max_fields, "moc_produkcji_kw", kw, "kW", 0);
+            } else if (func == 1 && !backflow) {
+                mtf_put(out, &nf, max_fields, "moc_max_kw", kw, "kW", 0);
+            }
         }
-        else if (vif == 0xFD && (vife >= 0x01 && vife <= 0x03) && volt_idx < 3) {
-            char name[24]; snprintf(name, sizeof(name), "napiecie_l%d_v", volt_idx + 1);
-            mtf_put(out, &nf, max_fields, name, val / 10.0, "V", 0);
+        else if (vif == 0xFD && (vife_first & 0x70) == 0x40 &&
+                 func == 0 && !storage && volt_idx < 3) {
+            // Napiecie: VIF FD, VIFE 0x40-0x4F -> 10^(nnnn-9) V,
+            // ostatni VIFE (po 0xFC "at phase") = numer fazy 1-3
+            int e = (vife_first & 0x0F) - 9;
+            double m = 1; for (int z=0; z<(e<0?-e:e); z++) m *= 10;
+            double volts = val * ((e < 0) ? 1.0/m : m);
+            int phase = (vife >= 1 && vife <= 3) ? (int)vife : (volt_idx + 1);
+            char name[24]; snprintf(name, sizeof(name), "napiecie_l%d_v", phase);
+            mtf_put(out, &nf, max_fields, name, volts, "V", 0);
             volt_idx++;
         }
         i += dn;
@@ -444,21 +611,16 @@ int meter_total_extract_fields(const uint8_t *data, size_t len,
     int clen = remove_block_crc(data, (int)len, clean, sizeof(clean));
 
     // Tylko Amiplus prad (APA, medium 0x02) ma wiele pol
-    if (strcmp(mf, "APA") == 0 && medium == 0x02 && have_key) {
-        int ci = -1;
-        for (int i = 10; i < 20 && i < clen; i++) if (clean[i] == 0x7A) { ci = i; break; }
-        if (ci < 0) return 0;
-        uint8_t iv[16];
-        for (int i = 0; i < 8; i++) iv[i] = clean[2+i];
-        for (int i = 8; i < 16; i++) iv[i] = clean[ci+1];
-        int encStart = ci + 5;
-        int encLen = ((clen - encStart) / 16) * 16;
-        if (encLen <= 0 || encLen > 240) return 0;
-        uint8_t dec[240];
-        if (!aes_cbc(key, iv, clean + encStart, encLen, dec)) return 0;
-        if (!(dec[0] == 0x2F && dec[1] == 0x2F)) return 0;
-        *out_kind = 2;
-        return difvif_fields(dec + 2, encLen - 2, out, max_fields);
+    if (strcmp(mf, "APA") == 0 && medium == 0x02) {
+        uint8_t payload[256];
+        int plen = tpl_payload(clean, clen, key, have_key, payload, sizeof(payload), NULL);
+        if (plen > 0) {
+            const uint8_t *p = payload;
+            if (plen >= 2 && p[0] == 0x2F && p[1] == 0x2F) { p += 2; plen -= 2; }
+            int nf = difvif_fields(p, plen, out, max_fields);
+            if (nf > 0) { *out_kind = 2; return nf; }
+        }
+        return 0;
     }
 
     // Pozostale liczniki: jedno pole total (uzyj istniejacej funkcji)
@@ -491,9 +653,10 @@ bool meter_total_extract(const uint8_t *data, size_t len,
     uint8_t clean[300];
     int clen = remove_block_crc(data, (int)len, clean, sizeof(clean));
 
-    // IZAR (Diehl SAP, woda) - LFSR, dziala na surowej ramce
-    if (strcmp(mf, "SAP") == 0 && medium == 0x01) {
-        if (izar_decode(data, (int)len, out_total)) { *out_kind = 1; return true; }  // 1=woda
+    // IZAR / PRIOS (Diehl: SAP, DME, Hydrometer: HYD) - LFSR, bez klucza AES.
+    // Walidacja bajtem kontrolnym 0x4B, wiec brak filtra medium.
+    if (strcmp(mf, "SAP") == 0 || strcmp(mf, "DME") == 0 || strcmp(mf, "HYD") == 0) {
+        if (izar_decode(clean, clen, out_total)) { *out_kind = 1; return true; }  // 1=woda
         return false;
     }
     // Apator woda (APA, medium 0x06/0x07)
@@ -512,6 +675,16 @@ bool meter_total_extract(const uint8_t *data, size_t len,
         int k = 0;
         if (difvif_meter(clean, clen, key, have_key, out_total, &k)) { *out_kind = 3; return true; }  // 3=gaz
         return false;
+    }
+    // Generyczny fallback: liczniki z naglowkiem TPL (0x7A/0x72) i standardowym
+    // DIF/VIF (jawne lub AES-CBC z kluczem) - np. iPerl i inne EN 13757-3.
+    {
+        int k = 0;
+        if (difvif_meter(clean, clen, key, have_key, out_total, &k)) {
+            if (k == 1 && medium == 0x03) k = 3;  // objetosc na liczniku gazu
+            *out_kind = k;
+            return true;
+        }
     }
     return false;
 }

@@ -606,23 +606,44 @@ int history_get_day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf
         }
     }
 
-    // Fallback do archiwum tylko gdy w RAM nie znaleziono godzin tej doby (starszy dzien).
+    // Fallback do archiwum tylko gdy w RAM nie znaleziono godzin tej doby (starszy
+    // lub pusty dzien). Rekordy w archiwum sa chronologiczne (rosnace ts) w
+    // kolejnosci logicznej, wiec NIE skanujemy calego ringu (do 17520 rekordow po
+    // jednym fseek+fread na SPIFFS = dziesiatki sekund z trzymanym s_mutex, co
+    // blokowalo history_on_reading i zawieszalo modul przy przegladaniu dni bez
+    // historii). Zamiast tego: wyszukiwanie binarne pierwszego rekordu doby
+    // (~15 odczytow) + odczyt sekwencyjny do konca doby (max ~25 rekordow).
     if (nb == 0) {
         char path[48]; archive_path(id_hex, path, sizeof(path));
         FILE *f = s_fs_ok ? fopen(path, "rb") : NULL;
         if (f) {
             int count = 0, head = 0;
-            if (arc_read_header(f, &count, &head)) {
-                for (int i = 0; i < count && nb < ARC_DAY_BUF; i++) {
-                    int phys = (head + i) % HIST_ARCHIVE_HOURS;
-                    hist_bucket_t rec;
-                    if (fseek(f, arc_rec_off(phys), SEEK_SET) != 0) break;
-                    if (fread(&rec, sizeof(rec), 1, f) != 1) break;
-                    if (rec.ts >= d0 && rec.ts < d1) {
-                        s_day_buf[nb++] = rec;
-                    } else if (rec.ts < d0) {
+            if (arc_read_header(f, &count, &head) && count > 0) {
+                hist_bucket_t rec;
+                // Najmniejszy indeks logiczny lo z ts >= d0.
+                int lo = 0, hi = count;
+                while (lo < hi) {
+                    int mid = lo + (hi - lo) / 2;
+                    int phys = (head + mid) % HIST_ARCHIVE_HOURS;
+                    if (fseek(f, arc_rec_off(phys), SEEK_SET) != 0 ||
+                        fread(&rec, sizeof(rec), 1, f) != 1) { lo = count; break; }
+                    if (rec.ts < d0) lo = mid + 1; else hi = mid;
+                }
+                // Rekord poprzedzajacy dobe - baza roznicy dla pierwszej godziny.
+                if (lo > 0 && lo <= count) {
+                    int phys = (head + lo - 1) % HIST_ARCHIVE_HOURS;
+                    if (fseek(f, arc_rec_off(phys), SEEK_SET) == 0 &&
+                        fread(&rec, sizeof(rec), 1, f) == 1 && rec.ts < d0) {
                         prev = rec; has_prev = true;
                     }
+                }
+                // Sekwencyjnie od lo; rekordy rosnace, wiec koniec przy ts >= d1.
+                for (int i = lo; i < count && nb < ARC_DAY_BUF; i++) {
+                    int phys = (head + i) % HIST_ARCHIVE_HOURS;
+                    if (fseek(f, arc_rec_off(phys), SEEK_SET) != 0) break;
+                    if (fread(&rec, sizeof(rec), 1, f) != 1) break;
+                    if (rec.ts >= d1) break;
+                    if (rec.ts >= d0) s_day_buf[nb++] = rec;
                 }
             }
             fclose(f);

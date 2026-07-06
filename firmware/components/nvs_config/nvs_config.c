@@ -18,6 +18,8 @@ static void set_defaults(sih_config_t *c) {
     c->led_brightness = 50;    // 50% jasnosci
     c->led_status_enabled = true;    // dioda RGB statusu domyslnie wlaczona
     c->led_status_brightness = 50;   // 50% jasnosci
+    c->led_only_pinned = false;      // domyslnie mrugaj dla KAZDEJ ramki
+    c->led_blink_ms = 60;            // czas swiecenia po ramce
 }
 
 void nvs_config_init(void) {
@@ -47,6 +49,9 @@ void nvs_config_init(void) {
         set_defaults(&g_cfg);
     } else {
         ESP_LOGI(TAG, "Konfiguracja wczytana, %d liczników", g_cfg.meter_count);
+        // Normalizacja pol dodanych w nowszych wersjach (stary blob -> zera).
+        if (g_cfg.led_blink_ms < 20 || g_cfg.led_blink_ms > 5000)
+            g_cfg.led_blink_ms = 60;
         // Wyczysc smieciowe wpisy dashboard_ids (np. po migracji starej struktury):
         // poprawne ID = hex dlugosci 6-10. Reszta -> wyzeruj.
         bool cleaned = false;
@@ -134,4 +139,17 @@ void nvs_config_set_meter_name(const char *id_hex, const char *name) {
         return;
     }
     nvs_config_save(&g_cfg);
+}
+
+bool nvs_config_is_pinned(const char *id_hex) {
+    if (!id_hex || !id_hex[0]) return false;
+    for (int i = 0; i < MAX_METERS; i++) {
+        if (g_cfg.dashboard_ids[i][0] &&
+            strcasecmp(g_cfg.dashboard_ids[i], id_hex) == 0) return true;
+    }
+    return false;
+}
+
+bool nvs_config_led_only_pinned(void) {
+    return g_cfg.led_only_pinned;
 }

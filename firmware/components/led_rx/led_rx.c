@@ -12,11 +12,20 @@
 #define LED_MODE        LEDC_LOW_SPEED_MODE
 #define LED_RES         LEDC_TIMER_8_BIT   // duty 0-255
 #define LED_FREQ        5000
-#define BLINK_MS        60
+#define BLINK_MS_DEF    60
+#define BLINK_MS_MIN    20
+#define BLINK_MS_MAX    5000
 
 static const char *TAG = "LED_RX";
 static bool     s_enabled = true;
 static uint8_t  s_brightness = 50;   // 0-100 %
+static uint16_t s_blink_ms = BLINK_MS_DEF;
+
+static uint16_t clamp_blink_ms(uint16_t ms) {
+    if (ms < BLINK_MS_MIN) return BLINK_MS_DEF;
+    if (ms > BLINK_MS_MAX) return BLINK_MS_MAX;
+    return ms;
+}
 static bool     s_ready = false;
 static esp_timer_handle_t s_off_timer = NULL;
 
@@ -40,9 +49,10 @@ static void led_off_cb(void *arg) {
     led_set_duty(0);
 }
 
-void led_rx_init(bool enabled, uint8_t brightness) {
+void led_rx_init(bool enabled, uint8_t brightness, uint16_t blink_ms) {
     s_enabled = enabled;
     s_brightness = brightness > 100 ? 100 : brightness;
+    s_blink_ms = clamp_blink_ms(blink_ms);
 
     ledc_timer_config_t tcfg = {
         .speed_mode      = LED_MODE,
@@ -76,8 +86,8 @@ void led_rx_init(bool enabled, uint8_t brightness) {
 
     s_ready = true;
     led_set_duty(0);  // zgaszona na starcie
-    ESP_LOGI(TAG, "Dioda RX GPIO%d, %s, jasnosc %d%%",
-             LED_GPIO, s_enabled ? "wlaczona" : "wylaczona", s_brightness);
+    ESP_LOGI(TAG, "Dioda RX GPIO%d, %s, jasnosc %d%%, blysk %d ms",
+             LED_GPIO, s_enabled ? "wlaczona" : "wylaczona", s_brightness, s_blink_ms);
 }
 
 void led_rx_blink(void) {
@@ -85,16 +95,17 @@ void led_rx_blink(void) {
     // jasnosc % -> duty 0-255
     uint8_t duty = (uint16_t)s_brightness * 255 / 100;
     led_set_duty(duty);
-    // zaplanuj zgaszenie po BLINK_MS (restart timera jesli juz biegnie)
+    // zaplanuj zgaszenie po s_blink_ms (restart timera jesli juz biegnie)
     if (s_off_timer) {
         esp_timer_stop(s_off_timer);
-        esp_timer_start_once(s_off_timer, BLINK_MS * 1000);
+        esp_timer_start_once(s_off_timer, (uint64_t)s_blink_ms * 1000);
     }
 }
 
-void led_rx_set(bool enabled, uint8_t brightness) {
+void led_rx_set(bool enabled, uint8_t brightness, uint16_t blink_ms) {
     s_enabled = enabled;
     s_brightness = brightness > 100 ? 100 : brightness;
+    s_blink_ms = clamp_blink_ms(blink_ms);
     if (!s_ready) return;
     if (!s_enabled) led_set_duty(0);  // zgas natychmiast gdy wylaczona
 }

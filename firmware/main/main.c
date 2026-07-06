@@ -77,7 +77,7 @@ void app_main(void) {
     history_init();   // montuje SPIFFS, wczytuje historie
     {
         sih_config_t lc = nvs_config_get();
-        led_rx_init(lc.led_enabled, lc.led_brightness);
+        led_rx_init(lc.led_enabled, lc.led_brightness, lc.led_blink_ms);
         led_status_init(lc.led_status_enabled, lc.led_status_brightness);
     }
     wmbus_decoder_init();

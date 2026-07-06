@@ -158,7 +158,15 @@ static void check_encryption_key(const uint8_t *data, size_t len, const char *id
 void wmbus_decoder_on_frame(const wmbus_frame_t *frame) {
     if (!frame || frame->len < 12) return;
 
-    led_rx_blink();   // blysk diody RX przy odebraniu telegramu
+    // Blysk diody RX: domyslnie przy KAZDYM telegramie; w trybie
+    // "tylko dashboard" wylacznie gdy ramka pochodzi od licznika
+    // przypietego do dashboardu.
+    {
+        char blink_id[12];
+        parse_meter_id(frame->data, blink_id, sizeof(blink_id));
+        if (!nvs_config_led_only_pinned() || nvs_config_is_pinned(blink_id))
+            led_rx_blink();
+    }
 
     int maxb = (int)frame->len;
     if (maxb > 290) maxb = 290;  // zabezpieczenie bufora

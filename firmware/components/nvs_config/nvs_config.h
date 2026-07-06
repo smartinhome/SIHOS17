@@ -32,6 +32,9 @@ typedef struct {
         char id_hex[12];
         char name[32];
     } meter_names[MAX_METERS];
+    // Nowe pola ZAWSZE na koncu (zgodnosc blobu NVS przy aktualizacji OTA).
+    bool     led_only_pinned;   // mrugaj tylko dla licznikow z dashboardu
+    uint16_t led_blink_ms;      // czas swiecenia po ramce (20-5000 ms, domyslnie 60)
 } sih_config_t;
 
 // Pobierz/ustaw wlasna nazwe licznika po ID. Zwraca "" gdy brak.
@@ -42,3 +45,9 @@ void         nvs_config_init(void);
 sih_config_t nvs_config_get(void);
 void         nvs_config_save(const sih_config_t *cfg);
 void         nvs_config_reset(void);
+
+// Czy licznik o danym ID jest przypiety do dashboardu (case-insensitive).
+// Lekki odczyt z cache w RAM - bezpieczny do wolania per ramka.
+bool nvs_config_is_pinned(const char *id_hex);
+// Lekki getter trybu diody RX (bez kopiowania calej konfiguracji).
+bool nvs_config_led_only_pinned(void);

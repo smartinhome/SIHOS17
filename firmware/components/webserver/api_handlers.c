@@ -437,9 +437,10 @@ static esp_err_t handle_meter_name(httpd_req_t *req) {
 static esp_err_t handle_led(httpd_req_t *req) {
     sih_config_t cfg = nvs_config_get();
     if (req->method == HTTP_POST) {
-        char body[96];
+        char body[160];
         read_body(req, body, sizeof(body));
         cfg.led_enabled = (strstr(body, "\"enabled\":true") != NULL);
+        cfg.led_only_pinned = (strstr(body, "\"only_pinned\":true") != NULL);
         char *p = strstr(body, "\"brightness\":");
         if (p) {
             int b = atoi(p + 13);
@@ -447,14 +448,23 @@ static esp_err_t handle_led(httpd_req_t *req) {
             if (b > 100) b = 100;
             cfg.led_brightness = (uint8_t)b;
         }
+        p = strstr(body, "\"blink_ms\":");
+        if (p) {
+            int ms = atoi(p + 11);
+            if (ms < 20) ms = 20;
+            if (ms > 5000) ms = 5000;
+            cfg.led_blink_ms = (uint16_t)ms;
+        }
         nvs_config_save(&cfg);
-        led_rx_set(cfg.led_enabled, cfg.led_brightness);
+        led_rx_set(cfg.led_enabled, cfg.led_brightness, cfg.led_blink_ms);
         resp_ok(req);
         return ESP_OK;
     }
-    char buf[64];
-    snprintf(buf, sizeof(buf), "{\"enabled\":%s,\"brightness\":%d}",
-             cfg.led_enabled ? "true" : "false", cfg.led_brightness);
+    char buf[128];
+    snprintf(buf, sizeof(buf),
+             "{\"enabled\":%s,\"brightness\":%d,\"only_pinned\":%s,\"blink_ms\":%d}",
+             cfg.led_enabled ? "true" : "false", cfg.led_brightness,
+             cfg.led_only_pinned ? "true" : "false", cfg.led_blink_ms);
     resp_json(req, buf);
     return ESP_OK;
 }

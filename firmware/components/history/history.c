@@ -99,71 +99,140 @@ static void archive_path(const char *id, char *out, int cap) {
 
 // Wspolny bufor roboczy archiwum (5.8KB .bss) - uzywany przez append i get_day.
 // Format pliku archiwum (ring buffer na flash, BEZ wczytywania calosci do RAM):
-//   naglowek: [int count][int head]  (count=ile rekordow, head=indeks najstarszego)
+//   naglowek v2: [u32 magic][int count][int head][u32 last_ts][float last_total]
+//   naglowek v1 (stary): [int count][int head]
 //   dane: HIST_ARCHIVE_HOURS rekordow hist_bucket_t (ring)
+// last_ts/last_total = DOKLADNY czas i wartosc ostatniego odczytu (aktualizowane
+// co ramke) - po restarcie dashboard pokazuje prawdziwy czas ostatniego odczytu,
+// a nie czas zapisu pliku h_ (ten powstaje tylko przy zamknieciu godziny).
 // Rekord logiczny i (0=najstarszy) jest fizycznie na pozycji (head+i)%cap.
-// Maly bufor roboczy do czytania dnia (max ~2 doby) - nie caly ring.
-#define ARC_HDR_BYTES (2 * (int)sizeof(int))
+#define ARC_HDR_BYTES (2 * (int)sizeof(int))                        // v1
+#define ARC_MAGIC_V2  0x53494832u                                   // "SIH2"
+#define ARC_HDR_V2    (int)(sizeof(uint32_t)*2 + sizeof(int)*2 + sizeof(float))
 #define ARC_DAY_BUF 64   // rekordow do bufora dnia (doba=24, zapas)
 static hist_bucket_t s_day_buf[ARC_DAY_BUF];
 
-// Odczyt naglowka archiwum. Zwraca true gdy plik istnieje i poprawny.
-static bool arc_read_header(FILE *f, int *count, int *head) {
+typedef struct {
+    int count, head;
+    int hdr;               // rozmiar naglowka w bajtach (v1/v2)
+    bool v2;
+    uint32_t last_ts;      // tylko v2 (0 w v1)
+    float last_total;      // tylko v2
+} arc_hdr_t;
+
+// Odczyt naglowka archiwum (v1 lub v2). Zwraca true gdy plik poprawny.
+static bool arc_read_header2(FILE *f, arc_hdr_t *h) {
+    memset(h, 0, sizeof(*h));
+    uint32_t first = 0;
     if (fseek(f, 0, SEEK_SET) != 0) return false;
-    if (fread(count, sizeof(int), 1, f) != 1) return false;
-    if (fread(head, sizeof(int), 1, f) != 1) return false;
-    // Wykryj stary/niezgodny format (sprzed ring buffera): w starym pliku drugi
-    // int to timestamp (~1.78e9), nie head (0..cap). Gdy count lub head poza
-    // zakresem - plik niezgodny, traktuj jako pusty (zostanie nadpisany w nowym
-    // formacie przy najblizszym zapisie godziny). Stare archiwum godzinowe i tak
-    // trzymalo tylko 31 dni; glowna historia (h_) jest nietknieta.
-    if (*count < 0 || *count > HIST_ARCHIVE_HOURS) { *count = 0; *head = 0; return false; }
-    if (*head < 0 || *head >= HIST_ARCHIVE_HOURS) { *count = 0; *head = 0; return false; }
+    if (fread(&first, sizeof(uint32_t), 1, f) != 1) return false;
+    if (first == ARC_MAGIC_V2) {
+        h->v2 = true; h->hdr = ARC_HDR_V2;
+        if (fread(&h->count, sizeof(int), 1, f) != 1) return false;
+        if (fread(&h->head,  sizeof(int), 1, f) != 1) return false;
+        if (fread(&h->last_ts, sizeof(uint32_t), 1, f) != 1) return false;
+        if (fread(&h->last_total, sizeof(float), 1, f) != 1) return false;
+    } else {
+        // v1: pierwszy int to count. Poprawny count jest maly (<=17520), wiec
+        // nie koliduje z magic.
+        h->v2 = false; h->hdr = ARC_HDR_BYTES;
+        h->count = (int)first;
+        if (fread(&h->head, sizeof(int), 1, f) != 1) return false;
+    }
+    // Wykryj niezgodny format: count/head poza zakresem -> traktuj jako pusty.
+    if (h->count < 0 || h->count > HIST_ARCHIVE_HOURS) { h->count = 0; h->head = 0; return false; }
+    if (h->head < 0 || h->head >= HIST_ARCHIVE_HOURS)  { h->count = 0; h->head = 0; return false; }
     return true;
 }
 
-// Pozycja w pliku (bajty) rekordu fizycznego o indeksie phys.
-static long arc_rec_off(int phys) {
-    return (long)ARC_HDR_BYTES + (long)phys * (long)sizeof(hist_bucket_t);
+// Zapis naglowka v2 na poczatku pliku.
+static void arc_write_header_v2(FILE *f, const arc_hdr_t *h) {
+    uint32_t magic = ARC_MAGIC_V2;
+    fseek(f, 0, SEEK_SET);
+    fwrite(&magic, sizeof(uint32_t), 1, f);
+    fwrite(&h->count, sizeof(int), 1, f);
+    fwrite(&h->head,  sizeof(int), 1, f);
+    fwrite(&h->last_ts, sizeof(uint32_t), 1, f);
+    fwrite(&h->last_total, sizeof(float), 1, f);
+}
+
+// Pozycja w pliku (bajty) rekordu fizycznego o indeksie phys (naglowek hdr B).
+static long arc_rec_off2(int hdr, int phys) {
+    return (long)hdr + (long)phys * (long)sizeof(hist_bucket_t);
+}
+
+// Jednorazowa migracja pliku v1 -> v2: kopiowanie strumieniowe do pliku .t,
+// potem rename. Rekordy przenoszone 1:1 (fizyczny uklad ringu zachowany),
+// wiec nie tracimy zebranego archiwum. Zwraca otwarty plik v2 (r+b) lub NULL.
+static FILE *arc_migrate_v2(const char *path, arc_hdr_t *h) {
+    char tmp[52];
+    snprintf(tmp, sizeof(tmp), "%s.t", path);
+    FILE *src = fopen(path, "rb");
+    if (!src) return NULL;
+    FILE *dst = fopen(tmp, "w+b");
+    if (!dst) { fclose(src); return NULL; }
+    h->v2 = true; h->hdr = ARC_HDR_V2; h->last_ts = 0; h->last_total = 0;
+    arc_write_header_v2(dst, h);
+    // Skopiuj region rekordow w calosci (uklad fizyczny bez zmian).
+    static uint8_t cp[1024];
+    fseek(src, ARC_HDR_BYTES, SEEK_SET);
+    size_t n;
+    while ((n = fread(cp, 1, sizeof(cp), src)) > 0) {
+        if (fwrite(cp, 1, n, dst) != n) { fclose(src); fclose(dst); remove(tmp); return NULL; }
+    }
+    fclose(src);
+    fclose(dst);
+    remove(path);
+    if (rename(tmp, path) != 0) { remove(tmp); return NULL; }
+    ESP_LOGI(TAG, "Archiwum %s zmigrowane do formatu v2", path);
+    return fopen(path, "r+b");
 }
 
 // Dopisz/zaktualizuj punkt godzinowy w archiwum (ring buffer, strumieniowo).
 // NIE wczytuje calego pliku do RAM - tylko naglowek + ostatni rekord.
-static void archive_append_hour(const char *id, uint32_t hour_ts, float total) {
+// ts_exact = dokladny unix ostatniego odczytu (do naglowka v2).
+static void archive_append_hour(const char *id, uint32_t hour_ts, float total,
+                                uint32_t ts_exact) {
     if (!s_fs_ok) return;
     char path[48]; archive_path(id, path, sizeof(path));
 
+    arc_hdr_t h;
     FILE *f = fopen(path, "r+b");
-    int count = 0, head = 0;
     if (!f) {
-        // nowy plik - utworz z naglowkiem
+        // nowy plik - utworz z naglowkiem v2
         f = fopen(path, "w+b");
         if (!f) { ESP_LOGW(TAG, "nie moge utworzyc archiwum %s", path); return; }
-        count = 0; head = 0;
-        fwrite(&count, sizeof(int), 1, f);
-        fwrite(&head, sizeof(int), 1, f);
+        memset(&h, 0, sizeof(h));
+        h.v2 = true; h.hdr = ARC_HDR_V2;
     } else {
-        if (!arc_read_header(f, &count, &head)) {
-            // Stary/niezgodny format - zresetuj plik do nowego formatu (pusty ring).
+        if (!arc_read_header2(f, &h)) {
+            // Niezgodny format - zresetuj plik (pusty ring v2).
             fclose(f);
             f = fopen(path, "w+b");
             if (!f) { ESP_LOGW(TAG, "nie moge zresetowac archiwum %s", path); return; }
-            count = 0; head = 0;
-            fwrite(&count, sizeof(int), 1, f);
-            fwrite(&head, sizeof(int), 1, f);
+            memset(&h, 0, sizeof(h));
+            h.v2 = true; h.hdr = ARC_HDR_V2;
+        } else if (!h.v2) {
+            // Poprawny plik v1 - jednorazowa migracja do v2 (bez utraty danych).
+            fclose(f);
+            f = arc_migrate_v2(path, &h);
+            if (!f) { ESP_LOGW(TAG, "migracja archiwum %s nieudana", path); return; }
         }
     }
+    h.last_ts = ts_exact;
+    h.last_total = total;
 
     // Czy ostatnia zapisana godzina == hour_ts? (aktualizacja biezacej godziny)
-    if (count > 0) {
-        int last_phys = (head + count - 1) % HIST_ARCHIVE_HOURS;
+    if (h.count > 0) {
+        int last_phys = (h.head + h.count - 1) % HIST_ARCHIVE_HOURS;
         hist_bucket_t last;
-        if (fseek(f, arc_rec_off(last_phys), SEEK_SET) == 0 &&
+        if (fseek(f, arc_rec_off2(h.hdr, last_phys), SEEK_SET) == 0 &&
             fread(&last, sizeof(last), 1, f) == 1 && last.ts == hour_ts) {
-            // ta sama godzina - nadpisz total
+            // ta sama godzina - nadpisz total + swiezy naglowek (dokladny last_ts)
             last.total = total;
-            fseek(f, arc_rec_off(last_phys), SEEK_SET);
+            fseek(f, arc_rec_off2(h.hdr, last_phys), SEEK_SET);
             fwrite(&last, sizeof(last), 1, f);
+            arc_write_header_v2(f, &h);
             fclose(f);
             return;
         }
@@ -171,20 +240,17 @@ static void archive_append_hour(const char *id, uint32_t hour_ts, float total) {
 
     // Nowa godzina - dopisz rekord. Gdy pelne, przesun head (nadpisz najstarszy).
     int write_phys;
-    if (count >= HIST_ARCHIVE_HOURS) {
-        write_phys = head;                       // nadpisz najstarszy
-        head = (head + 1) % HIST_ARCHIVE_HOURS;   // przesun okno
+    if (h.count >= HIST_ARCHIVE_HOURS) {
+        write_phys = h.head;                        // nadpisz najstarszy
+        h.head = (h.head + 1) % HIST_ARCHIVE_HOURS; // przesun okno
     } else {
-        write_phys = (head + count) % HIST_ARCHIVE_HOURS;
-        count++;
+        write_phys = (h.head + h.count) % HIST_ARCHIVE_HOURS;
+        h.count++;
     }
     hist_bucket_t rec = { hour_ts, total };
-    fseek(f, arc_rec_off(write_phys), SEEK_SET);
+    fseek(f, arc_rec_off2(h.hdr, write_phys), SEEK_SET);
     fwrite(&rec, sizeof(rec), 1, f);
-    // zaktualizuj naglowek
-    fseek(f, 0, SEEK_SET);
-    fwrite(&count, sizeof(int), 1, f);
-    fwrite(&head, sizeof(int), 1, f);
+    arc_write_header_v2(f, &h);
     fclose(f);
 }
 
@@ -201,25 +267,25 @@ static void archive_rebuild_from_hours(meter_hist_t *m) {
     int existing = -1;  // -1 = brak/niezgodne
     FILE *f = fopen(path, "rb");
     if (f) {
-        int count, head;
-        if (arc_read_header(f, &count, &head)) existing = count;  // poprawny nowy format
+        arc_hdr_t hh;
+        if (arc_read_header2(f, &hh)) existing = hh.count;  // poprawny format v1/v2
         fclose(f);
     }
     // Odbuduj tylko gdy archiwum puste, niezgodne (stary format) lub ma mniej
     // rekordow niz mamy godzin w RAM (nie psujemy bogatszego archiwum).
     if (existing >= m->n_hours) return;
 
-    // Zapisz na nowo: naglowek + godziny z RAM (chronologicznie, jak w hours[]).
+    // Zapisz na nowo: naglowek v2 + godziny z RAM (chronologicznie, jak w hours[]).
     f = fopen(path, "w+b");
     if (!f) { ESP_LOGW(TAG, "nie moge odbudowac archiwum %s", path); return; }
-    int count = m->n_hours, head = 0;
-    fwrite(&count, sizeof(int), 1, f);
-    fwrite(&head, sizeof(int), 1, f);
+    arc_hdr_t h = { .count = m->n_hours, .head = 0, .hdr = ARC_HDR_V2, .v2 = true,
+                    .last_ts = m->last_ts, .last_total = m->last_total };
+    arc_write_header_v2(f, &h);
     for (int i = 0; i < m->n_hours; i++) {
         fwrite(&m->hours[i], sizeof(hist_bucket_t), 1, f);
     }
     fclose(f);
-    ESP_LOGI(TAG, "Archiwum godzinowe odbudowane z RAM (%d godz) dla %s", count, m->id);
+    ESP_LOGI(TAG, "Archiwum godzinowe odbudowane z RAM (%d godz) dla %s", h.count, m->id);
 }
 
 // Odtworz z archiwum ha_ najswiezszy stan po restarcie. Plik h_ (hours[] itd.)
@@ -235,11 +301,11 @@ static void restore_from_archive(meter_hist_t *m) {
     char path[48]; archive_path(m->id, path, sizeof(path));
     FILE *f = fopen(path, "rb");
     if (!f) return;
-    int count = 0, head = 0;
-    if (arc_read_header(f, &count, &head) && count > 0) {
+    arc_hdr_t h;
+    if (arc_read_header2(f, &h) && h.count > 0) {
         hist_bucket_t rec;
-        int phys = (head + count - 1) % HIST_ARCHIVE_HOURS;   // najnowszy rekord
-        if (fseek(f, arc_rec_off(phys), SEEK_SET) == 0 &&
+        int phys = (h.head + h.count - 1) % HIST_ARCHIVE_HOURS;   // najnowszy rekord
+        if (fseek(f, arc_rec_off2(h.hdr, phys), SEEK_SET) == 0 &&
             fread(&rec, sizeof(rec), 1, f) == 1 &&
             rec.ts >= 1700000000) {
             uint32_t last_bh = (m->n_hours > 0) ? m->hours[m->n_hours - 1].ts : 0;
@@ -254,8 +320,15 @@ static void restore_from_archive(meter_hist_t *m) {
                     m->last_total = rec.total;
                     if (rec.ts > m->last_ts) m->last_ts = rec.ts;
                 }
-                ESP_LOGI(TAG, "Odtworzono biezaca godzine z archiwum dla %s (ts=%u)",
-                         m->id, (unsigned)rec.ts);
+                // Naglowek v2 niesie DOKLADNY czas i wartosc ostatniego odczytu
+                // sprzed restartu - dashboard pokaze prawdziwa godzine, nie czas
+                // ostatniego zapisu h_.
+                if (h.v2 && h.last_ts >= 1700000000 && h.last_ts >= m->last_ts) {
+                    m->last_ts = h.last_ts;
+                    m->last_total = h.last_total;
+                }
+                ESP_LOGI(TAG, "Odtworzono stan z archiwum dla %s (ts=%u)",
+                         m->id, (unsigned)m->last_ts);
             }
         }
     }
@@ -488,7 +561,7 @@ void history_on_reading(const char *id_hex, double total, int kind, uint32_t ts_
     // Archiwum godzinowe co ramke - ale tylko dla SLEDZONYCH licznikow (nie pisz
     // na flash dla kazdego zaslyszanego sasiada). To zrodlo odtwarzania stanu
     // biezacej godziny po restarcie (restore_from_archive).
-    if (history_is_tracked(id_hex)) archive_append_hour(m->id, bh, ft);
+    if (history_is_tracked(id_hex)) archive_append_hour(m->id, bh, ft, ts_unix);
 
     // Zapis do flash tylko gdy zamknela sie godzina (oszczedzamy zapisy)
     if (hour_closed) save_meter(m);
@@ -526,7 +599,7 @@ void history_on_field(const char *id_hex, const char *field, double value,
     rt_update(m, ts_unix, ft);
 
     // Archiwum godzinowe (miesiac) na flash dla sledzonego pola.
-    archive_append_hour(m->id, bh, ft);
+    archive_append_hour(m->id, bh, ft, ts_unix);
 
     if (hour_closed) save_meter(m);
     if (s_mutex) xSemaphoreGive(s_mutex);
@@ -664,30 +737,30 @@ int history_get_day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf
         char path[48]; archive_path(id_hex, path, sizeof(path));
         FILE *f = s_fs_ok ? fopen(path, "rb") : NULL;
         if (f) {
-            int count = 0, head = 0;
-            if (arc_read_header(f, &count, &head) && count > 0) {
+            arc_hdr_t h;
+            if (arc_read_header2(f, &h) && h.count > 0) {
                 hist_bucket_t rec;
                 // Najmniejszy indeks logiczny lo z ts >= d0.
-                int lo = 0, hi = count;
+                int lo = 0, hi = h.count;
                 while (lo < hi) {
                     int mid = lo + (hi - lo) / 2;
-                    int phys = (head + mid) % HIST_ARCHIVE_HOURS;
-                    if (fseek(f, arc_rec_off(phys), SEEK_SET) != 0 ||
-                        fread(&rec, sizeof(rec), 1, f) != 1) { lo = count; break; }
+                    int phys = (h.head + mid) % HIST_ARCHIVE_HOURS;
+                    if (fseek(f, arc_rec_off2(h.hdr, phys), SEEK_SET) != 0 ||
+                        fread(&rec, sizeof(rec), 1, f) != 1) { lo = h.count; break; }
                     if (rec.ts < d0) lo = mid + 1; else hi = mid;
                 }
                 // Rekord poprzedzajacy dobe - baza roznicy dla pierwszej godziny.
-                if (lo > 0 && lo <= count) {
-                    int phys = (head + lo - 1) % HIST_ARCHIVE_HOURS;
-                    if (fseek(f, arc_rec_off(phys), SEEK_SET) == 0 &&
+                if (lo > 0 && lo <= h.count) {
+                    int phys = (h.head + lo - 1) % HIST_ARCHIVE_HOURS;
+                    if (fseek(f, arc_rec_off2(h.hdr, phys), SEEK_SET) == 0 &&
                         fread(&rec, sizeof(rec), 1, f) == 1 && rec.ts < d0) {
                         prev = rec; has_prev = true;
                     }
                 }
                 // Sekwencyjnie od lo; rekordy rosnace, wiec koniec przy ts >= d1.
-                for (int i = lo; i < count && nb < ARC_DAY_BUF; i++) {
-                    int phys = (head + i) % HIST_ARCHIVE_HOURS;
-                    if (fseek(f, arc_rec_off(phys), SEEK_SET) != 0) break;
+                for (int i = lo; i < h.count && nb < ARC_DAY_BUF; i++) {
+                    int phys = (h.head + i) % HIST_ARCHIVE_HOURS;
+                    if (fseek(f, arc_rec_off2(h.hdr, phys), SEEK_SET) != 0) break;
                     if (fread(&rec, sizeof(rec), 1, f) != 1) break;
                     if (rec.ts >= d1) break;
                     if (rec.ts >= d0) s_day_buf[nb++] = rec;

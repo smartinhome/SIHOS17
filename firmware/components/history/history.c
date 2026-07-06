@@ -222,6 +222,46 @@ static void archive_rebuild_from_hours(meter_hist_t *m) {
     ESP_LOGI(TAG, "Archiwum godzinowe odbudowane z RAM (%d godz) dla %s", count, m->id);
 }
 
+// Odtworz z archiwum ha_ najswiezszy stan po restarcie. Plik h_ (hours[] itd.)
+// zapisywany jest tylko przy ZAMKNIECIU godziny, wiec po restarcie kubelek
+// biezacej godziny i last_total sa stare (nawet o ~59 min). Jesli restart/przerwa
+// przetnie granice godziny, kubelek przerwanej godziny nigdy nie zostaje
+// uzupelniony - wykres pokazuje dla niej ~0, a brakujace zuzycie wpada w
+// nastepna godzine. Archiwum ha_ jest natomiast aktualizowane PRZY KAZDEJ ramce
+// (archive_append_hour), wiec jego ostatni rekord to stan z ostatniego odczytu
+// przed restartem - scal go z seriami w RAM (zero dodatkowych zapisow flash).
+static void restore_from_archive(meter_hist_t *m) {
+    if (!s_fs_ok) return;
+    char path[48]; archive_path(m->id, path, sizeof(path));
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+    int count = 0, head = 0;
+    if (arc_read_header(f, &count, &head) && count > 0) {
+        hist_bucket_t rec;
+        int phys = (head + count - 1) % HIST_ARCHIVE_HOURS;   // najnowszy rekord
+        if (fseek(f, arc_rec_off(phys), SEEK_SET) == 0 &&
+            fread(&rec, sizeof(rec), 1, f) == 1 &&
+            rec.ts >= 1700000000) {
+            uint32_t last_bh = (m->n_hours > 0) ? m->hours[m->n_hours - 1].ts : 0;
+            if (rec.ts >= last_bh) {
+                series_update(m->hours,  &m->n_hours,  HIST_HOURS,  rec.ts, rec.total);
+                series_update(m->days,   &m->n_days,   HIST_DAYS,   floor_day(rec.ts),   rec.total);
+                series_update(m->months, &m->n_months, HIST_MONTHS, floor_month(rec.ts), rec.total);
+                series_update(m->years,  &m->n_years,  HIST_YEARS,  floor_year(rec.ts),  rec.total);
+                // Rekord archiwum jest co najmniej tak swiezy jak stan z pliku h_
+                // (arc pisany co ramke, h_ raz na godzine) - przejmij total.
+                if (rec.ts >= floor_hour(m->last_ts)) {
+                    m->last_total = rec.total;
+                    if (rec.ts > m->last_ts) m->last_ts = rec.ts;
+                }
+                ESP_LOGI(TAG, "Odtworzono biezaca godzine z archiwum dla %s (ts=%u)",
+                         m->id, (unsigned)rec.ts);
+            }
+        }
+    }
+    fclose(f);
+}
+
 static void save_meter(meter_hist_t *m) {
     if (!s_fs_ok) return;
     char path[48]; meter_path(m->id, path, sizeof(path));
@@ -253,16 +293,16 @@ static bool load_meter(meter_hist_t *m, const char *id) {
     r += fread(&m->last_ts, sizeof(uint32_t), 1, f);
     fread(&m->n_hours, sizeof(int), 1, f);
     if (m->n_hours < 0 || m->n_hours > HIST_HOURS) m->n_hours = 0;
-    fread(m->hours, sizeof(hist_bucket_t), m->n_hours, f);
+    m->n_hours = (int)fread(m->hours, sizeof(hist_bucket_t), m->n_hours, f);
     fread(&m->n_days, sizeof(int), 1, f);
     if (m->n_days < 0 || m->n_days > HIST_DAYS) m->n_days = 0;
-    fread(m->days, sizeof(hist_bucket_t), m->n_days, f);
+    m->n_days = (int)fread(m->days, sizeof(hist_bucket_t), m->n_days, f);
     fread(&m->n_months, sizeof(int), 1, f);
     if (m->n_months < 0 || m->n_months > HIST_MONTHS) m->n_months = 0;
-    fread(m->months, sizeof(hist_bucket_t), m->n_months, f);
+    m->n_months = (int)fread(m->months, sizeof(hist_bucket_t), m->n_months, f);
     fread(&m->n_years, sizeof(int), 1, f);
     if (m->n_years < 0 || m->n_years > HIST_YEARS) m->n_years = 0;
-    fread(m->years, sizeof(hist_bucket_t), m->n_years, f);
+    m->n_years = (int)fread(m->years, sizeof(hist_bucket_t), m->n_years, f);
     // cumulative na koncu (nowe pliki). Stary plik go nie ma - fread zwroci 0,
     // wtedy wnioskujemy z pola id: napiecie/moc = chwilowe, reszta = kumulacyjne.
     if (fread(&m->cumulative, sizeof(int), 1, f) != 1) {
@@ -408,11 +448,13 @@ static meter_hist_t *get_or_load(const char *id, bool create_if_missing) {
     meter_hist_t *slot = find_meter(id, true);
     if (!slot) return NULL;
     if (load_meter(slot, id)) {
+        restore_from_archive(slot);   // scal swiezszy stan z archiwum ha_ (po restarcie)
         return slot;   // wczytano z dysku
     }
     // brak pliku
     if (create_if_missing) {
         // slot juz zainicjowany przez find_meter (memset+id+used)
+        restore_from_archive(slot);   // h_ mogl zostac usuniety, archiwum moze istniec
         return slot;
     }
     // nie tworzymy - zwolnij slot
@@ -442,6 +484,11 @@ void history_on_reading(const char *id_hex, double total, int kind, uint32_t ts_
     series_update(m->months, &m->n_months, HIST_MONTHS, floor_month(ts_unix), ft);
     series_update(m->years,  &m->n_years,  HIST_YEARS,  floor_year(ts_unix),  ft);
     rt_update(m, ts_unix, ft);
+
+    // Archiwum godzinowe co ramke - ale tylko dla SLEDZONYCH licznikow (nie pisz
+    // na flash dla kazdego zaslyszanego sasiada). To zrodlo odtwarzania stanu
+    // biezacej godziny po restarcie (restore_from_archive).
+    if (history_is_tracked(id_hex)) archive_append_hour(m->id, bh, ft);
 
     // Zapis do flash tylko gdy zamknela sie godzina (oszczedzamy zapisy)
     if (hour_closed) save_meter(m);

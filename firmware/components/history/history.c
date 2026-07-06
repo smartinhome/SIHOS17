@@ -302,7 +302,8 @@ static void restore_from_archive(meter_hist_t *m) {
     FILE *f = fopen(path, "rb");
     if (!f) return;
     arc_hdr_t h;
-    if (arc_read_header2(f, &h) && h.count > 0) {
+    bool hdr_ok = arc_read_header2(f, &h);
+    if (hdr_ok && h.count > 0) {
         hist_bucket_t rec;
         int phys = (h.head + h.count - 1) % HIST_ARCHIVE_HOURS;   // najnowszy rekord
         if (fseek(f, arc_rec_off2(h.hdr, phys), SEEK_SET) == 0 &&
@@ -320,19 +321,32 @@ static void restore_from_archive(meter_hist_t *m) {
                     m->last_total = rec.total;
                     if (rec.ts > m->last_ts) m->last_ts = rec.ts;
                 }
-                // Naglowek v2 niesie DOKLADNY czas i wartosc ostatniego odczytu
-                // sprzed restartu - dashboard pokaze prawdziwa godzine, nie czas
-                // ostatniego zapisu h_.
-                if (h.v2 && h.last_ts >= 1700000000 && h.last_ts >= m->last_ts) {
-                    m->last_ts = h.last_ts;
-                    m->last_total = h.last_total;
-                }
-                ESP_LOGI(TAG, "Odtworzono stan z archiwum dla %s (ts=%u)",
-                         m->id, (unsigned)m->last_ts);
             }
         }
     }
+    // Naglowek v2 niesie DOKLADNY czas i wartosc ostatniego odczytu sprzed
+    // restartu - niezaleznie od stanu kubelkow przejmij, gdy swiezszy.
+    if (hdr_ok && h.v2 && h.last_ts >= 1700000000 && h.last_ts >= m->last_ts) {
+        m->last_ts = h.last_ts;
+        m->last_total = h.last_total;
+    }
     fclose(f);
+    // Plik v1 (sprzed formatu z dokladnym czasem): zmigruj JUZ TERAZ, przy
+    // starcie - nie czekajac na pierwsza ramke - i zapisz najlepszy znany stan.
+    // Dzieki temu kazdy KOLEJNY restart (nawet chwile pozniej) ma naglowek v2,
+    // a ramki odbierane od teraz aktualizuja go co odczyt.
+    if (hdr_ok && !h.v2) {
+        FILE *fm = arc_migrate_v2(path, &h);
+        if (fm) {
+            h.last_ts = m->last_ts;
+            h.last_total = m->last_total;
+            arc_write_header_v2(fm, &h);
+            fclose(fm);
+        }
+    }
+    ESP_LOGI(TAG, "Odtworzono %s: last_ts=%u total=%.3f (arch %s)",
+             m->id, (unsigned)m->last_ts, (double)m->last_total,
+             hdr_ok ? (h.v2 ? "v2" : "v1->v2") : "brak/nowy");
 }
 
 static void save_meter(meter_hist_t *m) {

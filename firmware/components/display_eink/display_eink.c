@@ -9,6 +9,7 @@
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_rom_sys.h"
@@ -29,6 +30,15 @@ static const char *TAG = "eink";
 static spi_device_handle_t s_spi = NULL;
 static display_eink_config_t s_cfg;
 static uint8_t s_fb[FB_SIZE];   // framebuffer, 1 = czarny piksel? (SSD1680: 0=czarny,1=bialy w RAM)
+
+// Mutex serializujacy WSZYSTKIE operacje e-ink (rysowanie po s_fb + odswiezanie).
+// button_task i refresh_task wolaja te same funkcje na tym samym uchwycie SPI,
+// a spi_master wymaga uzywania urzadzenia z jednego taska naraz - w szczegolnosci
+// rownolegle spi_device_acquire_bus() z dwoch taskow psulo blokade magistrali
+// i zawieszalo na stale cala SPI2 (w tym odbior CC1101).
+static SemaphoreHandle_t s_eink_mutex = NULL;
+static inline void eink_lock(void)   { if (s_eink_mutex) xSemaphoreTake(s_eink_mutex, portMAX_DELAY); }
+static inline void eink_unlock(void) { if (s_eink_mutex) xSemaphoreGive(s_eink_mutex); }
 
 // ---------- niski poziom SPI / GPIO ----------
 
@@ -407,6 +417,7 @@ static void fb_draw_text_inv(const font_t *f, int x, int y, const char *txt) {
 
 bool display_eink_init(const display_eink_config_t *cfg) {
     memcpy(&s_cfg, cfg, sizeof(*cfg));
+    if (!s_eink_mutex) s_eink_mutex = xSemaphoreCreateMutex();
 
     // Piny sterujace
     gpio_config_t io = {
@@ -439,6 +450,7 @@ bool display_eink_init(const display_eink_config_t *cfg) {
 }
 
 void display_eink_show_splash(void) {
+    eink_lock();
     fb_clear_white();
 
     // Lewa strefa: 0..qr_x, prawa: QR. Napis www.smartinhome.pl ma ~144px
@@ -465,6 +477,7 @@ void display_eink_show_splash(void) {
     fb_draw_bitmap(qr_x, qr_y, &QR_DATA[0][0], QR_SIZE, QR_BYTES_PER_ROW, qr_scale);
 
     eink_refresh();
+    eink_unlock();
     ESP_LOGI(TAG, "Splash (logo + napis + QR) wyswietlony");
 }
 
@@ -704,30 +717,37 @@ static void rebuild_pages(void) {
 }
 
 void display_eink_refresh_pages(void) {
+    eink_lock();
     rebuild_pages();
     if (s_page_count == 0) {
         draw_diag();   // zamiast splash - pokaz co jest nie tak
+        eink_unlock();
         return;
     }
     if (s_cur_page < 0 || s_cur_page >= s_page_count) s_cur_page = 0;
     draw_meter_page(s_page_ids[s_cur_page], s_cur_page + 1, s_page_count);
     eink_refresh();
+    eink_unlock();
 }
 
 void display_eink_next_page(void) {
+    eink_lock();
     rebuild_pages();
-    if (s_page_count == 0) { draw_diag(); return; }
+    if (s_page_count == 0) { draw_diag(); eink_unlock(); return; }
     s_cur_page = (s_cur_page + 1) % s_page_count;
     draw_meter_page(s_page_ids[s_cur_page], s_cur_page + 1, s_page_count);
     eink_refresh();
+    eink_unlock();
 }
 
 void display_eink_first_page(void) {
+    eink_lock();
     rebuild_pages();
-    if (s_page_count == 0) { draw_diag(); return; }
+    if (s_page_count == 0) { draw_diag(); eink_unlock(); return; }
     s_cur_page = 0;
     draw_meter_page(s_page_ids[s_cur_page], s_cur_page + 1, s_page_count);
     eink_refresh();
+    eink_unlock();
 }
 
 // ---------- przycisk BOOT + auto-odswiezanie ----------
@@ -790,9 +810,14 @@ void display_eink_start_tasks(int pin_button) {
 
 void display_eink_pause(void) {
     s_eink_paused = true;
-    // Usun taski (przed OTA) - zwalnia ich stos i zatrzymuje aktywnosc SPI.
+    // Poczekaj az trwajace odswiezanie sie skonczy i dopiero wtedy usun taski.
+    // vTaskDelete na tasku bedacym w srodku spi_device_acquire_bus zostawialby
+    // magistrale SPI2 przejeta na zawsze (deadlock CC1101 i kolejnych operacji).
+    // Task zablokowany na tym mutexie mozna bezpiecznie usunac.
+    eink_lock();
     if (s_refresh_task_h) { vTaskDelete(s_refresh_task_h); s_refresh_task_h = NULL; }
     if (s_btn_task_h)     { vTaskDelete(s_btn_task_h);     s_btn_task_h = NULL; }
+    eink_unlock();
     ESP_LOGI(TAG, "Taski e-ink wstrzymane (OTA)");
 }
 

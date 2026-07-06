@@ -165,8 +165,13 @@ static long arc_rec_off2(int hdr, int phys) {
 // potem rename. Rekordy przenoszone 1:1 (fizyczny uklad ringu zachowany),
 // wiec nie tracimy zebranego archiwum. Zwraca otwarty plik v2 (r+b) lub NULL.
 static FILE *arc_migrate_v2(const char *path, arc_hdr_t *h) {
-    char tmp[52];
-    snprintf(tmp, sizeof(tmp), "%s.t", path);
+    // Stala krotka nazwa pliku tymczasowego: SPIFFS ogranicza nazwe obiektu do
+    // 31 znakow (z wiodacym '/'), a najdluzsze archiwa (np. ha_..._napiecie_l1_v.bin
+    // = 30 zn.) z sufiksem juz sie nie miescily - fopen padal i migracja byla
+    // "nieudana" wlasnie dla pol napiec. Migracje sa serializowane mutexem
+    // historii, wiec jedna wspolna nazwa jest bezpieczna.
+    const char *tmp = "/spiffs/arc_mig.tmp";
+    remove(tmp);   // sprzatnij pozostalosc po ew. przerwanej migracji
     FILE *src = fopen(path, "rb");
     if (!src) return NULL;
     FILE *dst = fopen(tmp, "w+b");
@@ -342,6 +347,8 @@ static void restore_from_archive(meter_hist_t *m) {
             h.last_total = m->last_total;
             arc_write_header_v2(fm, &h);
             fclose(fm);
+        } else {
+            ESP_LOGW(TAG, "migracja archiwum %s przy starcie nieudana", path);
         }
     }
     ESP_LOGI(TAG, "Odtworzono %s: last_ts=%u total=%.3f (arch %s)",
@@ -509,6 +516,7 @@ void history_init(void) {
     size_t total = 0, used = 0;
     esp_spiffs_info("littlefs", &total, &used);
     ESP_LOGI(TAG, "SPIFFS zamontowany: %u/%u B", (unsigned)used, (unsigned)total);
+    remove("/spiffs/arc_mig.tmp");   // pozostalosc po ew. przerwanej migracji
     tracked_load();
     ESP_LOGI(TAG, "Sledzonych licznikow: %d", s_tracked_count);
 

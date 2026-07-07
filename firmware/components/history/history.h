@@ -10,6 +10,7 @@
 #define HIST_MONTHS  24    // 24 miesiace
 #define HIST_YEARS   10    // 10 lat
 #define HIST_REALTIME 60   // ostatnie 60 surowych odczytow
+#define HIST_CURVE 288     // krzywa dnia dla pol chwilowych: kubelki 5-min (24h)
 
 // Pojedynczy kubelek: czas poczatku okresu + total licznika na koniec okresu
 typedef struct {

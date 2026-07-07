@@ -103,9 +103,9 @@ static esp_err_t handle_history_day(httpd_req_t *req) {
     tmd.tm_year = y - 1900; tmd.tm_mon = mo - 1; tmd.tm_mday = d;
     tmd.tm_hour = 12; tmd.tm_min = 0; tmd.tm_sec = 0;
     uint32_t day_ts = (uint32_t)mktime(&tmd);
-    char *buf = malloc(8192);
+    char *buf = malloc(12288);
     if (!buf) { httpd_resp_send_500(req); return ESP_OK; }
-    history_get_day_json(id, day_ts, buf, 8192);
+    history_get_day_json(id, day_ts, buf, 12288);
     resp_json(req, buf);
     free(buf);
     return ESP_OK;

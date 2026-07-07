@@ -24,6 +24,9 @@ typedef struct {
     hist_bucket_t months[HIST_MONTHS]; int n_months;
     hist_bucket_t years[HIST_YEARS];   int n_years;
     hist_rt_t     rt[HIST_REALTIME];   int n_rt;
+    // Krzywa dnia (styl Home Assistant) dla pol CHWILOWYCH (moc, napiecie):
+    // ostatnia wartosc w kazdym kubelku 5-minutowym, ring 24h (288 pkt).
+    hist_bucket_t curve[HIST_CURVE];   int n_curve;
 } meter_hist_t;
 
 static meter_hist_t s_meters[MAX_HIST_METERS];
@@ -370,6 +373,8 @@ static void save_meter(meter_hist_t *m) {
     fwrite(&m->n_months, sizeof(int), 1, f); fwrite(m->months, sizeof(hist_bucket_t), m->n_months, f);
     fwrite(&m->n_years, sizeof(int), 1, f);  fwrite(m->years, sizeof(hist_bucket_t), m->n_years, f);
     fwrite(&m->cumulative, sizeof(int), 1, f);  // na koncu (kompatybilnosc starych plikow)
+    fwrite(&m->n_curve, sizeof(int), 1, f);      // krzywa dnia (pola chwilowe)
+    fwrite(m->curve, sizeof(hist_bucket_t), m->n_curve, f);
     fclose(f);
 }
 
@@ -402,6 +407,13 @@ static bool load_meter(meter_hist_t *m, const char *id) {
     if (fread(&m->cumulative, sizeof(int), 1, f) != 1) {
         bool instant = (strstr(id, "napiecie") || strstr(id, "moc"));
         m->cumulative = instant ? 0 : 1;
+    }
+    // Krzywa dnia - dopisana na koncu w nowszych wersjach; brak = 0 punktow.
+    if (fread(&m->n_curve, sizeof(int), 1, f) == 1) {
+        if (m->n_curve < 0 || m->n_curve > HIST_CURVE) m->n_curve = 0;
+        m->n_curve = (int)fread(m->curve, sizeof(hist_bucket_t), m->n_curve, f);
+    } else {
+        m->n_curve = 0;
     }
     fclose(f);
     return true;
@@ -579,6 +591,8 @@ void history_on_reading(const char *id_hex, double total, int kind, uint32_t ts_
     series_update(m->months, &m->n_months, HIST_MONTHS, floor_month(ts_unix), ft);
     series_update(m->years,  &m->n_years,  HIST_YEARS,  floor_year(ts_unix),  ft);
     rt_update(m, ts_unix, ft);
+    if (!m->cumulative)
+        series_update(m->curve, &m->n_curve, HIST_CURVE, ts_unix - (ts_unix % 300), ft);
 
     // Archiwum godzinowe co ramke - ale tylko dla SLEDZONYCH licznikow (nie pisz
     // na flash dla kazdego zaslyszanego sasiada). To zrodlo odtwarzania stanu
@@ -619,6 +633,8 @@ void history_on_field(const char *id_hex, const char *field, double value,
     series_update(m->months, &m->n_months, HIST_MONTHS, floor_month(ts_unix), ft);
     series_update(m->years,  &m->n_years,  HIST_YEARS,  floor_year(ts_unix),  ft);
     rt_update(m, ts_unix, ft);
+    if (!m->cumulative)
+        series_update(m->curve, &m->n_curve, HIST_CURVE, ts_unix - (ts_unix % 300), ft);
 
     // Archiwum godzinowe (miesiac) na flash dla sledzonego pola.
     archive_append_hour(m->id, bh, ft, ts_unix);
@@ -727,6 +743,25 @@ int history_get_day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf
 
     uint32_t d0 = floor_day(day_ts);          // poczatek wybranej doby
     uint32_t d1 = d0 + 86400;                  // poczatek nastepnej doby
+
+    // Pola CHWILOWE (moc, napiecie) z zebranym przebiegiem: zwroc krzywa dnia
+    // (kubelki 5-min, styl HA) zamiast 24 godzinnych wartosci.
+    if (m && !cumulative && m->n_curve > 0) {
+        int n2 = snprintf(buf, buf_cap,
+                          "{\"id\":\"%s\",\"kind\":%d,\"cumulative\":0,\"curve\":1,\"points\":[",
+                          id_hex ? id_hex : "", kind);
+        bool first2 = true;
+        for (int i = 0; i < m->n_curve && n2 < buf_cap - 48; i++) {
+            uint32_t t = m->curve[i].ts;
+            if (t < d0 || t >= d1) continue;
+            n2 += snprintf(buf + n2, buf_cap - n2, "%s{\"t\":%u,\"v\":%.3f}",
+                           first2 ? "" : ",", (unsigned)t, m->curve[i].total);
+            first2 = false;
+        }
+        n2 += snprintf(buf + n2, buf_cap - n2, "]}");
+        if (s_mutex) xSemaphoreGive(s_mutex);
+        return n2;
+    }
 
     int n = snprintf(buf, buf_cap, "{\"id\":\"%s\",\"kind\":%d,\"cumulative\":%d,\"points\":[",
                      id_hex ? id_hex : "", kind, cumulative);

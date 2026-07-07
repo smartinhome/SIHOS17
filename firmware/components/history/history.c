@@ -27,6 +27,7 @@ typedef struct {
     // Krzywa dnia (styl Home Assistant) dla pol CHWILOWYCH (moc, napiecie):
     // ostatnia wartosc w kazdym kubelku 5-minutowym, ring 24h (288 pkt).
     hist_bucket_t curve[HIST_CURVE];   int n_curve;
+    uint32_t last_save_ts;             // ostatni zapis h_ (zapis okresowy, RAM-only)
 } meter_hist_t;
 
 static meter_hist_t s_meters[MAX_HIST_METERS];
@@ -376,6 +377,7 @@ static void save_meter(meter_hist_t *m) {
     fwrite(&m->n_curve, sizeof(int), 1, f);      // krzywa dnia (pola chwilowe)
     fwrite(m->curve, sizeof(hist_bucket_t), m->n_curve, f);
     fclose(f);
+    m->last_save_ts = m->last_ts;
 }
 
 static bool load_meter(meter_hist_t *m, const char *id) {
@@ -599,8 +601,11 @@ void history_on_reading(const char *id_hex, double total, int kind, uint32_t ts_
     // biezacej godziny po restarcie (restore_from_archive).
     if (history_is_tracked(id_hex)) archive_append_hour(m->id, bh, ft, ts_unix);
 
-    // Zapis do flash tylko gdy zamknela sie godzina (oszczedzamy zapisy)
-    if (hour_closed) save_meter(m);
+    // Zapis: przy zamknieciu godziny LUB co >=15 min (krzywa dnia + biezaca
+    // godzina nie przepadaja przy utracie zasilania; kontrolowany restart
+    // dodatkowo robi pelny history_flush()).
+    if (hour_closed ||
+        (history_is_tracked(id_hex) && ts_unix - m->last_save_ts >= 900)) save_meter(m);
 
     if (s_mutex) xSemaphoreGive(s_mutex);
 }
@@ -639,7 +644,7 @@ void history_on_field(const char *id_hex, const char *field, double value,
     // Archiwum godzinowe (miesiac) na flash dla sledzonego pola.
     archive_append_hour(m->id, bh, ft, ts_unix);
 
-    if (hour_closed) save_meter(m);
+    if (hour_closed || ts_unix - m->last_save_ts >= 900) save_meter(m);
     if (s_mutex) xSemaphoreGive(s_mutex);
 }
 
@@ -1034,4 +1039,16 @@ void history_tracked_first(char *out, int cap) {
     if (!out || cap < 1) return;
     if (s_tracked_count > 0) strncpy(out, s_tracked[0], cap - 1), out[cap-1] = 0;
     else out[0] = 0;
+}
+
+// Zrzuc na flash wszystkie zaladowane liczniki - wolane przed kontrolowanym
+// restartem (przycisk restartu, start OTA), zeby krzywa dnia i biezaca godzina
+// nie zaczynaly od zera po ponownym uruchomieniu.
+void history_flush(void) {
+    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
+    for (int i = 0; i < MAX_HIST_METERS; i++) {
+        if (s_meters[i].used) save_meter(&s_meters[i]);
+    }
+    if (s_mutex) xSemaphoreGive(s_mutex);
+    ESP_LOGI(TAG, "Historia zrzucona na flash (flush)");
 }

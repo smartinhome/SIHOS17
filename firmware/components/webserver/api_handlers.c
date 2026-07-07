@@ -611,6 +611,7 @@ static esp_err_t handle_ota_upload(httpd_req_t *req) {
         return ESP_OK;
     }
     resp_ok(req);
+    history_flush();   // nie trac krzywej dnia przy aktualizacji
     ota_start_from_buffer(buf, len);
     return ESP_OK;
 }
@@ -625,6 +626,7 @@ static esp_err_t handle_ota_github(httpd_req_t *req) {
             beta = (strcmp(val, "beta") == 0);
     }
     resp_ok(req);
+    history_flush();   // nie trac krzywej dnia przy aktualizacji
     ota_start_from_github(beta);
     return ESP_OK;
 }
@@ -642,6 +644,7 @@ static esp_err_t handle_ota_status(httpd_req_t *req) {
 }
 
 static esp_err_t handle_restart(httpd_req_t *req) {
+    history_flush();   // nie trac krzywej dnia i biezacej godziny przy restarcie
     resp_ok(req);
     vTaskDelay(pdMS_TO_TICKS(500));
     esp_restart();

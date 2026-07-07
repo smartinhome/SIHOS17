@@ -93,3 +93,6 @@ int history_keys_for_id(const char *id, char keys[][28], int max_keys);
 // Diagnostyka dla ekranu: liczba sledzonych kluczy + pierwszy klucz (do podgladu).
 int history_tracked_count(void);
 void history_tracked_first(char *out, int cap);
+
+// Zrzuc na flash stan wszystkich zaladowanych licznikow (przed restartem/OTA).
+void history_flush(void);

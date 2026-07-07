@@ -4,4 +4,4 @@ set(IDF_TARGET "esp32c6")
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
-project(sih-wmbus-reader VERSION 1.0.0)
+project(sih-wmbus-reader VERSION 1.0.4)

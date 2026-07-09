@@ -103,6 +103,35 @@ static esp_err_t handle_history_day(httpd_req_t *req) {
     tmd.tm_year = y - 1900; tmd.tm_mon = mo - 1; tmd.tm_mday = d;
     tmd.tm_hour = 12; tmd.tm_min = 0; tmd.tm_sec = 0;
     uint32_t day_ts = (uint32_t)mktime(&tmd);
+
+    // Krzywa dnia 1-min (pola chwilowe): do 1440 punktow (~40KB JSON) -
+    // strumieniowanie chunked zamiast jednego wielkiego bufora.
+    hist_bucket_t *pts = malloc(HIST_CURVE * sizeof(hist_bucket_t));
+    if (pts) {
+        int np = history_curve_day(id, day_ts, pts, HIST_CURVE);
+        if (np > 0) {
+            httpd_resp_set_type(req, "application/json");
+            char chunk[2048];
+            int n = snprintf(chunk, sizeof(chunk),
+                             "{\"id\":\"%s\",\"cumulative\":0,\"curve\":1,\"points\":[", id);
+            for (int i = 0; i < np; i++) {
+                n += snprintf(chunk + n, sizeof(chunk) - n, "%s{\"t\":%u,\"v\":%.3f}",
+                              i ? "," : "", (unsigned)pts[i].ts, pts[i].total);
+                if (n > (int)sizeof(chunk) - 48) {
+                    httpd_resp_send_chunk(req, chunk, n);
+                    n = 0;
+                }
+            }
+            n += snprintf(chunk + n, sizeof(chunk) - n, "]}");
+            httpd_resp_send_chunk(req, chunk, n);
+            httpd_resp_send_chunk(req, NULL, 0);
+            free(pts);
+            return ESP_OK;
+        }
+        free(pts);
+    }
+
+    // Pola kumulacyjne (slupki godzinowe) - dotychczasowa sciezka buforowana.
     char *buf = malloc(12288);
     if (!buf) { httpd_resp_send_500(req); return ESP_OK; }
     history_get_day_json(id, day_ts, buf, 12288);

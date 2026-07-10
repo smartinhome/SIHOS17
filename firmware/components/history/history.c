@@ -190,6 +190,7 @@ static FILE *arc_migrate_v2(const char *path, arc_hdr_t *h) {
     // historii, wiec jedna wspolna nazwa jest bezpieczna.
     const char *tmp = "/spiffs/arc_mig.tmp";
     remove(tmp);   // sprzatnij pozostalosc po ew. przerwanej migracji
+    remove("/spiffs/arc_mig.dst");
     FILE *src = fopen(path, "rb");
     if (!src) return NULL;
     FILE *dst = fopen(tmp, "w+b");
@@ -205,8 +206,14 @@ static FILE *arc_migrate_v2(const char *path, arc_hdr_t *h) {
     }
     fclose(src);
     fclose(dst);
+    // Marker celu PRZED usunieciem oryginalu: utrata zasilania w oknie
+    // remove(path)..rename(tmp,path) nie zgubi archiwum - history_init
+    // dokonczy przenoszenie przy nastepnym starcie.
+    FILE *mk = fopen("/spiffs/arc_mig.dst", "wb");
+    if (mk) { fwrite(path, 1, strlen(path), mk); fclose(mk); }
     remove(path);
-    if (rename(tmp, path) != 0) { remove(tmp); return NULL; }
+    if (rename(tmp, path) != 0) { remove(tmp); remove("/spiffs/arc_mig.dst"); return NULL; }
+    remove("/spiffs/arc_mig.dst");
     ESP_LOGI(TAG, "Archiwum %s zmigrowane do formatu v2", path);
     return fopen(path, "r+b");
 }
@@ -286,19 +293,54 @@ static void archive_rebuild_from_hours(meter_hist_t *m) {
     if (!s_fs_ok || m->n_hours == 0) return;
     char path[48]; archive_path(m->id, path, sizeof(path));
 
-    // Sprawdz istniejace archiwum - ile ma poprawnych rekordow.
-    int existing = -1;  // -1 = brak/niezgodne
-    FILE *f = fopen(path, "rb");
+    // Poprawne archiwum NIGDY nie jest nadpisywane - co najwyzej UZUPELNIANE
+    // o godziny z RAM nowsze niz jego ostatni rekord (archiwum moglo powstac
+    // pozniej niz zbieranie danych). Wczesniejsza wersja przy kazdym klopocie
+    // z odczytem naglowka tworzyla plik od zera, kasujac wielomiesieczna
+    // historie do 7 dni z RAM.
+    FILE *f = fopen(path, "r+b");
     if (f) {
-        arc_hdr_t hh;
-        if (arc_read_header2(f, &hh)) existing = hh.count;  // poprawny format v1/v2
+        arc_hdr_t h;
+        if (arc_read_header2(f, &h)) {
+            uint32_t last = 0;
+            if (h.count > 0) {
+                hist_bucket_t rec;
+                int phys = (h.head + h.count - 1) % HIST_ARCHIVE_HOURS;
+                if (fseek(f, arc_rec_off2(h.hdr, phys), SEEK_SET) == 0 &&
+                    fread(&rec, sizeof(rec), 1, f) == 1) last = rec.ts;
+            }
+            int added = 0;
+            for (int i = 0; i < m->n_hours; i++) {
+                if (m->hours[i].ts <= last) continue;
+                int wp;
+                if (h.count >= HIST_ARCHIVE_HOURS) {
+                    wp = h.head; h.head = (h.head + 1) % HIST_ARCHIVE_HOURS;
+                } else {
+                    wp = (h.head + h.count) % HIST_ARCHIVE_HOURS; h.count++;
+                }
+                fseek(f, arc_rec_off2(h.hdr, wp), SEEK_SET);
+                fwrite(&m->hours[i], sizeof(hist_bucket_t), 1, f);
+                added++;
+            }
+            if (added) {
+                if (h.v2) {
+                    if (h.last_ts < m->last_ts) { h.last_ts = m->last_ts; h.last_total = m->last_total; }
+                    arc_write_header_v2(f, &h);
+                } else {
+                    fseek(f, 0, SEEK_SET);
+                    fwrite(&h.count, sizeof(int), 1, f);
+                    fwrite(&h.head, sizeof(int), 1, f);
+                }
+                ESP_LOGI(TAG, "Archiwum %s uzupelnione o %d godz z RAM", path, added);
+            }
+            fclose(f);
+            return;
+        }
         fclose(f);
+        ESP_LOGW(TAG, "Archiwum %s ma nieczytelny naglowek - odtwarzam z RAM (7 dni)", path);
     }
-    // Odbuduj tylko gdy archiwum puste, niezgodne (stary format) lub ma mniej
-    // rekordow niz mamy godzin w RAM (nie psujemy bogatszego archiwum).
-    if (existing >= m->n_hours) return;
 
-    // Zapisz na nowo: naglowek v2 + godziny z RAM (chronologicznie, jak w hours[]).
+    // Brak pliku lub naglowek nie do odczytania: utworz od nowa z godzin w RAM.
     f = fopen(path, "w+b");
     if (!f) { ESP_LOGW(TAG, "nie moge odbudowac archiwum %s", path); return; }
     arc_hdr_t h = { .count = m->n_hours, .head = 0, .hdr = ARC_HDR_V2, .v2 = true,
@@ -550,6 +592,25 @@ void history_init(void) {
     size_t total = 0, used = 0;
     esp_spiffs_info("littlefs", &total, &used);
     ESP_LOGI(TAG, "SPIFFS zamontowany: %u/%u B", (unsigned)used, (unsigned)total);
+    // Dokoncz ewentualna przerwana migracje archiwum: marker wskazuje cel,
+    // a plik tymczasowy zawiera juz pelna, poprawna kopie v2.
+    {
+        FILE *mk = fopen("/spiffs/arc_mig.dst", "rb");
+        if (mk) {
+            char dst[48] = {0};
+            fread(dst, 1, sizeof(dst) - 1, mk);
+            fclose(mk);
+            if (dst[0]) {
+                FILE *chk = fopen(dst, "rb");
+                if (chk) {
+                    fclose(chk);            // cel istnieje - migracja sie udala
+                } else if (rename("/spiffs/arc_mig.tmp", dst) == 0) {
+                    ESP_LOGW(TAG, "Dokonczono przerwana migracje archiwum %s", dst);
+                }
+            }
+            remove("/spiffs/arc_mig.dst");
+        }
+    }
     remove("/spiffs/arc_mig.tmp");   // pozostalosc po ew. przerwanej migracji
     tracked_load();
     ESP_LOGI(TAG, "Sledzonych licznikow: %d", s_tracked_count);

@@ -831,9 +831,27 @@ int history_get_day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf
     uint32_t d0 = floor_day(day_ts);          // poczatek wybranej doby
     uint32_t d1 = d0 + 86400;                  // poczatek nastepnej doby
 
-    // Pola CHWILOWE (moc, napiecie) z zebranym przebiegiem: zwroc krzywa dnia
-    // (kubelki 5-min, styl HA) zamiast 24 godzinnych wartosci.
+    // Pola CHWILOWE (moc, napiecie): krzywa 1-min TYLKO gdy dla zadanej doby
+    // faktycznie mamy punkty krzywej (biezaca doba). Dla starszych dni
+    // przechodzimy do sciezki godzinowej - te dane leza w 2-letnim archiwum
+    // na flashu dla KAZDEGO sledzonego pola, takze mocy i napiec. Wczesniej
+    // ta galaz przechwytywala pole chwilowe zawsze i dla dni starszych niz
+    // doba zwracala pusta liste, co wygladalo jak brak historii napiec/mocy.
+    bool use_curve = false;
     if (m && !cumulative && m->curve && m->n_curve > 0) {
+        bool has_day = false;
+        for (int i = 0; i < m->n_curve; i++) {
+            if (m->curve[i].ts >= d0 && m->curve[i].ts < d1) { has_day = true; break; }
+        }
+        if (has_day) {
+            bool is_current_day = (m->last_ts >= d0 && m->last_ts < d1);
+            bool fully_covered  = (m->curve[0].ts <= d0);   // ring zaczyna sie przed doba
+            // Dzien historyczny tylko CZESCIOWO zahaczony przez ring (np. koncowka
+            // wczorajszej doby) NIE moze przeslaniac pelnych 24 godzin z archiwum.
+            use_curve = is_current_day || fully_covered;
+        }
+    }
+    if (use_curve) {
         int n2 = snprintf(buf, buf_cap,
                           "{\"id\":\"%s\",\"kind\":%d,\"cumulative\":0,\"curve\":1,\"points\":[",
                           id_hex ? id_hex : "", kind);
@@ -1142,8 +1160,12 @@ int history_curve_day(const char *key, uint32_t day_ts, hist_bucket_t *out, int 
     meter_hist_t *m = get_or_load(key, false);
     if (m && !m->cumulative && m->curve && m->n_curve > 0) {
         uint32_t d0 = floor_day(day_ts), d1 = d0 + 86400;
-        for (int i = 0; i < m->n_curve && n < cap; i++) {
-            if (m->curve[i].ts >= d0 && m->curve[i].ts < d1) out[n++] = m->curve[i];
+        bool is_current_day = (m->last_ts >= d0 && m->last_ts < d1);
+        bool fully_covered  = (m->curve[0].ts <= d0);
+        if (is_current_day || fully_covered) {
+            for (int i = 0; i < m->n_curve && n < cap; i++) {
+                if (m->curve[i].ts >= d0 && m->curve[i].ts < d1) out[n++] = m->curve[i];
+            }
         }
     }
     if (s_mutex) xSemaphoreGive(s_mutex);

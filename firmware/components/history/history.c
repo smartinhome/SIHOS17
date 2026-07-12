@@ -236,10 +236,16 @@ static void archive_append_hour(const char *id, uint32_t hour_ts, float total,
         h.v2 = true; h.hdr = ARC_HDR_V2;
     } else {
         if (!arc_read_header2(f, &h)) {
-            // Niezgodny format - zresetuj plik (pusty ring v2).
+            // Nieczytelny naglowek podczas pracy: NIE kasuj po cichu. Zachowaj
+            // plik jako /spiffs/arc_bad.bin (dowod + szansa recznego odzyskania),
+            // dopiero potem zaloz swiezy ring. Poprzednio plik byl zerowany
+            // przy kazdym takim zdarzeniu - to jedna z drog utraty historii.
             fclose(f);
+            remove("/spiffs/arc_bad.bin");
+            if (rename(path, "/spiffs/arc_bad.bin") == 0)
+                ESP_LOGE(TAG, "Archiwum %s nieczytelne - odlozone jako arc_bad.bin", path);
             f = fopen(path, "w+b");
-            if (!f) { ESP_LOGW(TAG, "nie moge zresetowac archiwum %s", path); return; }
+            if (!f) { ESP_LOGW(TAG, "nie moge odtworzyc archiwum %s", path); return; }
             memset(&h, 0, sizeof(h));
             h.v2 = true; h.hdr = ARC_HDR_V2;
         } else if (!h.v2) {
@@ -337,6 +343,9 @@ static void archive_rebuild_from_hours(meter_hist_t *m) {
             return;
         }
         fclose(f);
+        remove("/spiffs/arc_bad.bin");
+        if (rename(path, "/spiffs/arc_bad.bin") == 0)
+            ESP_LOGE(TAG, "Archiwum %s nieczytelne - odlozone jako arc_bad.bin", path);
         ESP_LOGW(TAG, "Archiwum %s ma nieczytelny naglowek - odtwarzam z RAM (7 dni)", path);
     }
 
@@ -624,7 +633,28 @@ void history_init(void) {
         meter_hist_t *m = get_or_load(s_tracked[i], false);
         if (m) {
             loaded++;
-            archive_rebuild_from_hours(m);  // odbuduj archiwum ha_ z godzin w RAM
+            archive_rebuild_from_hours(m);  // uzupelnij archiwum ha_ z godzin w RAM
+            // Diagnostyka retencji: zasieg archiwum w logu przy kazdym starcie -
+            // jesli poczatek kiedykolwiek "przeskoczy" do przodu, od razu widac.
+            {
+                char apath[48]; archive_path(m->id, apath, sizeof(apath));
+                FILE *af = fopen(apath, "rb");
+                if (af) {
+                    arc_hdr_t ah;
+                    if (arc_read_header2(af, &ah) && ah.count > 0) {
+                        hist_bucket_t r0, r1;
+                        int p0 = ah.head, p1 = (ah.head + ah.count - 1) % HIST_ARCHIVE_HOURS;
+                        if (fseek(af, arc_rec_off2(ah.hdr, p0), SEEK_SET) == 0 &&
+                            fread(&r0, sizeof(r0), 1, af) == 1 &&
+                            fseek(af, arc_rec_off2(ah.hdr, p1), SEEK_SET) == 0 &&
+                            fread(&r1, sizeof(r1), 1, af) == 1) {
+                            ESP_LOGI(TAG, "Archiwum %s: %d godz, od ts=%u do ts=%u",
+                                     m->id, ah.count, (unsigned)r0.ts, (unsigned)r1.ts);
+                        }
+                    }
+                    fclose(af);
+                }
+            }
         }
     }
     ESP_LOGI(TAG, "Wczytano historie z flash dla %d/%d licznikow", loaded, s_tracked_count);

@@ -989,7 +989,14 @@ int history_get_day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf
     int nb = 0;
     hist_bucket_t prev; bool has_prev = false;
 
-    if (m) {
+    // Z RAM czytamy TYLKO dzien w pelni pokryty oknem 168 godzin (RAM zaczyna
+    // sie przed poczatkiem doby). Dzien GRANICZNY (dzis-7d) jest w RAM tylko
+    // czesciowo i kurczy sie z kazda pelna godzina - wczesniej jedna znaleziona
+    // godzina w RAM blokowala fallback do archiwum, wiec na tym dniu "znikaly"
+    // slupki, mimo ze w archiwum na flashu lezaly nietkniete. Dzien niepokryty
+    // od poczatku idzie w calosci z archiwum (kompletnego z dokladnoscia <=60 s).
+    bool ram_covers = (m && m->n_hours > 0 && m->hours[0].ts <= d0);
+    if (m && ram_covers) {
         for (int i = 0; i < m->n_hours && nb < ARC_DAY_BUF; i++) {
             if (m->hours[i].ts >= d0 && m->hours[i].ts < d1) {
                 s_day_buf[nb++] = m->hours[i];

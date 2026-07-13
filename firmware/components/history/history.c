@@ -220,6 +220,60 @@ static FILE *arc_migrate_v2(const char *path, arc_hdr_t *h) {
     return fopen(path, "r+b");
 }
 
+// Weryfikacja i naprawa archiwum z uszkodzonym naglowkiem (np. count=17520
+// przy realnych ~200 rekordach po przerwanym zapisie na starszym firmware).
+// Objaw: ring udaje pelny i kazda nowa godzina nadpisuje logicznie najstarszy
+// slot - poczatek historii przesuwa sie do przodu o godzine na godzine.
+// Naprawa: od NAJNOWSZEGO rekordu idziemy wstecz po logicznych indeksach,
+// dopoki rekordy sa czytelne, z sensownym ts i scisle malejace; ten ciagly
+// ogon to prawdziwe dane. Nowy naglowek: head=fizyczna pozycja pierwszego
+// poprawnego, count=dlugosc ogona. Rekordy zostaja na miejscu.
+#define ARC_TS_MIN 1700000000u
+#define ARC_TS_MAX 2100000000u
+static bool arc_validate_repair(const char *path, FILE *f, arc_hdr_t *h) {
+    if (h->count <= 0) return true;
+    hist_bucket_t rec;
+    // Pierwszy i ostatni logiczny rekord.
+    int p_first = h->head;
+    int p_last  = (h->head + h->count - 1) % HIST_ARCHIVE_HOURS;
+    bool first_ok = (fseek(f, arc_rec_off2(h->hdr, p_first), SEEK_SET) == 0 &&
+                     fread(&rec, sizeof(rec), 1, f) == 1 &&
+                     rec.ts >= ARC_TS_MIN && rec.ts <= ARC_TS_MAX);
+    hist_bucket_t last;
+    bool last_ok = (fseek(f, arc_rec_off2(h->hdr, p_last), SEEK_SET) == 0 &&
+                    fread(&last, sizeof(last), 1, f) == 1 &&
+                    last.ts >= ARC_TS_MIN && last.ts <= ARC_TS_MAX);
+    if (first_ok && last_ok) return true;   // naglowek wyglada zdrowo
+    if (!last_ok) return false;             // nawet koniec zly - nie do naprawy tutaj
+
+    // Idz wstecz od konca: licz dlugosc poprawnego ogona.
+    int valid = 1;
+    uint32_t prev_ts = last.ts;
+    for (int back = 1; back < h->count; back++) {
+        int phys = (p_last - back + HIST_ARCHIVE_HOURS) % HIST_ARCHIVE_HOURS;
+        if (fseek(f, arc_rec_off2(h->hdr, phys), SEEK_SET) != 0) break;
+        if (fread(&rec, sizeof(rec), 1, f) != 1) break;
+        if (rec.ts < ARC_TS_MIN || rec.ts > ARC_TS_MAX) break;
+        if (rec.ts >= prev_ts) break;       // musi scisle malec idac wstecz
+        prev_ts = rec.ts;
+        valid++;
+    }
+    int new_head = (p_last - (valid - 1) + HIST_ARCHIVE_HOURS) % HIST_ARCHIVE_HOURS;
+    ESP_LOGW(TAG, "Archiwum %s: naprawa naglowka (bylo count=%d head=%d, jest count=%d head=%d)",
+             path, h->count, h->head, valid, new_head);
+    h->count = valid;
+    h->head  = new_head;
+    if (h->v2) {
+        arc_write_header_v2(f, h);
+    } else {
+        fseek(f, 0, SEEK_SET);
+        fwrite(&h->count, sizeof(int), 1, f);
+        fwrite(&h->head,  sizeof(int), 1, f);
+    }
+    return true;
+}
+
+
 // Dopisz/zaktualizuj punkt godzinowy w archiwum (ring buffer, strumieniowo).
 // NIE wczytuje calego pliku do RAM - tylko naglowek + ostatni rekord.
 // ts_exact = dokladny unix ostatniego odczytu (do naglowka v2).
@@ -315,7 +369,7 @@ static void archive_rebuild_from_hours(meter_hist_t *m) {
     FILE *f = fopen(path, "r+b");
     if (f) {
         arc_hdr_t h;
-        if (arc_read_header2(f, &h)) {
+        if (arc_read_header2(f, &h) && arc_validate_repair(path, f, &h)) {
             uint32_t last = 0;
             if (h.count > 0) {
                 hist_bucket_t rec;

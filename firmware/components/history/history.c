@@ -2,6 +2,7 @@
 #include "esp_spiffs.h"
 #include "esp_log.h"
 #include <string.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
@@ -30,6 +31,7 @@ typedef struct {
     // statycznie dla 16 slotow zjadloby to 184KB RAM.
     hist_bucket_t *curve;              int n_curve;
     uint32_t last_save_ts;             // ostatni zapis h_ (zapis okresowy, RAM-only)
+    uint32_t last_arc_ts;              // ostatni zapis ha_ (throttling, RAM-only)
 } meter_hist_t;
 
 static meter_hist_t s_meters[MAX_HIST_METERS];
@@ -227,8 +229,13 @@ static void archive_append_hour(const char *id, uint32_t hour_ts, float total,
     char path[48]; archive_path(id, path, sizeof(path));
 
     arc_hdr_t h;
+    errno = 0;
     FILE *f = fopen(path, "r+b");
     if (!f) {
+        if (errno != ENOENT) {
+            ESP_LOGE(TAG, "Archiwum %s: otwarcie nieudane (errno=%d) - pomijam zapis", path, errno);
+            return;
+        }
         // nowy plik - utworz z naglowkiem v2
         f = fopen(path, "w+b");
         if (!f) { ESP_LOGW(TAG, "nie moge utworzyc archiwum %s", path); return; }
@@ -304,6 +311,7 @@ static void archive_rebuild_from_hours(meter_hist_t *m) {
     // pozniej niz zbieranie danych). Wczesniejsza wersja przy kazdym klopocie
     // z odczytem naglowka tworzyla plik od zera, kasujac wielomiesieczna
     // historie do 7 dni z RAM.
+    errno = 0;
     FILE *f = fopen(path, "r+b");
     if (f) {
         arc_hdr_t h;
@@ -349,6 +357,13 @@ static void archive_rebuild_from_hours(meter_hist_t *m) {
         ESP_LOGW(TAG, "Archiwum %s ma nieczytelny naglowek - odtwarzam z RAM (7 dni)", path);
     }
 
+    // Utworz od nowa TYLKO gdy plik naprawde nie istnieje (ENOENT). Kazdy inny
+    // powod nieudanego otwarcia (uszkodzenie po przerwanym zapisie, brak
+    // zasobow) NIE moze konczyc sie nadpisaniem - zostaje glosny blad w logu.
+    if (!f && errno != ENOENT) {
+        ESP_LOGE(TAG, "Archiwum %s: otwarcie nieudane (errno=%d) - NIE odtwarzam", path, errno);
+        return;
+    }
     // Brak pliku lub naglowek nie do odczytania: utworz od nowa z godzin w RAM.
     f = fopen(path, "w+b");
     if (!f) { ESP_LOGW(TAG, "nie moge odbudowac archiwum %s", path); return; }
@@ -589,7 +604,10 @@ void history_init(void) {
         .base_path = "/spiffs",
         .partition_label = "littlefs",   // partycja z subtype spiffs
         .max_files = 6,
-        .format_if_mount_failed = true
+        // NIGDY nie formatuj automatycznie: nieudane montowanie (np. brudny
+        // stan po twardym resecie) kasowaloby CALA historie wszystkich
+        // licznikow. Wolimy prace bez historii i glosny blad w logu.
+        .format_if_mount_failed = false
     };
     esp_err_t ret = esp_vfs_spiffs_register(&conf);
     if (ret != ESP_OK) {
@@ -711,7 +729,11 @@ void history_on_reading(const char *id_hex, double total, int kind, uint32_t ts_
     // Archiwum godzinowe co ramke - ale tylko dla SLEDZONYCH licznikow (nie pisz
     // na flash dla kazdego zaslyszanego sasiada). To zrodlo odtwarzania stanu
     // biezacej godziny po restarcie (restore_from_archive).
-    if (history_is_tracked(id_hex)) archive_append_hour(m->id, bh, ft, ts_unix);
+    if (history_is_tracked(id_hex) &&
+        (ts_unix - m->last_arc_ts >= 60 || floor_hour(ts_unix) != floor_hour(m->last_arc_ts))) {
+        archive_append_hour(m->id, bh, ft, ts_unix);
+        m->last_arc_ts = ts_unix;
+    }
 
     // Zapis: przy zamknieciu godziny LUB co >=15 min (krzywa dnia + biezaca
     // godzina nie przepadaja przy utracie zasilania; kontrolowany restart
@@ -753,8 +775,13 @@ void history_on_field(const char *id_hex, const char *field, double value,
     if (!m->cumulative && ensure_curve(m))
         series_update(m->curve, &m->n_curve, HIST_CURVE, ts_unix - (ts_unix % 60), ft);
 
-    // Archiwum godzinowe (miesiac) na flash dla sledzonego pola.
-    archive_append_hour(m->id, bh, ft, ts_unix);
+    // Archiwum godzinowe na flash dla sledzonego pola - z throttlingiem 60 s:
+    // ramki co ~10 s daja 6x mniej goracych zapisow (mniejsze ryzyko przerwania
+    // zapisu w chwili resetu), a kubelek i tak trzyma ostatnia wartosc godziny.
+    if (ts_unix - m->last_arc_ts >= 60 || floor_hour(ts_unix) != floor_hour(m->last_arc_ts)) {
+        archive_append_hour(m->id, bh, ft, ts_unix);
+        m->last_arc_ts = ts_unix;
+    }
 
     if (hour_closed || ts_unix - m->last_save_ts >= 900) save_meter(m);
     if (s_mutex) xSemaphoreGive(s_mutex);

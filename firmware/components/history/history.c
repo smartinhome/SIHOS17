@@ -1136,6 +1136,43 @@ bool history_last_known(const char *id_hex, double *out_total, int *out_kind, ui
 
 // ----- API dla wyswietlacza e-ink -----
 
+// Suma zuzycia doby [d0,d0+24h) liczona IDENTYCZNIE jak slupki wykresu
+// (roznice kolejnych kubelkow godzinowych + rozklad luk <=6h proporcjonalnie,
+// z przycieciem na granicy doby). Uzywana przez e-ink, zeby "dzis" na
+// wyswietlaczu rownalo sie sumie slupkow w web UI.
+// Dziala na godzinach w RAM; wymaga, by RAM pokrywal dobe od jej poczatku.
+static bool day_sum_from_hours(const meter_hist_t *m, uint32_t d0, float *out_sum) {
+    if (!m || m->n_hours == 0 || m->hours[0].ts > d0) return false;
+    uint32_t d1 = d0 + 86400;
+    const uint32_t GAP_FILL_MAX_H = 6;
+    float sum = 0;
+    const hist_bucket_t *ref = NULL;
+    for (int i = 0; i < m->n_hours; i++) {
+        const hist_bucket_t *b = &m->hours[i];
+        if (b->ts >= d1) break;
+        if (b->ts < d0) { ref = b; continue; }
+        if (ref && b->ts > ref->ts) {
+            uint32_t gap_h = (b->ts - ref->ts) / 3600;
+            float delta = b->total - ref->total;
+            if (delta < 0) delta = 0;
+            if (gap_h <= 1) {
+                sum += delta;
+            } else if (gap_h <= GAP_FILL_MAX_H) {
+                float per = delta / (float)gap_h;
+                for (uint32_t g = 1; g <= gap_h; g++) {
+                    uint32_t tg = ref->ts + g * 3600;
+                    if (tg >= d0 && tg < d1) sum += per;
+                }
+            } else {
+                sum += delta;
+            }
+        }
+        ref = b;
+    }
+    *out_sum = sum;
+    return true;
+}
+
 bool history_display_summary(const char *key, hist_display_t *out) {
     if (!key || !out) return false;
     memset(out, 0, sizeof(*out));
@@ -1178,6 +1215,12 @@ bool history_display_summary(const char *key, hist_display_t *out) {
             out->today = m->last_total - t_d1;
             if (out->today < 0) out->today = 0;
             out->has_today = true;
+            {
+                // Spojnosc z wykresem: gdy RAM pokrywa dobe, licz jak slupki
+                // (rozklad luk na granicy polnocy dawal rozne "dzis" niz web UI).
+                float ds;
+                if (day_sum_from_hours(m, day0, &ds)) out->today = ds;
+            }
         } else if (out->has_value) {
             // Brak danych z wczoraj (np. pierwszy dzien) - dzis = 0 do polnocy.
             out->today = 0;
@@ -1185,6 +1228,10 @@ bool history_display_summary(const char *key, hist_display_t *out) {
         }
         if (h1 && h2) {
             out->yesterday = t_d1 - t_d2;
+            {
+                float ys;
+                if (day_sum_from_hours(m, day_1, &ys)) out->yesterday = ys;
+            }
             if (out->yesterday < 0) out->yesterday = 0;
             out->has_yesterday = true;
         }

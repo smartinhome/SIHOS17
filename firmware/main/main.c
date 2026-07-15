@@ -10,6 +10,7 @@
 #include "ota_manager.h"
 #include "display_eink.h"
 #include "log_buffer.h"
+#include "esp_heap_caps.h"
 
 #include "nvs_flash.h"
 #include "esp_log.h"
@@ -92,5 +93,11 @@ void app_main(void) {
     // Strony pokazuja sledzone liczniki z danymi z historii.
     display_eink_start_tasks(BOOT_BUTTON_PIN);
 
+    // Diagnostyka pamieci: twarde liczby zamiast procentow (procent zajetosci
+    // sterty myli, bo .bss nie jest w niej liczony - por. optymalizacja slotow).
+    ESP_LOGI(TAG, "RAM: wolne %u B, min. wolne od startu %u B, calkowite %u B",
+             (unsigned)esp_get_free_heap_size(),
+             (unsigned)esp_get_minimum_free_heap_size(),
+             (unsigned)heap_caps_get_total_size(MALLOC_CAP_DEFAULT));
     ESP_LOGI(TAG, "System gotowy");
 }

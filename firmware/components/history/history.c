@@ -662,6 +662,19 @@ void history_set_tracked(const char *id_hex, bool tracked) {
             memcpy(s_tracked[i], s_tracked[i+1], sizeof(s_tracked[0]));
         s_tracked_count--;
         tracked_save();
+        // Zwolnij slot RAM (2.9KB + ew. krzywa 11.5KB) - inaczej wisialby do
+        // restartu. Pliki na flashu zostaja, wiec ponowne wlaczenie sledzenia
+        // odzyskuje historie.
+        for (int i = 0; i < MAX_HIST_METERS; i++) {
+            if (s_meters[i] && s_meters[i]->used &&
+                strcasecmp(s_meters[i]->id, id_hex) == 0) {
+                save_meter(s_meters[i]);
+                free_curve(s_meters[i]);
+                free(s_meters[i]);
+                s_meters[i] = NULL;
+                break;
+            }
+        }
     }
     if (s_mutex) xSemaphoreGive(s_mutex);
 }
@@ -774,6 +787,11 @@ static meter_hist_t *get_or_load(const char *id, bool create_if_missing) {
 // ---------- Glowne wejscie: nowy odczyt ----------
 void history_on_reading(const char *id_hex, double total, int kind, uint32_t ts_unix) {
     if (!id_hex || ts_unix < 1700000000) return;  // wymaga zsynchronizowanego czasu
+    // Historie zbieramy WYLACZNIE dla sledzonych licznikow. Zaslyszani sasiedzi
+    // (kazdy nadajnik w zasiegu) zajmowali wczesniej slot 2.9KB na stercie i plik
+    // na flashu, mimo ze nikt ich nie ogladal. Podglad ramek ("Lap licznik") i
+    // dekodowanie dzialaja niezaleznie - to rezygnacja wylacznie z historii.
+    if (!history_is_tracked(id_hex)) return;
     if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
 
     meter_hist_t *m = get_or_load(id_hex, true);
@@ -799,8 +817,7 @@ void history_on_reading(const char *id_hex, double total, int kind, uint32_t ts_
     // Archiwum godzinowe co ramke - ale tylko dla SLEDZONYCH licznikow (nie pisz
     // na flash dla kazdego zaslyszanego sasiada). To zrodlo odtwarzania stanu
     // biezacej godziny po restarcie (restore_from_archive).
-    if (history_is_tracked(id_hex) &&
-        (ts_unix - m->last_arc_ts >= 60 || floor_hour(ts_unix) != floor_hour(m->last_arc_ts))) {
+    if (ts_unix - m->last_arc_ts >= 60 || floor_hour(ts_unix) != floor_hour(m->last_arc_ts)) {
         archive_append_hour(m->id, bh, ft, ts_unix);
         m->last_arc_ts = ts_unix;
     }
@@ -808,8 +825,7 @@ void history_on_reading(const char *id_hex, double total, int kind, uint32_t ts_
     // Zapis: przy zamknieciu godziny LUB co >=15 min (krzywa dnia + biezaca
     // godzina nie przepadaja przy utracie zasilania; kontrolowany restart
     // dodatkowo robi pelny history_flush()).
-    if (hour_closed ||
-        (history_is_tracked(id_hex) && ts_unix - m->last_save_ts >= 900)) save_meter(m);
+    if (hour_closed || ts_unix - m->last_save_ts >= 900) save_meter(m);
 
     if (s_mutex) xSemaphoreGive(s_mutex);
 }

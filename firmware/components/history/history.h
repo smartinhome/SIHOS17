@@ -42,6 +42,13 @@ void history_on_field(const char *id_hex, const char *field, double value,
 // Zwraca zuzycie (roznice) miedzy kolejnymi kubelkami - styl HA Energy.
 int history_get_json(const char *id_hex, const char *res, char *buf, int buf_cap);
 
+// Seria dla ZAKRESU KALENDARZOWEGO: kubelki dobowe (unit='d') od from do to
+// (unix, [from,to)) albo miesieczne (unit='m'). Uzywane przez widoki
+// "ten tydzien" (7 dni pn-nd), "ten miesiac" (1..28/31) i "ten rok" (12 mies).
+// Dni spoza okna serii dziennej (90 dni) sa dobierane z 2-letniego archiwum.
+int history_range_json(const char *id_hex, uint32_t from, uint32_t to,
+                       char unit, char *buf, int buf_cap);
+
 // Zwraca godzinowe zuzycie z konkretnego dnia (archiwum miesieczne na flash).
 // day_ts: dowolny unix timestamp z wybranego dnia (uzywany jest floor do doby).
 // Format JSON jak history_get_json: {"id":..,"kind":..,"cumulative":..,"points":[{"t":..,"v":..}]}

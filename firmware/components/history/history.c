@@ -873,6 +873,109 @@ static bool earliest_total_in(meter_hist_t *m, uint32_t period_start,
     return found;
 }
 
+// Stan licznika (total) na moment ts: najswiezszy kubelek godzinowy o ts<=t.
+// Zrodlo: RAM (godziny) i archiwum 2-letnie. Zwraca false gdy brak odniesienia.
+static bool total_at_ts(meter_hist_t *m, uint32_t t, float *out) {
+    bool found = false; uint32_t best_ts = 0; float best = 0;
+    for (int i = 0; i < m->n_hours; i++) {
+        if (m->hours[i].ts <= t && m->hours[i].ts >= best_ts) {
+            best_ts = m->hours[i].ts; best = m->hours[i].total; found = true;
+        }
+    }
+    if (found && best_ts + 7200 >= t) { *out = best; return true; }
+    if (!s_fs_ok) { if (found) { *out = best; return true; } return false; }
+    char path[48]; archive_path(m->id, path, sizeof(path));
+    FILE *f = fopen(path, "rb");
+    if (!f) { if (found) { *out = best; return true; } return false; }
+    arc_hdr_t h;
+    if (arc_read_header2(f, &h) && h.count > 0) {
+        int lo = 0, hi = h.count;               // pierwszy rekord z ts > t
+        hist_bucket_t rec;
+        while (lo < hi) {
+            int mid = lo + (hi - lo) / 2;
+            int phys = (h.head + mid) % HIST_ARCHIVE_HOURS;
+            if (fseek(f, arc_rec_off2(h.hdr, phys), SEEK_SET) != 0 ||
+                fread(&rec, sizeof(rec), 1, f) != 1) { lo = 0; break; }
+            if (rec.ts <= t) lo = mid + 1; else hi = mid;
+        }
+        if (lo > 0) {                            // rekord tuz przed/na t
+            int phys = (h.head + lo - 1) % HIST_ARCHIVE_HOURS;
+            if (fseek(f, arc_rec_off2(h.hdr, phys), SEEK_SET) == 0 &&
+                fread(&rec, sizeof(rec), 1, f) == 1 && rec.ts <= t) {
+                if (!found || rec.ts >= best_ts) { best = rec.total; found = true; }
+            }
+        }
+    }
+    fclose(f);
+    if (found) { *out = best; return true; }
+    return false;
+}
+
+// Kolejna granica kubelka: doba (+1 dzien) lub miesiac (+1 miesiac), lokalnie.
+static uint32_t next_bucket(uint32_t t, char unit) {
+    time_t tt = t; struct tm tm; localtime_r(&tt, &tm);
+    if (unit == 'm') { tm.tm_mon += 1; tm.tm_mday = 1; }
+    else             { tm.tm_mday += 1; }
+    tm.tm_hour = 0; tm.tm_min = 0; tm.tm_sec = 0;
+    tm.tm_isdst = -1;
+    return (uint32_t)mktime(&tm);
+}
+
+int history_range_json(const char *id_hex, uint32_t from, uint32_t to,
+                       char unit, char *buf, int buf_cap) {
+    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
+    meter_hist_t *m = get_or_load(id_hex, false);
+    if (!m) {
+        int n = snprintf(buf, buf_cap, "{\"id\":\"%s\",\"kind\":0,\"points\":[]}",
+                         id_hex ? id_hex : "");
+        if (s_mutex) xSemaphoreGive(s_mutex);
+        return n;
+    }
+    int n = snprintf(buf, buf_cap, "{\"id\":\"%s\",\"kind\":%d,\"cumulative\":%d,\"points\":[",
+                     m->id, m->kind, m->cumulative);
+    bool first = true;
+    uint32_t now = (uint32_t)time(NULL);
+    for (uint32_t b = from; b < to && n < buf_cap - 64; ) {
+        uint32_t e = next_bucket(b, unit);
+        if (b > now) break;                       // okresy przyszle - pomijamy
+        float v = 0; bool have = false;
+        if (m->cumulative) {
+            float t0, t1;
+            uint32_t end = (e > now) ? now : e;   // biezacy okres: stan "na teraz"
+            if (total_at_ts(m, end, &t1)) {
+                if (total_at_ts(m, b, &t0)) {
+                    if (t1 >= t0) { v = t1 - t0; have = true; }
+                } else {
+                    // Brak stanu na POCZATKU okresu (dane zaczely sie w jego
+                    // trakcie - np. pierwszy miesiac zbierania): licz przyrost
+                    // od najwczesniejszego znanego stanu wewnatrz okresu,
+                    // zamiast pomijac caly slupek.
+                    float base;
+                    if (earliest_total_in(m, b, t1, &base) && t1 >= base) {
+                        v = t1 - base; have = true;
+                    }
+                }
+            }
+        } else {
+            // chwilowe: srednia z kubelkow godzinowych okresu (RAM)
+            float sum = 0; int cnt = 0;
+            for (int i = 0; i < m->n_hours; i++) {
+                if (m->hours[i].ts >= b && m->hours[i].ts < e) { sum += m->hours[i].total; cnt++; }
+            }
+            if (cnt) { v = sum / cnt; have = true; }
+        }
+        if (have) {
+            n += snprintf(buf + n, buf_cap - n, "%s{\"t\":%u,\"v\":%.3f}",
+                          first ? "" : ",", (unsigned)b, v);
+            first = false;
+        }
+        b = e;
+    }
+    n += snprintf(buf + n, buf_cap - n, "]}");
+    if (s_mutex) xSemaphoreGive(s_mutex);
+    return n;
+}
+
 int history_get_json(const char *id_hex, const char *res, char *buf, int buf_cap) {
     if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
     meter_hist_t *m = get_or_load(id_hex, false);

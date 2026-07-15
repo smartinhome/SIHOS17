@@ -34,7 +34,20 @@ typedef struct {
     uint32_t last_arc_ts;              // ostatni zapis ha_ (throttling, RAM-only)
 } meter_hist_t;
 
-static meter_hist_t s_meters[MAX_HIST_METERS];
+// Sloty historii alokowane NA ZADANIE (2.9KB kazdy). Wczesniej 16 pelnych
+// struktur siedzialo w .bss = 46.6KB zajete od startu, niezaleznie od tego
+// ile licznikow jest realnie sledzonych (konfiguracja dopuszcza max 8).
+static meter_hist_t *s_meters[MAX_HIST_METERS];
+
+// Zwraca slot i (alokujac go przy pierwszym uzyciu) albo NULL przy braku RAM.
+static meter_hist_t *slot_get(int i) {
+    if (i < 0 || i >= MAX_HIST_METERS) return NULL;
+    if (!s_meters[i]) {
+        s_meters[i] = calloc(1, sizeof(meter_hist_t));
+        if (!s_meters[i]) ESP_LOGE(TAG, "brak RAM na slot historii %d", i);
+    }
+    return s_meters[i];
+}
 // Lista sledzonych licznikow (pokazywane w Historii). Reszta (sasiedzi) ukryta.
 #define MAX_TRACKED 24
 static char s_tracked[MAX_TRACKED][28];
@@ -564,14 +577,17 @@ static bool load_meter(meter_hist_t *m, const char *id) {
 // znajdz lub zaalokuj slot licznika
 static meter_hist_t *find_meter(const char *id, bool create) {
     for (int i = 0; i < MAX_HIST_METERS; i++)
-        if (s_meters[i].used && strcmp(s_meters[i].id, id) == 0) return &s_meters[i];
+        if (s_meters[i] && s_meters[i]->used && strcmp(s_meters[i]->id, id) == 0) return s_meters[i];
     if (!create) return NULL;
     for (int i = 0; i < MAX_HIST_METERS; i++)
-        if (!s_meters[i].used) {
-            memset(&s_meters[i], 0, sizeof(meter_hist_t));
-            strncpy(s_meters[i].id, id, sizeof(s_meters[i].id) - 1);
-            s_meters[i].used = true;
-            return &s_meters[i];
+        if (!s_meters[i] || !s_meters[i]->used) {
+            meter_hist_t *sl = slot_get(i);
+            if (!sl) continue;                 // brak RAM - sprobuj kolejny slot
+            free_curve(sl);                    // wskaznik zniknie w memset
+            memset(sl, 0, sizeof(meter_hist_t));
+            strncpy(sl->id, id, sizeof(sl->id) - 1);
+            sl->used = true;
+            return sl;
         }
     return NULL;
 }
@@ -1213,11 +1229,11 @@ int history_list_json(char *buf, int buf_cap) {
     int n = snprintf(buf, buf_cap, "[");
     bool first = true;
     for (int i = 0; i < MAX_HIST_METERS; i++) {
-        if (!s_meters[i].used) continue;
+        if (!s_meters[i] || !s_meters[i]->used) continue;
         n += snprintf(buf + n, buf_cap - n, "%s{\"id\":\"%s\",\"kind\":%d,\"cumulative\":%d,\"last\":%.3f,\"ts\":%u,\"tracked\":%s}",
-                      first ? "" : ",", s_meters[i].id, s_meters[i].kind, s_meters[i].cumulative,
-                      s_meters[i].last_total, (unsigned)s_meters[i].last_ts,
-                      history_is_tracked(s_meters[i].id) ? "true" : "false");
+                      first ? "" : ",", s_meters[i]->id, s_meters[i]->kind, s_meters[i]->cumulative,
+                      s_meters[i]->last_total, (unsigned)s_meters[i]->last_ts,
+                      history_is_tracked(s_meters[i]->id) ? "true" : "false");
         first = false;
     }
     n += snprintf(buf + n, buf_cap - n, "]");
@@ -1415,7 +1431,7 @@ void history_tracked_first(char *out, int cap) {
 void history_flush(void) {
     if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
     for (int i = 0; i < MAX_HIST_METERS; i++) {
-        if (s_meters[i].used) save_meter(&s_meters[i]);
+        if (s_meters[i] && s_meters[i]->used) save_meter(s_meters[i]);
     }
     if (s_mutex) xSemaphoreGive(s_mutex);
     ESP_LOGI(TAG, "Historia zrzucona na flash (flush)");

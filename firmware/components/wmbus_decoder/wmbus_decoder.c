@@ -23,16 +23,28 @@ static int           s_meter_count = 0;
 static SemaphoreHandle_t s_mutex = NULL;
 
 // Bufor pierścieniowy surowych ramek
-static raw_frame_t   s_raw[MAX_RAW_FRAMES] = {0};
+// Bufor podgladu ramek (~21KB) alokowany PRZY PIERWSZEJ RAMCE, nie w .bss -
+// nie obciaza startu, gdy najwiecej RAM potrzebuja WiFi/OTA.
+static raw_frame_t  *s_raw = NULL;
 static int           s_raw_head  = 0;   // następny indeks do zapisu
 static int           s_raw_count = 0;   // ile ramek w buforze (max MAX_RAW_FRAMES)
 
 static void store_raw_frame(const wmbus_frame_t *frame) {
+    if (!s_raw) {
+        s_raw = calloc(MAX_RAW_FRAMES, sizeof(raw_frame_t));
+        if (!s_raw) return;   // brak RAM - pomijamy podglad ramek (odbior dziala dalej)
+    }
     raw_frame_t *r = &s_raw[s_raw_head];
     size_t n = frame->len;
     if (n > MAX_RAW_HEX / 2) n = MAX_RAW_HEX / 2;   // przytnij do pojemności hex
-    for (size_t i = 0; i < n; i++)
-        snprintf(r->hex + i * 2, 3, "%02X", frame->data[i]);
+    // Konwersja hex przez tablice zamiast snprintf() na KAZDY bajt: snprintf
+    // parsuje format i wola vsnprintf per bajt (~46x wolniej na tej samej
+    // maszynie). To jest goraca sciezka - wolane dla kazdej odebranej ramki.
+    static const char HEXD[] = "0123456789ABCDEF";
+    for (size_t i = 0; i < n; i++) {
+        r->hex[i * 2]     = HEXD[frame->data[i] >> 4];
+        r->hex[i * 2 + 1] = HEXD[frame->data[i] & 0x0F];
+    }
     r->hex[n * 2] = 0;
     r->rssi  = frame->rssi;
     r->lqi   = frame->lqi;
@@ -260,7 +272,7 @@ int wmbus_decoder_raw_count(void) { return s_raw_count; }
 
 // newest_index 0 = najnowsza ramka, 1 = poprzednia, ...
 const raw_frame_t *wmbus_decoder_raw_get(int newest_index) {
-    if (newest_index < 0 || newest_index >= s_raw_count) return NULL;
+    if (!s_raw || newest_index < 0 || newest_index >= s_raw_count) return NULL;
     // s_raw_head wskazuje na następne wolne miejsce, więc najnowsza jest head-1
     int idx = (s_raw_head - 1 - newest_index + 2 * MAX_RAW_FRAMES) % MAX_RAW_FRAMES;
     return &s_raw[idx];

@@ -1067,6 +1067,83 @@ int history_get_json(const char *id_hex, const char *res, char *buf, int buf_cap
 // Zwraca godzinowe zuzycie z konkretnego dnia z archiwum miesiecznego (flash).
 // Czyta plik archiwum, filtruje punkty z wybranej doby, liczy zuzycie jako roznice
 // kolejnych totali (dla kumulacyjnych) lub wartosc (dla chwilowych).
+int history_debug_day(const char *key, uint32_t day_ts, char *buf, int cap) {
+    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
+    meter_hist_t *m = get_or_load(key, false);
+    uint32_t d0 = floor_day(day_ts), d1 = d0 + 86400;
+    int n = snprintf(buf, cap, "{\"key\":\"%s\",\"d0\":%u,\"d1\":%u", key ? key : "", (unsigned)d0, (unsigned)d1);
+    if (!m) {
+        n += snprintf(buf + n, cap - n, ",\"slot\":\"BRAK - licznik nie zaladowany\"}");
+        if (s_mutex) xSemaphoreGive(s_mutex);
+        return n;
+    }
+    bool ram_covers = (m->n_hours > 0 && m->hours[0].ts <= d0);
+    n += snprintf(buf + n, cap - n,
+        ",\"cumulative\":%d,\"kind\":%d,\"last_ts\":%u,\"last_total\":%.3f"
+        ",\"n_hours\":%d,\"hours0_ts\":%u,\"hoursN_ts\":%u,\"ram_covers\":%s,\"n_curve\":%d",
+        m->cumulative, m->kind, (unsigned)m->last_ts, (double)m->last_total,
+        m->n_hours, (unsigned)(m->n_hours ? m->hours[0].ts : 0),
+        (unsigned)(m->n_hours ? m->hours[m->n_hours-1].ts : 0),
+        ram_covers ? "true" : "false", m->n_curve);
+    int ram_in_day = 0;
+    for (int i = 0; i < m->n_hours; i++)
+        if (m->hours[i].ts >= d0 && m->hours[i].ts < d1) ram_in_day++;
+    n += snprintf(buf + n, cap - n, ",\"ram_godzin_w_dobie\":%d", ram_in_day);
+    char path[48]; archive_path(key, path, sizeof(path));
+    FILE *f = s_fs_ok ? fopen(path, "rb") : NULL;
+    if (!f) {
+        n += snprintf(buf + n, cap - n, ",\"arch\":\"BRAK PLIKU %s\"}", path);
+        if (s_mutex) xSemaphoreGive(s_mutex);
+        return n;
+    }
+    arc_hdr_t h;
+    if (!arc_read_header2(f, &h)) {
+        n += snprintf(buf + n, cap - n, ",\"arch\":\"NAGLOWEK NIECZYTELNY\"}");
+        fclose(f);
+        if (s_mutex) xSemaphoreGive(s_mutex);
+        return n;
+    }
+    n += snprintf(buf + n, cap - n, ",\"arc_count\":%d,\"arc_head\":%d,\"arc_v2\":%s,\"arc_hdr\":%d",
+                  h.count, h.head, h.v2 ? "true" : "false", h.hdr);
+    hist_bucket_t rec;
+    int lo = 0, hi = h.count;
+    while (lo < hi) {
+        int mid = lo + (hi - lo) / 2;
+        int phys = (h.head + mid) % HIST_ARCHIVE_HOURS;
+        if (fseek(f, arc_rec_off2(h.hdr, phys), SEEK_SET) != 0 ||
+            fread(&rec, sizeof(rec), 1, f) != 1) { lo = h.count; break; }
+        if (rec.ts < d0) lo = mid + 1; else hi = mid;
+    }
+    n += snprintf(buf + n, cap - n, ",\"bin_search_lo\":%d", lo);
+    n += snprintf(buf + n, cap - n, ",\"arc_w_dobie\":[");
+    int cnt = 0;
+    for (int i = lo; i < h.count && cnt < 26 && n < cap - 80; i++) {
+        int phys = (h.head + i) % HIST_ARCHIVE_HOURS;
+        if (fseek(f, arc_rec_off2(h.hdr, phys), SEEK_SET) != 0) break;
+        if (fread(&rec, sizeof(rec), 1, f) != 1) break;
+        if (rec.ts >= d1) break;
+        if (rec.ts >= d0) {
+            n += snprintf(buf + n, cap - n, "%s{\"ts\":%u,\"v\":%.3f}", cnt ? "," : "",
+                          (unsigned)rec.ts, (double)rec.total);
+            cnt++;
+        }
+    }
+    n += snprintf(buf + n, cap - n, "],\"arc_znalezionych\":%d", cnt);
+    if (lo > 0) {
+        int phys = (h.head + lo - 1) % HIST_ARCHIVE_HOURS;
+        if (fseek(f, arc_rec_off2(h.hdr, phys), SEEK_SET) == 0 &&
+            fread(&rec, sizeof(rec), 1, f) == 1)
+            n += snprintf(buf + n, cap - n, ",\"prev_rekord\":{\"ts\":%u,\"v\":%.3f}",
+                          (unsigned)rec.ts, (double)rec.total);
+    } else {
+        n += snprintf(buf + n, cap - n, ",\"prev_rekord\":null");
+    }
+    fclose(f);
+    n += snprintf(buf + n, cap - n, "}");
+    if (s_mutex) xSemaphoreGive(s_mutex);
+    return n;
+}
+
 int history_get_day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf_cap) {
     if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
     // Pobierz metadane (kind, cumulative) z RAM jesli licznik zaladowany.

@@ -104,6 +104,10 @@ void history_tracked_first(char *out, int cap);
 // Zrzuc na flash stan wszystkich zaladowanych licznikow (przed restartem/OTA).
 void history_flush(void);
 
+// Diagnostyka: surowy obraz zrodel danych dla klucza i doby (RAM vs archiwum) -
+// co widzi kod przy budowaniu wykresu i co odrzuca. Tylko do debugowania.
+int history_debug_day(const char *key, uint32_t day_ts, char *buf, int cap);
+
 // Punkty krzywej dnia (pola chwilowe) dla podanej doby - do strumieniowania
 // przez API (1440 pkt nie miesci sie w jednym buforze JSON). Zwraca liczbe
 // punktow skopiowanych do out (moze byc 0 gdy brak krzywej / pole kumulacyjne).

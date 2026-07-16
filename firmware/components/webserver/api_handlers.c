@@ -86,6 +86,34 @@ static esp_err_t handle_history(httpd_req_t *req) {
 // GET /api/history/day?id=...&date=YYYY-MM-DD -> godzinowe zuzycie z danego dnia
 // GET /api/history/range?id=...&from=UNIX&to=UNIX&unit=d|m
 // Kubelki kalendarzowe: dni (tydzien pn-nd, miesiac 1..31) lub miesiace (rok).
+// GET /api/history/debug?id=KLUCZ&date=RRRR-MM-DD
+// Diagnostyka: co widzi kod w RAM i w archiwum dla wskazanej doby.
+static esp_err_t handle_history_debug(httpd_req_t *req) {
+    char query[192] = {0}, val[64] = {0}, id[32] = {0};
+    struct tm tmd = {0};
+    time_t now = time(NULL);
+    localtime_r(&now, &tmd);
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        if (httpd_query_key_value(query, "id", val, sizeof(val)) == ESP_OK)
+            strlcpy(id, val, sizeof(id));
+        if (httpd_query_key_value(query, "date", val, sizeof(val)) == ESP_OK) {
+            int y, mo, d;
+            if (sscanf(val, "%d-%d-%d", &y, &mo, &d) == 3) {
+                tmd.tm_year = y - 1900; tmd.tm_mon = mo - 1; tmd.tm_mday = d;
+            }
+        }
+    }
+    tmd.tm_hour = 12; tmd.tm_min = 0; tmd.tm_sec = 0; tmd.tm_isdst = -1;
+    uint32_t day_ts = (uint32_t)mktime(&tmd);
+    if (!id[0]) { resp_json(req, "{\"error\":\"brak id\"}"); return ESP_OK; }
+    char *buf = malloc(4096);
+    if (!buf) { httpd_resp_send_500(req); return ESP_OK; }
+    history_debug_day(id, day_ts, buf, 4096);
+    resp_json(req, buf);
+    free(buf);
+    return ESP_OK;
+}
+
 static esp_err_t handle_history_range(httpd_req_t *req) {
     char query[192] = {0}, val[64] = {0};
     char id[32] = {0}; uint32_t from = 0, to = 0; char unit = 'd';
@@ -898,6 +926,7 @@ void api_register_handlers(httpd_handle_t server) {
         { .uri="/api/history",      .method=HTTP_GET,  .handler=handle_history,      .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/history/day",  .method=HTTP_GET,  .handler=handle_history_day,  .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/history/range", .method=HTTP_GET, .handler=handle_history_range, .user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/history/debug", .method=HTTP_GET, .handler=handle_history_debug, .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/history/track",.method=HTTP_POST, .handler=handle_history_track,.user_ctx=NULL, .is_websocket=false },
         { .uri="/api/history/tracked",.method=HTTP_GET, .handler=handle_history_tracked,.user_ctx=NULL, .is_websocket=false },
         { .uri="/api/meters",      .method=HTTP_GET,  .handler=handle_meters,      .user_ctx=NULL, .is_websocket=false },

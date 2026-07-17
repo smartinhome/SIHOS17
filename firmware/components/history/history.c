@@ -1208,15 +1208,6 @@ int history_get_day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf
     // slupki, mimo ze w archiwum na flashu lezaly nietkniete. Dzien niepokryty
     // od poczatku idzie w calosci z archiwum (kompletnego z dokladnoscia <=60 s).
     bool ram_covers = (m && m->n_hours > 0 && m->hours[0].ts <= d0);
-    if (m && ram_covers) {
-        for (int i = 0; i < m->n_hours && nb < ARC_DAY_BUF; i++) {
-            if (m->hours[i].ts >= d0 && m->hours[i].ts < d1) {
-                s_day_buf[nb++] = m->hours[i];
-            } else if (m->hours[i].ts < d0) {
-                prev = m->hours[i]; has_prev = true;
-            }
-        }
-    }
 
     // Fallback do archiwum tylko gdy w RAM nie znaleziono godzin tej doby (starszy
     // lub pusty dzien). Rekordy w archiwum sa chronologiczne (rosnace ts) w
@@ -1225,7 +1216,7 @@ int history_get_day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf
     // blokowalo history_on_reading i zawieszalo modul przy przegladaniu dni bez
     // historii). Zamiast tego: wyszukiwanie binarne pierwszego rekordu doby
     // (~15 odczytow) + odczyt sekwencyjny do konca doby (max ~25 rekordow).
-    if (nb == 0) {
+    if (!ram_covers) {
         char path[48]; archive_path(id_hex, path, sizeof(path));
         FILE *f = s_fs_ok ? fopen(path, "rb") : NULL;
         if (f) {
@@ -1259,6 +1250,30 @@ int history_get_day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf
                 }
             }
             fclose(f);
+        }
+    } else {
+        for (int i = 0; i < m->n_hours && nb < ARC_DAY_BUF; i++) {
+            if (m->hours[i].ts >= d0 && m->hours[i].ts < d1) {
+                s_day_buf[nb++] = m->hours[i];
+            } else if (m->hours[i].ts < d0) {
+                prev = m->hours[i]; has_prev = true;
+            }
+        }
+    }
+
+    // SCALANIE RAM + archiwum: archiwum bywa NIEPELNE dla doby (np. 9 lipca -
+    // zjedzony przez uszkodzony ring), a RAM ma te godziny. Wczesniej reguła
+    // "albo RAM, albo archiwum" dawala PUSTY wykres mimo danych w pamieci.
+    if (m) {
+        uint32_t newest = (nb > 0) ? s_day_buf[nb-1].ts : 0;
+        for (int i = 0; i < m->n_hours && nb < ARC_DAY_BUF; i++) {
+            uint32_t t = m->hours[i].ts;
+            if (t < d0) {
+                if (!has_prev || t > prev.ts) { prev = m->hours[i]; has_prev = true; }
+                continue;
+            }
+            if (t >= d1) break;
+            if (t > newest || nb == 0) s_day_buf[nb++] = m->hours[i];
         }
     }
 

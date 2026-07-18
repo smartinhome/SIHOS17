@@ -1536,6 +1536,15 @@ void history_tracked_first(char *out, int cap) {
 // Zrzuc na flash wszystkie zaladowane liczniki - wolane przed kontrolowanym
 // restartem (przycisk restartu, start OTA), zeby krzywa dnia i biezaca godzina
 // nie zaczynaly od zera po ponownym uruchomieniu.
+bool history_fs_usage(size_t *used, size_t *total) {
+    if (!s_fs_ok) return false;
+    size_t u = 0, t = 0;
+    if (esp_spiffs_info("littlefs", &t, &u) != ESP_OK) return false;
+    if (used) *used = u;
+    if (total) *total = t;
+    return true;
+}
+
 void history_flush(void) {
     if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
     for (int i = 0; i < MAX_HIST_METERS; i++) {

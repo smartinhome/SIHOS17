@@ -267,6 +267,11 @@ static esp_err_t handle_system(httpd_req_t *req) {
     uint32_t flash_size = 0;
     esp_flash_get_size(NULL, &flash_size);
 
+    // Zajetosc partycji historii (pliki h_/ha_ licznikow) - littlefs/SPIFFS.
+    size_t hist_used = 0, hist_total = 0;
+    bool hist_ok = history_fs_usage(&hist_used, &hist_total);
+    int hist_pct = (hist_ok && hist_total) ? (int)(hist_used * 100 / hist_total) : 0;
+
     // Aplikacja - rozmiar partycji
     const esp_partition_t *run = esp_ota_get_running_partition();
     uint32_t app_part_size = run ? run->size : 0;
@@ -303,6 +308,7 @@ static esp_err_t handle_system(httpd_req_t *req) {
         "\"features\":{\"wifi\":%s,\"bt\":%s,\"ieee802154\":%s},"
         "\"heap_free\":%u,\"heap_min\":%u,\"heap_total\":%u,"
         "\"heap_largest\":%u,\"heap_used_pct\":%d,"
+        "\"hist_used\":%u,\"hist_total\":%u,\"hist_pct\":%d,"
         "\"flash_size\":%u,\"app_part_size\":%u,"
         "\"temp_c\":%.1f,\"temp_ok\":%s,"
         "\"mac\":\"%s\",\"task_count\":%u,\"uptime_s\":%lld,"
@@ -317,6 +323,7 @@ static esp_err_t handle_system(httpd_req_t *req) {
         (chip.features & CHIP_FEATURE_IEEE802154) ? "true" : "false",
         (unsigned)heap_free, (unsigned)heap_min, (unsigned)heap_total,
         (unsigned)heap_largest, heap_used_pct,
+        (unsigned)hist_used, (unsigned)hist_total, hist_pct,
         (unsigned)flash_size, (unsigned)app_part_size,
         temp_ok ? temp_c : 0.0f, temp_ok ? "true" : "false",
         mac_str, (unsigned)task_count, (long long)uptime_s,

@@ -104,6 +104,9 @@ void history_tracked_first(char *out, int cap);
 // Zrzuc na flash stan wszystkich zaladowanych licznikow (przed restartem/OTA).
 void history_flush(void);
 
+// Uzycie partycji historii (littlefs/SPIFFS) w bajtach. Zwraca false przy bledzie.
+bool history_fs_usage(size_t *used, size_t *total);
+
 // Diagnostyka: surowy obraz zrodel danych dla klucza i doby (RAM vs archiwum) -
 // co widzi kod przy budowaniu wykresu i co odrzuca. Tylko do debugowania.
 int history_debug_day(const char *key, uint32_t day_ts, char *buf, int cap);

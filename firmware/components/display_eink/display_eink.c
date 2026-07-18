@@ -294,10 +294,12 @@ static void fb_clear_white(void) {
 // Ustaw piksel w ukladzie LOGICZNYM (0..249, 0..121). 1=czarny.
 static void fb_set_pixel(int lx, int ly, int black) {
     if (lx < 0 || lx >= LCD_W || ly < 0 || ly >= LCD_H) return;
-    // Rotacja 270 stopni: logiczne (lx,ly) -> fizyczne (px,py)
-    // ESPHome rotation 270: px = ly, py = (LCD_W-1) - lx
-    int px = ly;
-    int py = (LCD_W - 1) - lx;
+    // Wyswietlacz montowany "do gory nogami" - obrot panelu o 180 stopni
+    // wzgledem dotychczasowej rotacji 270 (efektywnie rotacja 90).
+    // Bazowe ESPHome rotation 270: px = ly, py = (LCD_W-1) - lx;
+    // po odwroceniu obu osi fizycznych: px = (PANEL_W-1) - ly, py = lx.
+    int px = (PANEL_W - 1) - ly;
+    int py = lx;
     if (px < 0 || px >= PANEL_W || py < 0 || py >= PANEL_H) return;
     int idx = py * PANEL_BPR + (px >> 3);
     uint8_t mask = 0x80 >> (px & 7);

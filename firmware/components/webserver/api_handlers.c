@@ -557,6 +557,23 @@ static esp_err_t handle_led(httpd_req_t *req) {
     return ESP_OK;
 }
 
+static esp_err_t handle_logs_cfg(httpd_req_t *req) {
+    sih_config_t cfg = nvs_config_get();
+    if (req->method == HTTP_POST) {
+        char body[64];
+        read_body(req, body, sizeof(body));
+        cfg.logs_enabled = (strstr(body, "\"enabled\":true") != NULL);
+        nvs_config_save(&cfg);
+        resp_ok(req);
+        return ESP_OK;
+    }
+    char buf[32];
+    snprintf(buf, sizeof(buf), "{\"enabled\":%s}",
+             cfg.logs_enabled ? "true" : "false");
+    resp_json(req, buf);
+    return ESP_OK;
+}
+
 static esp_err_t handle_led_status(httpd_req_t *req) {
     sih_config_t cfg = nvs_config_get();
     if (req->method == HTTP_POST) {
@@ -951,6 +968,8 @@ void api_register_handlers(httpd_handle_t server) {
         { .uri="/api/backup",      .method=HTTP_GET,  .handler=handle_backup_get,  .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/backup",      .method=HTTP_POST, .handler=handle_backup_post, .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/logs",        .method=HTTP_GET,  .handler=handle_logs,        .user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/logs/cfg",    .method=HTTP_GET,  .handler=handle_logs_cfg,    .user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/logs/cfg",    .method=HTTP_POST, .handler=handle_logs_cfg,    .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/logs/clear",  .method=HTTP_POST, .handler=handle_logs_clear,  .user_ctx=NULL, .is_websocket=false },
     };
     for (int i = 0; i < (int)(sizeof(handlers)/sizeof(handlers[0])); i++)

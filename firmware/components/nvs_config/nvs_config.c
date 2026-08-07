@@ -20,6 +20,7 @@ static void set_defaults(sih_config_t *c) {
     c->led_status_brightness = 50;   // 50% jasnosci
     c->led_only_pinned = false;      // domyslnie mrugaj dla KAZDEJ ramki
     c->led_blink_ms = 60;            // czas swiecenia po ramce
+    c->logs_enabled = false;         // zakladka Logi domyslnie ukryta
 }
 
 void nvs_config_init(void) {

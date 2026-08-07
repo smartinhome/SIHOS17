@@ -35,6 +35,7 @@ typedef struct {
     // Nowe pola ZAWSZE na koncu (zgodnosc blobu NVS przy aktualizacji OTA).
     bool     led_only_pinned;   // mrugaj tylko dla licznikow z dashboardu
     uint16_t led_blink_ms;      // czas swiecenia po ramce (20-5000 ms, domyslnie 60)
+    bool     logs_enabled;      // zakladka Logi widoczna (domyslnie false)
 } sih_config_t;
 
 // Pobierz/ustaw wlasna nazwe licznika po ID. Zwraca "" gdy brak.

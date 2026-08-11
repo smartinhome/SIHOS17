@@ -10,9 +10,13 @@
 #include "freertos/semphr.h"
 #include "nvs_flash.h"
 #include "nvs.h"
+#include "esp_heap_caps.h"
 
 static const char *TAG = "HISTORY";
-#define MAX_HIST_METERS 16
+// Tyle samo, ile MAX_TRACKED - inaczej czesc sledzonych pol nie dostawala
+// slotu i po cichu nie miala historii (Amiplus daje ~20 pol po becie 257).
+// Sloty sa alokowane NA ZADANIE, wiec zapas nie kosztuje RAM dopoki nieuzyty.
+#define MAX_HIST_METERS 24
 
 // Stan historii pojedynczego licznika
 typedef struct {
@@ -73,8 +77,22 @@ static bool s_fs_ok = false;
 // ---------- Pomocnicze: zaokraglenia czasu ----------
 static uint32_t floor_hour(uint32_t t)  { return t - (t % 3600); }
 // Alokacja bufora krzywej na zadanie; NULL-safe (bez krzywej gdy brak RAM).
+// Zapas sterty, ktory musi zostac PO alokacji krzywej (11.2 KB kazda).
+// Amiplus ma ~10 pol chwilowych; bez tego progu zaznaczenie ich wszystkich
+// zjadloby ponad 100 KB i wywrocilo moduł. Brak krzywej nie psuje wykresu -
+// dzien rysuje sie wtedy z kubelkow godzinowych (grubsza rozdzielczosc).
+#define CURVE_HEAP_RESERVE (60 * 1024)
+
 static bool ensure_curve(meter_hist_t *m) {
     if (m->curve) return true;
+    size_t need = HIST_CURVE * sizeof(hist_bucket_t);
+    size_t freeb = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+    if (freeb < need + CURVE_HEAP_RESERVE) {
+        ESP_LOGW(TAG, "%s: brak RAM na krzywa minutowa (wolne %u B) - dane godzinowe",
+                 m->id, (unsigned)freeb);
+        m->n_curve = 0;
+        return false;
+    }
     m->curve = calloc(HIST_CURVE, sizeof(hist_bucket_t));
     if (!m->curve) { m->n_curve = 0; return false; }
     return true;
@@ -828,7 +846,12 @@ static meter_hist_t *get_or_load(const char *id, bool create_if_missing) {
     if (m) return m;
     // nie ma w RAM - zaalokuj slot i wczytaj z dysku wprost do niego
     meter_hist_t *slot = find_meter(id, true);
-    if (!slot) return NULL;
+    if (!slot) {
+        // Brak wolnego slotu - pole nie bedzie mialo historii ani wykresu.
+        // Glosny log, bo wczesniej konczylo sie to cicho i wygladalo jak blad UI.
+        ESP_LOGW(TAG, "%s: brak wolnego slotu historii (limit %d)", id, MAX_HIST_METERS);
+        return NULL;
+    }
     if (load_meter(slot, id)) {
         restore_from_archive(slot);   // scal swiezszy stan z archiwum ha_ (po restarcie)
         return slot;   // wczytano z dysku

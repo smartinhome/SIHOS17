@@ -18,6 +18,10 @@ static int                s_rssi  = 0;
 static int                s_last_disc_reason = 0;  // powod ostatniego rozlaczenia STA
 static char               s_ip[16] = "0.0.0.0";
 static esp_netif_t       *s_sta_netif = NULL;
+// W trybie AP interfejs STA jest wlaczony (APSTA) TYLKO po to, by dzialalo
+// skanowanie sieci. Nie moze wtedy probowac sie laczyc - kazda proba to
+// przerwa w pracy AP i rozlaczenie telefonu/laptopa.
+static bool               s_sta_autoconnect = false;
 static esp_netif_t       *s_ap_netif  = NULL;
 static int                s_retry = 0;
 #define MAX_RETRY 5
@@ -27,11 +31,13 @@ static int                s_retry = 0;
 static void event_handler(void *arg, esp_event_base_t base,
                            int32_t id, void *data) {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
+        if (!s_sta_autoconnect) return;   // APSTA w trybie AP - tylko do skanowania
         esp_wifi_connect();
         s_state = WIFI_STATE_CONNECTING;
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         wifi_event_sta_disconnected_t *dis = (wifi_event_sta_disconnected_t *)data;
         if (dis) { ESP_LOGW(TAG, "Rozlaczono z WiFi, powod = %d", dis->reason); s_last_disc_reason = dis->reason; }
+        if (!s_sta_autoconnect) return;   // tryb AP - nie ponawiaj polaczen STA
         if (s_retry < MAX_RETRY) {
             esp_wifi_connect();
             s_retry++;
@@ -62,13 +68,17 @@ static void event_handler(void *arg, esp_event_base_t base,
 }
 
 static void start_ap(const sih_config_t *cfg) {
-    s_ap_netif = esp_netif_create_default_wifi_ap();
+    s_sta_autoconnect = false;   // w AP interfejs STA sluzy wylacznie do skanowania
+    if (!s_ap_netif)  s_ap_netif  = esp_netif_create_default_wifi_ap();
+    if (!s_sta_netif) s_sta_netif = esp_netif_create_default_wifi_sta();
     wifi_config_t ap_cfg = {0};
     strlcpy((char *)ap_cfg.ap.ssid,     cfg->ap_ssid, sizeof(ap_cfg.ap.ssid));
     strlcpy((char *)ap_cfg.ap.password, cfg->ap_pass,  sizeof(ap_cfg.ap.password));
     ap_cfg.ap.max_connection = 4;
     ap_cfg.ap.authmode = WIFI_AUTH_WPA2_PSK;
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
+    // APSTA (nie czysty AP): skanowanie wymaga interfejsu STA. Dzieki temu
+    // /api/wifi/scan nie musi przelaczac trybu, co rozlaczalo klientow AP.
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_cfg));
     ESP_ERROR_CHECK(esp_wifi_start());
     s_state = WIFI_STATE_AP_MODE;
@@ -100,6 +110,7 @@ void wifi_manager_init(void) {
     strlcpy((char *)sta_cfg.sta.ssid,     cfg.wifi_ssid, sizeof(sta_cfg.sta.ssid));
     strlcpy((char *)sta_cfg.sta.password, cfg.wifi_pass,  sizeof(sta_cfg.sta.password));
 
+    s_sta_autoconnect = true;
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_cfg));
     ESP_ERROR_CHECK(esp_wifi_start());
@@ -139,32 +150,35 @@ void wifi_manager_reconnect(const char *ssid, const char *pass) {
 }
 
 // ---- Skanowanie sieci WiFi ----
-// Dziala w STA i AP. W trybie AP tymczasowo wlacza APSTA (skan wymaga interfejsu STA),
-// po skanie wraca do czystego AP.
+// Dziala w STA i AP. W trybie AP modul pracuje w APSTA od startu (patrz start_ap),
+// wiec skan NIE przelacza trybu - przelaczanie rozlaczalo klientow AP i odpowiedz
+// HTTP nie docierala do przegladarki.
 int wifi_manager_scan(char *json_buf, int cap) {
-    wifi_mode_t prev_mode = WIFI_MODE_NULL;
-    esp_wifi_get_mode(&prev_mode);
-    bool switched = false;
+    wifi_mode_t mode = WIFI_MODE_NULL;
+    esp_wifi_get_mode(&mode);
 
-    // Skanowanie wymaga interfejsu STA. Jesli jestesmy w czystym AP, wlacz APSTA.
-    if (prev_mode == WIFI_MODE_AP) {
+    // Awaryjnie: gdyby modul byl w czystym AP (starsza konfiguracja), wlacz APSTA
+    // i JUZ w nim zostan - powrot do czystego AP zrywal polaczenie z klientem.
+    if (mode == WIFI_MODE_AP) {
         if (!s_sta_netif) s_sta_netif = esp_netif_create_default_wifi_sta();
+        s_sta_autoconnect = false;
         if (esp_wifi_set_mode(WIFI_MODE_APSTA) != ESP_OK) {
             ESP_LOGW(TAG, "scan: nie udalo sie wlaczyc APSTA");
             snprintf(json_buf, cap, "[]");
             return -1;
         }
-        switched = true;
     }
 
+    // Krotki czas na kanal: skan blokuje radio, a w trybie AP kazda milisekunda
+    // to przerwa w obsludze podlaczonego telefonu/laptopa.
     wifi_scan_config_t scan_cfg = {
         .ssid = NULL, .bssid = NULL, .channel = 0, .show_hidden = false,
         .scan_type = WIFI_SCAN_TYPE_ACTIVE,
+        .scan_time = { .active = { .min = 40, .max = 90 } },
     };
     esp_err_t err = esp_wifi_scan_start(&scan_cfg, true /* blokujaco */);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "esp_wifi_scan_start blad: %d", err);
-        if (switched) esp_wifi_set_mode(WIFI_MODE_AP);
         snprintf(json_buf, cap, "[]");
         return -1;
     }
@@ -172,9 +186,9 @@ int wifi_manager_scan(char *json_buf, int cap) {
     uint16_t ap_count = 0;
     esp_wifi_scan_get_ap_num(&ap_count);
     if (ap_count > 20) ap_count = 20; // ogranicz
+    if (ap_count == 0) { snprintf(json_buf, cap, "[]"); return 0; }
     wifi_ap_record_t *recs = calloc(ap_count, sizeof(wifi_ap_record_t));
     if (!recs) {
-        if (switched) esp_wifi_set_mode(WIFI_MODE_AP);
         snprintf(json_buf, cap, "[]");
         return -1;
     }
@@ -208,7 +222,6 @@ int wifi_manager_scan(char *json_buf, int cap) {
     snprintf(json_buf + n, cap - n, "]");
     free(recs);
 
-    if (switched) esp_wifi_set_mode(WIFI_MODE_AP);
     return written;
 }
 

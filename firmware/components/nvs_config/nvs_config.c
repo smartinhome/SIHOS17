@@ -15,11 +15,13 @@ static void set_defaults(sih_config_t *c) {
     c->freq_mhz    = 868.950f;
     c->meter_count = 0;
     c->led_enabled = true;     // dioda RX domyslnie wlaczona
-    c->led_brightness = 50;    // 50% jasnosci
+    c->led_brightness = 50;    // 50% - wskaznik odbioru (pomaranczowy)
     c->led_status_enabled = true;    // dioda RGB statusu domyslnie wlaczona
-    c->led_status_brightness = 50;   // 50% jasnosci
+    c->led_status_brightness = 7;    // 7% - RGB statusu swieci ciagle, wiec
+                                     // niska jasnosc wystarcza i nie razi
     c->led_only_pinned = false;      // domyslnie mrugaj dla KAZDEJ ramki
-    c->led_blink_ms = 60;            // czas swiecenia po ramce
+    c->led_blink_ms = 140;           // czas swiecenia po ramce - 140 ms jest
+                                     // wyraznie widoczne dla oka
     c->logs_enabled = false;         // zakladka Logi domyslnie ukryta
 }
 

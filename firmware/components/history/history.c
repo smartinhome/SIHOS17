@@ -8,6 +8,8 @@
 #include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "nvs_flash.h"
+#include "nvs.h"
 
 static const char *TAG = "HISTORY";
 #define MAX_HIST_METERS 16
@@ -630,6 +632,13 @@ static void tracked_load(void) {
     fclose(f);
 }
 
+bool history_fs_ok(void) { return s_fs_ok; }
+
+void history_tracked_limits(int *used, int *max) {
+    if (used) *used = s_tracked_count;
+    if (max)  *max  = MAX_TRACKED;
+}
+
 bool history_is_tracked(const char *id_hex) {
     if (!id_hex) return false;
     for (int i = 0; i < s_tracked_count; i++)
@@ -700,11 +709,50 @@ void history_init(void) {
     };
     esp_err_t ret = esp_vfs_spiffs_register(&conf);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "SPIFFS mount blad: %s", esp_err_to_name(ret));
-        s_fs_ok = false;
-        return;
+        // Rozroznij DWA przypadki nieudanego montowania:
+        //  a) fabrycznie nowy modul - partycja nigdy nie byla sformatowana.
+        //     Trzeba ja sformatowac RAZ, inaczej historia nigdy nie zadziala.
+        //  b) modul, ktory kiedys mial dzialajacy system plikow - tu format
+        //     skasowalby cala historie, wiec NIE formatujemy (jak dotad).
+        // Rozroznienie po znaczniku w NVS ustawianym po pierwszym udanym montowaniu.
+        bool was_ok_before = false;
+        nvs_handle_t nh;
+        if (nvs_open("sih_fs", NVS_READWRITE, &nh) == ESP_OK) {
+            uint8_t v = 0;
+            if (nvs_get_u8(nh, "mounted_ok", &v) == ESP_OK && v == 1) was_ok_before = true;
+            nvs_close(nh);
+        }
+        if (was_ok_before) {
+            ESP_LOGE(TAG, "SPIFFS mount blad: %s - NIE formatuje (chronie historie)",
+                     esp_err_to_name(ret));
+            s_fs_ok = false;
+            return;
+        }
+        ESP_LOGW(TAG, "SPIFFS mount blad: %s - pierwsze uruchomienie, formatuje partycje",
+                 esp_err_to_name(ret));
+        conf.format_if_mount_failed = true;
+        ret = esp_vfs_spiffs_register(&conf);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "SPIFFS format nieudany: %s", esp_err_to_name(ret));
+            s_fs_ok = false;
+            return;
+        }
+        ESP_LOGW(TAG, "SPIFFS sformatowany - historia bedzie zapisywana");
     }
     s_fs_ok = true;
+    // Zapamietaj, ze system plikow byl juz sprawny - od teraz nigdy nie formatujemy
+    // automatycznie (ochrona historii przed skasowaniem po brudnym resecie).
+    {
+        nvs_handle_t nh;
+        if (nvs_open("sih_fs", NVS_READWRITE, &nh) == ESP_OK) {
+            uint8_t v = 0;
+            if (nvs_get_u8(nh, "mounted_ok", &v) != ESP_OK || v != 1) {
+                nvs_set_u8(nh, "mounted_ok", 1);
+                nvs_commit(nh);
+            }
+            nvs_close(nh);
+        }
+    }
     size_t total = 0, used = 0;
     esp_spiffs_info("littlefs", &total, &used);
     ESP_LOGI(TAG, "SPIFFS zamontowany: %u/%u B", (unsigned)used, (unsigned)total);

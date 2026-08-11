@@ -209,7 +209,21 @@ static esp_err_t handle_history_track(httpd_req_t *req) {
     if ((p = strstr(body, "\"id\":\""))) sscanf(p, "\"id\":\"%39[^\"]\"", id);
     if (strlen(id) == 0) { resp_err(req, "brak id"); return ESP_OK; }
     bool tracked = (strstr(body, "\"tracked\":true") != NULL);
+    if (tracked && !history_fs_ok()) {
+        resp_err(req, "brak pamieci historii (system plikow nie dziala)");
+        return ESP_OK;
+    }
     history_set_tracked(id, tracked);
+    // Potwierdz, ze wpis faktycznie istnieje - inaczej UI pokazywalby ptaszek
+    // mimo cichego odrzucenia (pelna lista lub nieudany zapis).
+    if (tracked && !history_is_tracked(id)) {
+        int used = 0, mx = 0;
+        history_tracked_limits(&used, &mx);
+        char msg[96];
+        snprintf(msg, sizeof(msg), "limit sledzonych wartosci (%d/%d)", used, mx);
+        resp_err(req, msg);
+        return ESP_OK;
+    }
     resp_ok(req);
     return ESP_OK;
 }

@@ -1,5 +1,6 @@
 #include "api_handlers.h"
 #include <time.h>
+#include <sys/time.h>
 #include "wmbus_decoder.h"
 #include "nvs_config.h"
 #include "wifi_manager.h"
@@ -557,6 +558,38 @@ static esp_err_t handle_led(httpd_req_t *req) {
     return ESP_OK;
 }
 
+static esp_err_t handle_time(httpd_req_t *req) {
+    if (req->method == HTTP_POST) {
+        char body[64];
+        read_body(req, body, sizeof(body));
+        char *p = strstr(body, "\"ts\":");
+        if (!p) { resp_json(req, "{\"ok\":false}"); return ESP_OK; }
+        long long ts = atoll(p + 5);
+        // sanity: 2023-11-14 .. 2036 (jak ARC_TS_MIN/MAX w history.c)
+        if (ts < 1700000000LL || ts > 2100000000LL) {
+            resp_json(req, "{\"ok\":false}");
+            return ESP_OK;
+        }
+        // Nie nadpisuj czasu juz zsynchronizowanego przez SNTP - ten jest
+        // dokladniejszy niz zegar przegladarki.
+        time_t now = time(NULL);
+        if (now > 1700000000) { resp_json(req, "{\"ok\":true,\"kept\":true}"); return ESP_OK; }
+        setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3", 1);
+        tzset();
+        struct timeval tv = { .tv_sec = (time_t)ts, .tv_usec = 0 };
+        settimeofday(&tv, NULL);
+        ESP_LOGI(TAG, "Czas ustawiony z przegladarki: %lld", ts);
+        resp_json(req, "{\"ok\":true}");
+        return ESP_OK;
+    }
+    time_t now = time(NULL);
+    char buf[64];
+    snprintf(buf, sizeof(buf), "{\"ts\":%lld,\"valid\":%s}",
+             (long long)now, (now > 1700000000) ? "true" : "false");
+    resp_json(req, buf);
+    return ESP_OK;
+}
+
 static esp_err_t handle_logs_cfg(httpd_req_t *req) {
     sih_config_t cfg = nvs_config_get();
     if (req->method == HTTP_POST) {
@@ -968,6 +1001,8 @@ void api_register_handlers(httpd_handle_t server) {
         { .uri="/api/backup",      .method=HTTP_GET,  .handler=handle_backup_get,  .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/backup",      .method=HTTP_POST, .handler=handle_backup_post, .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/logs",        .method=HTTP_GET,  .handler=handle_logs,        .user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/time",        .method=HTTP_GET,  .handler=handle_time,        .user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/time",        .method=HTTP_POST, .handler=handle_time,        .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/logs/cfg",    .method=HTTP_GET,  .handler=handle_logs_cfg,    .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/logs/cfg",    .method=HTTP_POST, .handler=handle_logs_cfg,    .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/logs/clear",  .method=HTTP_POST, .handler=handle_logs_clear,  .user_ctx=NULL, .is_websocket=false },

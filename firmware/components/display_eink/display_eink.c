@@ -706,7 +706,7 @@ static void draw_diag(void) {
         strftime(ts, sizeof(ts), "Czas: %d.%m %H:%M:%S", &tm);
         fb_draw_text(&F14, 4, 74, ts);
     } else {
-        fb_draw_text(&F14, 4, 74, "Czas: BRAK (czekam na SNTP)");
+        fb_draw_text(&F14, 4, 74, "Czas: BRAK - otworz panel WWW");
     }
 
     fb_draw_text(&F14, 4, 96, "www.smartinhome.pl");

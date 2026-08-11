@@ -502,6 +502,7 @@ static int difvif_fields(const uint8_t *p, int len, mtf_field_t *out, int max_fi
     int nf = 0;
     int i = 0;
     int volt_idx = 0;
+    int curr_idx = 0;
     while (i < len && nf < max_fields) {
         uint8_t dif = p[i];
         if (dif == 0x2F) { i++; continue; }
@@ -579,6 +580,35 @@ static int difvif_fields(const uint8_t *p, int len, mtf_field_t *out, int max_fi
                 else           mtf_put(out, &nf, max_fields, "moc_produkcji_kw", kw, "kW", 0);
             } else if (func == 1 && !backflow) {
                 mtf_put(out, &nf, max_fields, "moc_max_kw", kw, "kW", 0);
+            }
+        }
+        else if (vif == 0xFD && (vife_first & 0x70) == 0x50 &&
+                 func == 0 && !storage && curr_idx < 3) {
+            // Prad fazowy: VIF FD, VIFE 0x50-0x5F -> 10^(nnnn-12) A,
+            // ostatni VIFE (po 0xFC "at phase") = numer fazy 1-3
+            int e = (vife_first & 0x0F) - 12;
+            double m = 1; for (int z=0; z<(e<0?-e:e); z++) m *= 10;
+            double amps = val * ((e < 0) ? 1.0/m : m);
+            int phase = (vife >= 1 && vife <= 3) ? (int)vife : (curr_idx + 1);
+            char name[24]; snprintf(name, sizeof(name), "prad_l%d_a", phase);
+            mtf_put(out, &nf, max_fields, name, amps, "A", 0);
+            curr_idx++;
+        }
+        else if (vif == 0xFB && func == 0 && !storage) {
+            // Moc bierna: VIFE 0x14-0x15 -> 10^(n) VAR
+            // Energia bierna: VIFE 0x02-0x03 -> 10^(n) kVARh
+            // Trailing VIFE 0x3C rozroznia pojemnosciowa (C) od indukcyjnej (L).
+            int v = vife_first & 0x7F;
+            if (v >= 0x14 && v <= 0x15) {
+                double m = (v & 1) ? 10.0 : 1.0;
+                char name[24]; snprintf(name, sizeof(name), "moc_bierna_%c_var",
+                                        backflow ? 'c' : 'l');
+                mtf_put(out, &nf, max_fields, name, val * m, "VAR", 0);
+            } else if (v >= 0x02 && v <= 0x03) {
+                double m = (v & 1) ? 10.0 : 1.0;
+                char name[32]; snprintf(name, sizeof(name), "energia_bierna_%c_kvarh",
+                                        backflow ? 'c' : 'l');
+                mtf_put(out, &nf, max_fields, name, val * m, "kVARh", 1);
             }
         }
         else if (vif == 0xFD && (vife_first & 0x70) == 0x40 &&

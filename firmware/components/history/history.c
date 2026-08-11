@@ -14,7 +14,10 @@ static const char *TAG = "HISTORY";
 
 // Stan historii pojedynczego licznika
 typedef struct {
-    char     id[28];          // klucz: "id" lub "id:pole" (np. 56989134:moc_kw)
+    char     id[40];          // klucz: "id" lub "id:pole" (np. 56989134:moc_kw)
+                              // 40 znakow - patrz s_tracked; pole NIE trafia
+                              // na flash (jest w nazwie pliku), wiec zmiana
+                              // rozmiaru nie uniewaznia istniejacych h_*.bin
     int      kind;            // 1=woda, 2=prad, 3=gaz
     int      cumulative;      // 1=kumulacyjne (roznice), 0=chwilowe (wartosc)
     bool     used;
@@ -50,7 +53,10 @@ static meter_hist_t *slot_get(int i) {
 }
 // Lista sledzonych licznikow (pokazywane w Historii). Reszta (sasiedzi) ukryta.
 #define MAX_TRACKED 24
-static char s_tracked[MAX_TRACKED][28];
+// 40 znakow: najdluzszy klucz to id(8)+':'+nazwa pola, np.
+// "56989134:energia_bierna_c_kvarh" (31). Przy 28 klucze byly po cichu
+// obcinane i sledzenie nie dzialalo (np. poprzedni_miesiac_m3 dla IZAR).
+static char s_tracked[MAX_TRACKED][40];
 static int  s_tracked_count = 0;
 static SemaphoreHandle_t s_mutex = NULL;
 static bool s_fs_ok = false;
@@ -112,7 +118,7 @@ static void rt_update(meter_hist_t *m, uint32_t ts, float total) {
 // ---------- SPIFFS zapis/odczyt ----------
 static void meter_path(const char *id, char *out, int cap) {
     // zamien ':' na '_' (SPIFFS nie lubi dwukropka w nazwie)
-    char safe[28];
+    char safe[40];
     int j = 0;
     for (int i = 0; id[i] && j < (int)sizeof(safe) - 1; i++)
         safe[j++] = (id[i] == ':') ? '_' : id[i];
@@ -122,7 +128,7 @@ static void meter_path(const char *id, char *out, int cap) {
 
 // Sciezka archiwum godzinowego (miesiac) - tylko na flash, nie w RAM.
 static void archive_path(const char *id, char *out, int cap) {
-    char safe[28];
+    char safe[40];
     int j = 0;
     for (int i = 0; id[i] && j < (int)sizeof(safe) - 1; i++)
         safe[j++] = (id[i] == ':') ? '_' : id[i];
@@ -293,7 +299,7 @@ static bool arc_validate_repair(const char *path, FILE *f, arc_hdr_t *h) {
 static void archive_append_hour(const char *id, uint32_t hour_ts, float total,
                                 uint32_t ts_exact) {
     if (!s_fs_ok) return;
-    char path[48]; archive_path(id, path, sizeof(path));
+    char path[64]; archive_path(id, path, sizeof(path));
 
     arc_hdr_t h;
     errno = 0;
@@ -371,7 +377,7 @@ static void archive_append_hour(const char *id, uint32_t hour_ts, float total,
 // pelnego 2-letniego archiwum swiezo zebranego).
 static void archive_rebuild_from_hours(meter_hist_t *m) {
     if (!s_fs_ok || m->n_hours == 0) return;
-    char path[48]; archive_path(m->id, path, sizeof(path));
+    char path[64]; archive_path(m->id, path, sizeof(path));
 
     // Poprawne archiwum NIGDY nie jest nadpisywane - co najwyzej UZUPELNIANE
     // o godziny z RAM nowsze niz jego ostatni rekord (archiwum moglo powstac
@@ -454,7 +460,7 @@ static void archive_rebuild_from_hours(meter_hist_t *m) {
 // przed restartem - scal go z seriami w RAM (zero dodatkowych zapisow flash).
 static void restore_from_archive(meter_hist_t *m) {
     if (!s_fs_ok) return;
-    char path[48]; archive_path(m->id, path, sizeof(path));
+    char path[64]; archive_path(m->id, path, sizeof(path));
     FILE *f = fopen(path, "rb");
     if (!f) return;
     arc_hdr_t h;
@@ -509,7 +515,7 @@ static void restore_from_archive(meter_hist_t *m) {
 
 static void save_meter(meter_hist_t *m) {
     if (!s_fs_ok) return;
-    char path[48]; meter_path(m->id, path, sizeof(path));
+    char path[64]; meter_path(m->id, path, sizeof(path));
     FILE *f = fopen(path, "wb");
     if (!f) { ESP_LOGW(TAG, "nie moge zapisac %s", path); return; }
     // Zapis: kind, last_total, last_ts, potem kazda seria (n + dane)
@@ -530,7 +536,7 @@ static void save_meter(meter_hist_t *m) {
 
 static bool load_meter(meter_hist_t *m, const char *id) {
     if (!s_fs_ok) return false;
-    char path[48]; meter_path(id, path, sizeof(path));
+    char path[64]; meter_path(id, path, sizeof(path));
     FILE *f = fopen(path, "rb");
     if (!f) return false;
     free_curve(m);            // wskaznik zaraz zniknie w memset - nie wyciekaj
@@ -610,7 +616,7 @@ static void tracked_load(void) {
     if (!s_fs_ok) return;
     FILE *f = fopen(TRACKED_PATH, "rb");
     if (!f) return;
-    char line[36];
+    char line[48];
     while (fgets(line, sizeof(line), f) && s_tracked_count < MAX_TRACKED) {
         // usun biale znaki z konca
         int len = strlen(line);
@@ -834,7 +840,7 @@ void history_on_reading(const char *id_hex, double total, int kind, uint32_t ts_
 void history_on_field(const char *id_hex, const char *field, double value,
                       int kind, int cumulative, uint32_t ts_unix) {
     if (!id_hex || !field || ts_unix < 1700000000) return;
-    char key[28];
+    char key[40];
     snprintf(key, sizeof(key), "%s:%s", id_hex, field);
 
     // ETAP A: zbieramy tylko sledzone pola (sasiedzi i niewybrane ignorowane)
@@ -916,7 +922,7 @@ static bool total_at_ts(meter_hist_t *m, uint32_t t, float *out) {
     }
     if (found && best_ts + 7200 >= t) { *out = best; return true; }
     if (!s_fs_ok) { if (found) { *out = best; return true; } return false; }
-    char path[48]; archive_path(m->id, path, sizeof(path));
+    char path[64]; archive_path(m->id, path, sizeof(path));
     FILE *f = fopen(path, "rb");
     if (!f) { if (found) { *out = best; return true; } return false; }
     arc_hdr_t h;
@@ -1089,7 +1095,7 @@ int history_debug_day(const char *key, uint32_t day_ts, char *buf, int cap) {
     for (int i = 0; i < m->n_hours; i++)
         if (m->hours[i].ts >= d0 && m->hours[i].ts < d1) ram_in_day++;
     n += snprintf(buf + n, cap - n, ",\"ram_godzin_w_dobie\":%d", ram_in_day);
-    char path[48]; archive_path(key, path, sizeof(path));
+    char path[64]; archive_path(key, path, sizeof(path));
     FILE *f = s_fs_ok ? fopen(path, "rb") : NULL;
     if (!f) {
         n += snprintf(buf + n, cap - n, ",\"arch\":\"BRAK PLIKU %s\"}", path);
@@ -1217,7 +1223,7 @@ int history_get_day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf
     // historii). Zamiast tego: wyszukiwanie binarne pierwszego rekordu doby
     // (~15 odczytow) + odczyt sekwencyjny do konca doby (max ~25 rekordow).
     if (!ram_covers) {
-        char path[48]; archive_path(id_hex, path, sizeof(path));
+        char path[64]; archive_path(id_hex, path, sizeof(path));
         FILE *f = s_fs_ok ? fopen(path, "rb") : NULL;
         if (f) {
             arc_hdr_t h;

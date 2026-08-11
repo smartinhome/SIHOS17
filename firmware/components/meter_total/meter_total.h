@@ -19,7 +19,8 @@ bool meter_total_extract(const uint8_t *data, size_t len,
 bool meter_total_needs_key(const uint8_t *data, size_t len);
 
 // --- Wielopolowa ekstrakcja (dla licznika energii: energia, moc, napiecia) ---
-#define MTF_MAX_FIELDS 16
+#define MTF_MAX_FIELDS 24   // Amiplus: energia+taryfy, moc, napiecia,
+                             // prady, moc/energia bierna = do 20 pol
 typedef struct {
     char   field[24];   // nazwa pola, np. "energia_kwh", "napiecie_l1_v"
     double value;

@@ -606,7 +606,10 @@ static void draw_meter_page(const char *id, int page_no, int total_pages) {
             const char *f = key_field(keys[i]);
             hist_display_t fs;
             if (!history_display_summary(keys[i], &fs) || !fs.has_value) continue;
-            if (strstr(f, "moc") && !strstr(f, "produkcji")) {
+            // UWAGA: dopasowanie DOKLADNE. Luzne strstr(f,"moc") lapalo tez
+            // moc_bierna_l_var / moc_bierna_c_var / moc_max_kw i pokazywalo je
+            // jako "akt. pobor" przemnozone przez 1000 (bledna wartosc w W).
+            if (strcmp(f, "moc_kw") == 0) {
                 // Aktualny pobor w W (kW * 1000), prawy gorny rog, odwrocony.
                 char pw[20];
                 snprintf(pw, sizeof(pw), "%.0f W", fs.last_total * 1000.0);
@@ -616,7 +619,28 @@ static void draw_meter_page(const char *id, int page_no, int total_pages) {
                 fb_draw_text_inv(&F24, pw_x, 18, pw);
                 int lbl_w = fb_text_width(&F14, "akt. pobór");
                 fb_draw_text(&F14, LCD_W - lbl_w - 4, 44, "akt. pobór");
-            } else if (strstr(f, "napiecie") || strstr(f, "_v")) {
+            } else if (strstr(f, "bierna")) {
+                // Moc bierna w VAR (NIE mnozyc przez 1000 - juz jest w VAR).
+                char v[16];
+                snprintf(v, sizeof(v), "%.0f", fs.last_total);
+                const char *lbl = strstr(f, "_c_") ? "Qc:" : "Ql:";
+                if (volt_y <= 90) {
+                    fb_draw_text(&F14, 188, volt_y, lbl);
+                    fb_draw_text(&F14, 210, volt_y, v);
+                    volt_y += 14;
+                }
+            } else if (strncmp(f, "prad", 4) == 0) {
+                // Prad fazowy w amperach.
+                char v[16];
+                snprintf(v, sizeof(v), "%.1fA", fs.last_total);
+                const char *lbl = strstr(f, "l1") ? "I1:" : strstr(f, "l2") ? "I2:" :
+                                  strstr(f, "l3") ? "I3:" : "I:";
+                if (volt_y <= 90) {
+                    fb_draw_text(&F14, 188, volt_y, lbl);
+                    fb_draw_text(&F14, 210, volt_y, v);
+                    volt_y += 14;
+                }
+            } else if (strncmp(f, "napiecie", 8) == 0) {
                 // Napiecie - w prawej czesci ramki statystyk.
                 char v[16];
                 snprintf(v, sizeof(v), "%.0fV", fs.last_total);

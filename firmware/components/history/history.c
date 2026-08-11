@@ -35,6 +35,12 @@ typedef struct {
     // Bufor DYNAMICZNY (11.5KB) - alokowany tylko dla pol, ktore go uzywaja;
     // statycznie dla 16 slotow zjadloby to 184KB RAM.
     hist_bucket_t *curve;              int n_curve;
+    // Stan licznika na POCZATKU biezacej doby - do liczenia "zuzycie dzis"
+    // na biezaco (co ramke), bez czekania na pelna godzine. Kubelki godzinowe
+    // trzymaja OSTATNIA wartosc w kubelku, wiec nie da sie z nich odtworzyc
+    // stanu o polnocy w trakcie pierwszej godziny pracy.
+    uint32_t day_base_ts;              // poczatek doby, ktorej dotyczy baza
+    float    day_base_total;           // stan licznika o polnocy tej doby
     uint32_t last_save_ts;             // ostatni zapis h_ (zapis okresowy, RAM-only)
     uint32_t last_arc_ts;              // ostatni zapis ha_ (throttling, RAM-only)
 } meter_hist_t;
@@ -532,6 +538,9 @@ static void save_meter(meter_hist_t *m) {
     fwrite(&m->n_curve, sizeof(int), 1, f);      // krzywa dnia (pola chwilowe)
     if (m->curve && m->n_curve > 0)
         fwrite(m->curve, sizeof(hist_bucket_t), m->n_curve, f);
+    // Baza doby - NA KONCU pliku, zeby starsze h_*.bin nadal sie wczytywaly.
+    fwrite(&m->day_base_ts, sizeof(uint32_t), 1, f);
+    fwrite(&m->day_base_total, sizeof(float), 1, f);
     fclose(f);
     m->last_save_ts = m->last_ts;
 }
@@ -577,6 +586,13 @@ static bool load_meter(meter_hist_t *m, const char *id) {
         }
     } else {
         m->n_curve = 0;
+    }
+    // Baza doby - dopisana na koncu w nowszych wersjach. Brak w starym pliku =
+    // 0; wtedy pierwsza ramka po restarcie ustawi ja na biezacy stan.
+    if (fread(&m->day_base_ts, sizeof(uint32_t), 1, f) != 1 ||
+        fread(&m->day_base_total, sizeof(float), 1, f) != 1) {
+        m->day_base_ts = 0;
+        m->day_base_total = 0;
     }
     fclose(f);
     return true;
@@ -901,6 +917,15 @@ void history_on_field(const char *id_hex, const char *field, double value,
     float ft = (float)value;
     m->kind = kind;
     m->cumulative = cumulative;
+    // Nowa doba? Zapamietaj stan licznika na jej poczatku. Baza to ostatni znany
+    // odczyt (koniec poprzedniej doby), a przy pierwszej ramce w ogole - ten odczyt.
+    {
+        uint32_t d0_now = floor_day(ts_unix);
+        if (m->day_base_ts != d0_now) {
+            m->day_base_total = (m->last_ts != 0) ? m->last_total : ft;
+            m->day_base_ts    = d0_now;
+        }
+    }
     m->last_total = ft;
     m->last_ts = ts_unix;
 
@@ -1492,36 +1517,24 @@ bool history_display_summary(const char *key, hist_display_t *out) {
             else if (m->days[i].ts == day_2) { t_d2 = m->days[i].total; h2 = true; }
             else if (m->days[i].ts == day_3) { t_d3 = m->days[i].total; h3 = true; }
         }
-        if (h1 && out->has_value) {
-            out->today = m->last_total - t_d1;
-            if (out->today < 0) out->today = 0;
-            out->has_today = true;
-            {
-                // Spojnosc z wykresem: gdy RAM pokrywa dobe, licz jak slupki
-                // (rozklad luk na granicy polnocy dawal rozne "dzis" niz web UI).
-                float ds;
-                if (day_sum_from_hours(m, day0, &ds)) out->today = ds;
-            }
-        } else if (out->has_value) {
-            // Brak odczytu z WCZORAJ (np. pierwszy dzien po instalacji lub po
-            // sformatowaniu pamieci). Wczesniej ustawialismy tu twarde 0, przez co
-            // e-ink pokazywal "0 L" az do nastepnej doby, mimo ze panel WWW liczyl
-            // zuzycie poprawnie. Liczymy wiec tak jak wykres: najpierw suma z
-            // kubelkow godzinowych dzisiejszej doby, a gdy ich brak - przyrost od
-            // najwczesniejszego znanego stanu w tej dobie.
-            float ds;
-            if (day_sum_from_hours(m, day0, &ds)) {
-                out->today = ds;
+        // ZUZYCIE DZIS - liczone NA BIEZACO, przy kazdym odswiezeniu e-ink (co 60 s).
+        // Wprost: biezacy stan licznika minus stan o polnocy. Dzieki temu wartosc
+        // rosnie z kazda ramka, a nie skokowo co pelna godzine (kubelki godzinowe
+        // w obrebie pierwszej godziny nie maja od czego odjac i dawaly 0).
+        // Punkt odniesienia (stan o polnocy), w kolejnosci wiarygodnosci:
+        //   1. stan na koniec WCZORAJ (bufor dzienny) - najdokladniejszy,
+        //   2. najwczesniejszy znany stan z dzisiejszej doby (pierwszy dzien pracy).
+        if (out->has_value) {
+            float base = 0; bool have_base = false;
+            if (m->day_base_ts == day0) { base = m->day_base_total; have_base = true; }
+            else if (h1) { base = t_d1; have_base = true; }
+            else if (earliest_total_in(m, day0, m->last_total, &base)) have_base = true;
+            if (have_base) {
+                out->today = m->last_total - base;
+                if (out->today < 0) out->today = 0;
             } else {
-                float base = 0;
-                if (earliest_total_in(m, day0, m->last_total, &base) &&
-                    m->last_total > base) {
-                    out->today = m->last_total - base;
-                } else {
-                    out->today = 0;
-                }
+                out->today = 0;
             }
-            if (out->today < 0) out->today = 0;
             out->has_today = true;
         }
         if (h1 && h2) {

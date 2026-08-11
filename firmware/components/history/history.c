@@ -1503,8 +1503,25 @@ bool history_display_summary(const char *key, hist_display_t *out) {
                 if (day_sum_from_hours(m, day0, &ds)) out->today = ds;
             }
         } else if (out->has_value) {
-            // Brak danych z wczoraj (np. pierwszy dzien) - dzis = 0 do polnocy.
-            out->today = 0;
+            // Brak odczytu z WCZORAJ (np. pierwszy dzien po instalacji lub po
+            // sformatowaniu pamieci). Wczesniej ustawialismy tu twarde 0, przez co
+            // e-ink pokazywal "0 L" az do nastepnej doby, mimo ze panel WWW liczyl
+            // zuzycie poprawnie. Liczymy wiec tak jak wykres: najpierw suma z
+            // kubelkow godzinowych dzisiejszej doby, a gdy ich brak - przyrost od
+            // najwczesniejszego znanego stanu w tej dobie.
+            float ds;
+            if (day_sum_from_hours(m, day0, &ds)) {
+                out->today = ds;
+            } else {
+                float base = 0;
+                if (earliest_total_in(m, day0, m->last_total, &base) &&
+                    m->last_total > base) {
+                    out->today = m->last_total - base;
+                } else {
+                    out->today = 0;
+                }
+            }
+            if (out->today < 0) out->today = 0;
             out->has_today = true;
         }
         if (h1 && h2) {
@@ -1559,7 +1576,7 @@ int history_tracked_meter_ids(char ids[][12], int max_ids) {
     return count;
 }
 
-int history_keys_for_id(const char *id, char keys[][28], int max_keys) {
+int history_keys_for_id(const char *id, char keys[][40], int max_keys) {
     if (!id) return 0;
     if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
     int count = 0;
@@ -1568,8 +1585,8 @@ int history_keys_for_id(const char *id, char keys[][28], int max_keys) {
         // Klucz pasuje gdy zaczyna sie od "id" i dalej jest ':' lub koniec.
         if (strncasecmp(s_tracked[i], id, idlen) == 0 &&
             (s_tracked[i][idlen] == ':' || s_tracked[i][idlen] == '\0')) {
-            strncpy(keys[count], s_tracked[i], 27);
-            keys[count][27] = 0;
+            strncpy(keys[count], s_tracked[i], 39);
+            keys[count][39] = 0;
             count++;
         }
     }

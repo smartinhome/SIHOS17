@@ -538,7 +538,7 @@ static void draw_meter_page(const char *id, int page_no, int total_pages) {
     fb_clear_white();
 
     // Zbierz wszystkie sledzone klucze tego licznika.
-    char keys[8][28];
+    char keys[8][40];
     int nkeys = history_keys_for_id(id, keys, 8);
 
     // Wybierz glowne pole kumulacyjne (energia/woda/gaz) - do duzego widoku.

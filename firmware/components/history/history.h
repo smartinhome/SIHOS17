@@ -100,7 +100,7 @@ int history_tracked_meter_ids(char ids[][12], int max_ids);
 
 // Wypelnia pelne klucze sledzenia (id:pole lub id) dla danego ID licznika.
 // keys: tablica bufow [n][28]. Zwraca liczbe znalezionych kluczy.
-int history_keys_for_id(const char *id, char keys[][28], int max_keys);
+int history_keys_for_id(const char *id, char keys[][40], int max_keys);
 
 // Diagnostyka dla ekranu: liczba sledzonych kluczy + pierwszy klucz (do podgladu).
 int history_tracked_count(void);

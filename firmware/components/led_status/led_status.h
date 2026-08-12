@@ -3,7 +3,9 @@
 #include <stdbool.h>
 
 // Dioda RGB WS2812 (status WiFi) na GPIO8.
-// Zielona = polaczono z WiFi, czerwona = brak/utrata polaczenia z zapisana siecia.
+// Zielona  = polaczono z siecia domowa (STA).
+// Niebieska = tryb AP i ktos jest podlaczony (telefon/laptop).
+// Czerwona  = brak polaczenia: tryb AP bez klientow lub utrata sieci.
 // Jasnosc regulowana, mozna wylaczyc calkowicie.
 
 // Inicjalizacja. enabled/brightness wczytane z konfiguracji.

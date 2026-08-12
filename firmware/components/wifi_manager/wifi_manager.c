@@ -22,6 +22,9 @@ static esp_netif_t       *s_sta_netif = NULL;
 // skanowanie sieci. Nie moze wtedy probowac sie laczyc - kazda proba to
 // przerwa w pracy AP i rozlaczenie telefonu/laptopa.
 static bool               s_sta_autoconnect = false;
+// Ilu klientow (telefon/laptop) jest podlaczonych do naszego AP.
+// Uzywane przez diode RGB: niebieski = ktos podlaczony, czerwony = nikt.
+static volatile int       s_ap_clients = 0;
 static esp_netif_t       *s_ap_netif  = NULL;
 static int                s_retry = 0;
 #define MAX_RETRY 5
@@ -30,6 +33,16 @@ static int                s_retry = 0;
 
 static void event_handler(void *arg, esp_event_base_t base,
                            int32_t id, void *data) {
+    if (base == WIFI_EVENT && id == WIFI_EVENT_AP_STACONNECTED) {
+        s_ap_clients++;
+        ESP_LOGI(TAG, "AP: klient podlaczony (razem %d)", s_ap_clients);
+        return;
+    }
+    if (base == WIFI_EVENT && id == WIFI_EVENT_AP_STADISCONNECTED) {
+        if (s_ap_clients > 0) s_ap_clients--;
+        ESP_LOGI(TAG, "AP: klient odlaczony (zostalo %d)", s_ap_clients);
+        return;
+    }
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         if (!s_sta_autoconnect) return;   // APSTA w trybie AP - tylko do skanowania
         esp_wifi_connect();
@@ -69,6 +82,7 @@ static void event_handler(void *arg, esp_event_base_t base,
 
 static void start_ap(const sih_config_t *cfg) {
     s_sta_autoconnect = false;   // w AP interfejs STA sluzy wylacznie do skanowania
+    s_ap_clients = 0;
     if (!s_ap_netif)  s_ap_netif  = esp_netif_create_default_wifi_ap();
     if (!s_sta_netif) s_sta_netif = esp_netif_create_default_wifi_sta();
     wifi_config_t ap_cfg = {0};
@@ -128,6 +142,8 @@ void wifi_manager_init(void) {
         start_ap(&cfg);
     }
 }
+
+int wifi_manager_ap_clients(void) { return s_ap_clients; }
 
 wifi_state_t wifi_manager_get_state(void) { return s_state; }
 

@@ -110,12 +110,24 @@ static void led_show(uint8_t r, uint8_t g, uint8_t b) {
 // Zadanie: co sekunde sprawdza stan WiFi i ustawia kolor.
 static void led_status_task(void *arg) {
     wifi_state_t last = (wifi_state_t)(-1);
+    int last_clients = -1;
     while (1) {
         wifi_state_t st = wifi_manager_get_state();
-        if (st != last || !s_have_last) {
+        // Liczba klientow AP zmienia sie BEZ zmiany stanu WiFi, wiec musi byc
+        // osobnym warunkiem odswiezenia - inaczej kolor nie drgnalby po
+        // podlaczeniu telefonu.
+        int clients = (st == WIFI_STATE_AP_MODE) ? wifi_manager_ap_clients() : 0;
+        if (st != last || clients != last_clients || !s_have_last) {
             last = st;
-            if (st == WIFI_STATE_CONNECTED) led_show(0, 255, 0);   // zielony
-            else                            led_show(255, 0, 0);   // czerwony
+            last_clients = clients;
+            if (st == WIFI_STATE_CONNECTED) {
+                led_show(0, 255, 0);                       // zielony: siec domowa
+            } else if (st == WIFI_STATE_AP_MODE) {
+                if (clients > 0) led_show(0, 0, 255);      // niebieski: ktos podlaczony do AP
+                else             led_show(255, 0, 0);      // czerwony: AP bez klientow
+            } else {
+                led_show(255, 0, 0);                       // czerwony: brak polaczenia
+            }
         }
         vTaskDelay(pdMS_TO_TICKS(1000));
     }

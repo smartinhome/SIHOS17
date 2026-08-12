@@ -143,23 +143,39 @@ static void rt_update(meter_hist_t *m, uint32_t ts, float total) {
 }
 
 // ---------- SPIFFS zapis/odczyt ----------
-static void meter_path(const char *id, char *out, int cap) {
-    // zamien ':' na '_' (SPIFFS nie lubi dwukropka w nazwie)
-    char safe[40];
+// SPIFFS ma limit nazwy obiektu: 32 bajty Z terminatorem, czyli 31 znakow.
+// Nazwa obiektu to "/ha_" + klucz + ".bin" (prefiks /spiffs jest obcinany),
+// wiec na sam klucz zostaja 23 znaki. Dluzsze klucze (np.
+// "56989134:energia_bierna_c_kvarh") powodowaly ciche bledy zapisu -
+// historia takiego pola nigdy nie trafiala na flash.
+#define SAFE_KEY_MAX 23
+
+static void safe_key(const char *id, char *out) {
+    char tmp[48];
     int j = 0;
-    for (int i = 0; id[i] && j < (int)sizeof(safe) - 1; i++)
-        safe[j++] = (id[i] == ':') ? '_' : id[i];
-    safe[j] = 0;
+    for (int i = 0; id[i] && j < (int)sizeof(tmp) - 1; i++)
+        tmp[j++] = (id[i] == ':') ? '_' : id[i];
+    tmp[j] = 0;
+    if (j <= SAFE_KEY_MAX) { memcpy(out, tmp, j + 1); return; }
+    // Za dlugie: skroc i dopnij 4-znakowy skrot PELNEGO klucza (FNV-1a),
+    // zeby np. ..._bierna_c_kvarh i ..._bierna_l_kvarh nie zlaly sie w jedno.
+    uint32_t h = 2166136261u;
+    for (int i = 0; id[i]; i++) { h ^= (uint8_t)id[i]; h *= 16777619u; }
+    int keep = SAFE_KEY_MAX - 5;          // miejsce na "_" + 4 hex
+    memcpy(out, tmp, keep);
+    snprintf(out + keep, 6, "_%04x", (unsigned)(h & 0xFFFF));
+}
+
+static void meter_path(const char *id, char *out, int cap) {
+    char safe[SAFE_KEY_MAX + 1];
+    safe_key(id, safe);
     snprintf(out, cap, "/spiffs/h_%s.bin", safe);
 }
 
 // Sciezka archiwum godzinowego (miesiac) - tylko na flash, nie w RAM.
 static void archive_path(const char *id, char *out, int cap) {
-    char safe[40];
-    int j = 0;
-    for (int i = 0; id[i] && j < (int)sizeof(safe) - 1; i++)
-        safe[j++] = (id[i] == ':') ? '_' : id[i];
-    safe[j] = 0;
+    char safe[SAFE_KEY_MAX + 1];
+    safe_key(id, safe);
     snprintf(out, cap, "/spiffs/ha_%s.bin", safe);
 }
 
@@ -655,6 +671,23 @@ static void tracked_load(void) {
         }
     }
     fclose(f);
+}
+
+size_t history_free_curves(void) {
+    // Krzywe minutowe (po 11.2 KB) sa odtwarzalne - po restarcie i tak buduja sie
+    // od nowa, a dane godzinowe zostaja. Zwalniamy je przed OTA, bo TLS do GitHuba
+    // potrzebuje sporego, spojnego kawalka sterty.
+    size_t freed = 0;
+    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
+    for (int i = 0; i < MAX_HIST_METERS; i++) {
+        if (s_meters[i] && s_meters[i]->curve) {
+            freed += HIST_CURVE * sizeof(hist_bucket_t);
+            free_curve(s_meters[i]);
+        }
+    }
+    if (s_mutex) xSemaphoreGive(s_mutex);
+    ESP_LOGI(TAG, "Zwolniono %u B buforow krzywych (OTA)", (unsigned)freed);
+    return freed;
 }
 
 bool history_fs_ok(void) { return s_fs_ok; }

@@ -66,6 +66,10 @@ void history_set_tracked(const char *id_hex, bool tracked);
 
 // Czy system plikow historii jest sprawny (false = nic sie nie zapisze).
 bool history_fs_ok(void);
+
+// Zwalnia bufory krzywych minutowych (odzyskuje RAM np. przed OTA).
+// Zwraca liczbe zwolnionych bajtow. Dane godzinowe pozostaja nietkniete.
+size_t history_free_curves(void);
 // Ile pozycji zajetych / ile maksymalnie na liscie sledzonych.
 void history_tracked_limits(int *used, int *max);
 bool history_is_tracked(const char *id_hex);

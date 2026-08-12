@@ -8,6 +8,8 @@
 #include "esp_https_ota.h"
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
+#include "esp_heap_caps.h"
+#include "history.h"
 #include "esp_app_desc.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
@@ -49,6 +51,12 @@ static void ota_url_task(void *arg) {
         .partial_http_download = false,
     };
 
+    // Zwolnij bufory krzywych minutowych - TLS do GitHuba potrzebuje duzego,
+    // spojnego kawalka sterty, a kazde sledzone pole chwilowe trzyma 11.2 KB.
+    history_free_curves();
+    ESP_LOGI(TAG, "OTA: heap przed pobieraniem = %u B, najwiekszy blok = %u B",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     ESP_LOGI(TAG, "OTA: rozpoczynam pobieranie firmware z URL");
     ESP_LOGI(TAG, "OTA: %s", url);
 

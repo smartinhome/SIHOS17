@@ -1465,17 +1465,25 @@ bool history_last_known(const char *id_hex, double *out_total, int *out_kind, ui
 // z przycieciem na granicy doby). Uzywana przez e-ink, zeby "dzis" na
 // wyswietlaczu rownalo sie sumie slupkow w web UI.
 // Dziala na godzinach w RAM; wymaga, by RAM pokrywal dobe od jej poczatku.
-static bool day_sum_from_hours(const meter_hist_t *m, uint32_t d0, float *out_sum) {
-    if (!m || m->n_hours == 0 || m->hours[0].ts > d0) return false;
+// need_cover=true  - wymagaj kubelka sprzed poczatku doby (pelne pokrycie).
+// need_cover=false - policz z tego, co jest w dobie. Potrzebne dla doby
+//   ZAMKNIETEJ na nowym module: gdy modul ruszyl np. o 8:00, kubelka sprzed
+//   polnocy nie ma, ale zuzycie z tej doby jest znane i widac je w panelu.
+static bool day_sum_from_hours_ex(const meter_hist_t *m, uint32_t d0,
+                                  float *out_sum, bool need_cover) {
+    if (!m || m->n_hours == 0) return false;
+    if (need_cover && m->hours[0].ts > d0) return false;
     uint32_t d1 = d0 + 86400;
     const uint32_t GAP_FILL_MAX_H = 6;
     float sum = 0;
+    int counted = 0;
     const hist_bucket_t *ref = NULL;
     for (int i = 0; i < m->n_hours; i++) {
         const hist_bucket_t *b = &m->hours[i];
         if (b->ts >= d1) break;
         if (b->ts < d0) { ref = b; continue; }
         if (ref && b->ts > ref->ts) {
+            counted++;
             uint32_t gap_h = (b->ts - ref->ts) / 3600;
             float delta = b->total - ref->total;
             if (delta < 0) delta = 0;
@@ -1493,8 +1501,13 @@ static bool day_sum_from_hours(const meter_hist_t *m, uint32_t d0, float *out_su
         }
         ref = b;
     }
+    if (!need_cover && counted == 0) return false;   // nic do policzenia
     *out_sum = sum;
     return true;
+}
+
+static bool day_sum_from_hours(const meter_hist_t *m, uint32_t d0, float *out_sum) {
+    return day_sum_from_hours_ex(m, d0, out_sum, true);
 }
 
 bool history_display_summary(const char *key, hist_display_t *out) {
@@ -1560,19 +1573,31 @@ bool history_display_summary(const char *key, hist_display_t *out) {
             if (out->today < 0) out->today = 0;
             out->has_today = true;
         }
-        if (h1 && h2) {
-            out->yesterday = t_d1 - t_d2;
-            {
-                float ys;
-                if (day_sum_from_hours(m, day_1, &ys)) out->yesterday = ys;
+        // ZUZYCIE WCZORAJ - tak jak w panelu WWW, z kubelkow godzinowych.
+        // Wczesniej wymagalismy wpisow dobowych z wczoraj I przedwczoraj (h1 && h2),
+        // przez co NOWY modul nigdy nie pokazywal wczoraj - przedwczoraj jeszcze
+        // nie istnialo, choc godzinowe dane z wczoraj byly (i widac je w UI).
+        {
+            float ys;
+            if (day_sum_from_hours_ex(m, day_1, &ys, false)) {
+                out->yesterday = ys;
+                out->has_yesterday = true;
+            } else if (h1 && h2) {
+                out->yesterday = t_d1 - t_d2;
+                out->has_yesterday = true;
             }
             if (out->yesterday < 0) out->yesterday = 0;
-            out->has_yesterday = true;
         }
-        if (h2 && h3) {
-            out->day_before = t_d2 - t_d3;
+        {
+            float bs;
+            if (day_sum_from_hours_ex(m, day_2, &bs, false)) {
+                out->day_before = bs;
+                out->has_day_before = true;
+            } else if (h2 && h3) {
+                out->day_before = t_d2 - t_d3;
+                out->has_day_before = true;
+            }
             if (out->day_before < 0) out->day_before = 0;
-            out->has_day_before = true;
         }
     } else {
         // Chwilowe (moc/napiecie): "dzis" = biezaca wartosc, dzien = ostatnia z dnia.

@@ -697,6 +697,20 @@ bool meter_total_extract(const uint8_t *data, size_t len,
     uint8_t clean[300];
     int clen = remove_block_crc(data, (int)len, clean, sizeof(clean));
 
+    // Techem MK Radio 4 (TCH, wersja 0x95, CI 0xA2 = format producenta).
+    // Nie ma tu DIF/VIF - dane leza na stalych pozycjach ramki BEZ CRC blokow:
+    //   [14..15] licznik z konca poprzedniego okresu rozliczeniowego (LE, 0.1 m3)
+    //   [18..19] przyrost od tamtego momentu               (LE, 0.1 m3)
+    // Stan biezacy = suma obu. Zgodne z wmbusmeters (driver mkradio4).
+    // Typ 0x62 = woda ciepla, 0x72 = woda zimna - oba obslugiwane tak samo.
+    if (strcmp(mf, "TCH") == 0 && clen >= 20 && clean[8] == 0x95 &&
+        (clean[9] == 0x62 || clean[9] == 0x72) && clean[10] == 0xA2) {
+        uint16_t prev = (uint16_t)(clean[14] | (clean[15] << 8));
+        uint16_t curr = (uint16_t)(clean[18] | (clean[19] << 8));
+        *out_total = (double)(prev + curr) / 10.0;
+        *out_kind  = 1;   // woda
+        return true;
+    }
     // IZAR / PRIOS (Diehl: SAP, DME, Hydrometer: HYD) - LFSR, bez klucza AES.
     // Walidacja bajtem kontrolnym 0x4B, wiec brak filtra medium.
     if (strcmp(mf, "SAP") == 0 || strcmp(mf, "DME") == 0 || strcmp(mf, "HYD") == 0) {

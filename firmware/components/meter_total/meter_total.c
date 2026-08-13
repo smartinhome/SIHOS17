@@ -143,9 +143,16 @@ typedef struct {
 static bool find_tpl(const uint8_t *b, int len, tpl_info_t *t) {
     if (!b || len < 15) return false;
     int ci = -1;
-    if (b[10] == 0x7A || b[10] == 0x72) ci = 10;
-    else for (int i = 10; i < 20 && i < len; i++)
-        if (b[i] == 0x7A || b[i] == 0x72) { ci = i; break; }
+    if (b[10] == 0x7A || b[10] == 0x72) {
+        ci = 10;
+    } else if (b[10] == 0x8C || b[10] == 0x8D || b[10] == 0x90 || b[10] == 0x91) {
+        // Za warstwa ELL/AFL moze stac wlasciwy naglowek TPL. Szukamy go tylko
+        // wtedy - wczesniej skanowalismy bajty 10..19 ZAWSZE, wiec przypadkowy
+        // bajt 0x7A w tresci ramki (np. IZAR/PRIOS z CI=0xA4) byl brany za
+        // naglowek i licznik raportowany jako zaszyfrowany AES.
+        for (int i = 11; i < 20 && i < len; i++)
+            if (b[i] == 0x7A || b[i] == 0x72) { ci = i; break; }
+    }
     if (ci < 0) return false;
 
     memset(t, 0, sizeof(*t));
@@ -232,6 +239,13 @@ bool meter_total_needs_key(const uint8_t *data, size_t len) {
     if (!data || len < 15) return false;
     uint8_t clean[300];
     int clen = remove_block_crc(data, (int)len, clean, sizeof(clean));
+    // Diehl/PRIOS (IZAR, Hydrometer) NIE uzywaja AES - maja wlasne maskowanie
+    // LFSR z kluczami wbudowanymi w firmware. Nigdy nie prosimy o klucz.
+    if (clen >= 4) {
+        char mf[4]; manuf3(clean, mf);
+        if (strcmp(mf, "SAP") == 0 || strcmp(mf, "DME") == 0 || strcmp(mf, "HYD") == 0)
+            return false;
+    }
     tpl_info_t t;
     if (!find_tpl(clean, clen, &t)) return false;
     if (t.mode == 0) return false;

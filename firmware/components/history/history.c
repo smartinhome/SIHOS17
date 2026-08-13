@@ -1468,6 +1468,21 @@ int history_get_day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf
             if (i > 0) ref = &s_day_buf[i-1];
             else if (has_prev) ref = &prev;
 
+            // Pierwszy kubelek doby bez odniesienia sprzed polnocy (np. modul
+            // ruszyl dzis po resecie fabrycznym): uzyj stanu z pierwszego
+            // odczytu tej doby - tego samego, ktorego uzywa e-ink. Bez tego
+            // panel nie rysowal NIC, a e-ink pokazywal juz zuzycie.
+            // Jeden slupek, bez rozkladania na godziny: zuzycie powstalo od
+            // startu modulu, a nie od polnocy.
+            if (!ref && i == 0 && m->day_base_ts == d0) {
+                float delta0 = s_day_buf[0].total - m->day_base_total;
+                if (delta0 < 0) delta0 = 0;
+                n += snprintf(buf + n, buf_cap - n, "%s{\"t\":%u,\"v\":%.3f}",
+                              first ? "" : ",", (unsigned)s_day_buf[0].ts, delta0);
+                first = false;
+                continue;
+            }
+
             if (ref && s_day_buf[i].ts > ref->ts) {
                 uint32_t gap_h = (s_day_buf[i].ts - ref->ts) / 3600;
                 float delta = s_day_buf[i].total - ref->total;

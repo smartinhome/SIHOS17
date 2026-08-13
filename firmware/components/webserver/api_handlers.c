@@ -953,6 +953,8 @@ static esp_err_t handle_backup_post(httpd_req_t *req) {
         }
         p += dlen;
     }
+    // Znacznik: po restarcie pierwsza ramka ma zaczac biezaca dobe od nowa.
+    history_mark_rebase();
     ESP_LOGI(TAG, "Backup przywrocony: %d licznikow + %d plikow historii", mc, restored);
     free(buf);
     resp_ok(req);

@@ -45,6 +45,7 @@ typedef struct {
     // restarcie w srodku dnia baza jest nieznana i liczenie MUSI spasc na
     // kubelki godzinowe - inaczej za punkt odniesienia wzielibysmy stan sprzed
     // restartu i "dzis" spadloby do zera (regresja z bety 264).
+    bool     rebased;                  // czy juz odciety po przywroceniu kopii
     uint32_t day_base_ts;
     float    day_base_total;
     uint32_t last_save_ts;             // ostatni zapis h_ (zapis okresowy, RAM-only)
@@ -74,6 +75,12 @@ static char s_tracked[MAX_TRACKED][40];
 static int  s_tracked_count = 0;
 static SemaphoreHandle_t s_mutex = NULL;
 static bool s_fs_ok = false;
+// Po przywroceniu kopii stan licznika zdazyl sie zmienic, a zuzycie z tego
+// okresu NIE zostalo zarejestrowane. Bez tego firmware probowal je dopisac do
+// dzisiejszych godzin (jeden ogromny slupek albo kilka identycznych po rozlozeniu
+// luki). Znacznik mowi: przy pierwszej ramce po restarcie zacznij dobe od nowa.
+#define REBASE_FLAG "/spiffs/rebase.flg"
+static bool s_rebase_pending = false;
 
 // ---------- Pomocnicze: zaokraglenia czasu ----------
 static uint32_t floor_hour(uint32_t t)  { return t - (t % 3600); }
@@ -775,6 +782,11 @@ bool history_day_sum(const char *key, uint32_t day_ts, float *out_sum) {
     return true;
 }
 
+void history_mark_rebase(void) {
+    FILE *f = fopen(REBASE_FLAG, "wb");
+    if (f) { fputc(1, f); fclose(f); }
+}
+
 bool history_fs_ok(void) { return s_fs_ok; }
 
 void history_tracked_limits(int *used, int *max) {
@@ -883,6 +895,11 @@ void history_init(void) {
         ESP_LOGW(TAG, "SPIFFS sformatowany - historia bedzie zapisywana");
     }
     s_fs_ok = true;
+    {   // znacznik po przywroceniu kopii - kasujemy od razu, dziala jednorazowo
+        FILE *rf = fopen(REBASE_FLAG, "rb");
+        if (rf) { fclose(rf); remove(REBASE_FLAG); s_rebase_pending = true;
+            ESP_LOGW(TAG, "Po przywroceniu kopii: biezaca doba zostanie zaczeta od nowa"); }
+    }
     // Zapamietaj, ze system plikow byl juz sprawny - od teraz nigdy nie formatujemy
     // automatycznie (ochrona historii przed skasowaniem po brudnym resecie).
     {
@@ -1051,6 +1068,22 @@ void history_on_field(const char *id_hex, const char *field, double value,
     m->cumulative = cumulative;
     {
         uint32_t d0_now = floor_day(ts_unix);
+        if (s_rebase_pending && !m->rebased) {
+            // Pierwsza ramka po przywroceniu kopii. Kubelki BIEZACEJ doby pochodza
+            // sprzed kopii i odnosza sie do innego stanu licznika - porownanie z
+            // nowym odczytem dawaloby zmyslone zuzycie. Usuwamy je i zaczynamy dobe
+            // od teraz. Starsze doby zostaja - sa kompletne i wiarygodne.
+            int keep = 0;
+            for (int k = 0; k < m->n_hours; k++)
+                if (m->hours[k].ts < d0_now) m->hours[keep++] = m->hours[k];
+            m->n_hours = keep;
+            m->n_curve = 0;
+            m->n_rt = 0;
+            m->day_base_total = ft;
+            m->day_base_ts    = d0_now;
+            m->rebased        = true;
+            ESP_LOGW(TAG, "%s: doba zaczeta od nowa po przywroceniu kopii", m->id);
+        }
         if (m->day_base_ts != d0_now) {
             if (m->last_ts == 0) {
                 // Pierwszy odczyt tego licznika w ogole - to nasz punkt startowy.
@@ -1524,7 +1557,11 @@ int history_get_day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf
             // panel nie rysowal NIC, a e-ink pokazywal juz zuzycie.
             // Jeden slupek, bez rozkladania na godziny: zuzycie powstalo od
             // startu modulu, a nie od polnocy.
-            if (!ref && i == 0 && m->day_base_ts == d0) {
+            // Punkt odniesienia doby ma PIERWSZENSTWO przed kubelkiem sprzed
+            // polnocy. Jest dokladniejszy (stan dokladnie o polnocy, a nie o 23:00)
+            // i po przywroceniu kopii to jedyna wiarygodna wartosc - wczorajszy
+            // kubelek pochodzi sprzed kopii i odnosi sie do innego stanu licznika.
+            if (i == 0 && m && m->day_base_ts == d0) {
                 float delta0 = s_day_buf[0].total - m->day_base_total;
                 if (delta0 < 0) delta0 = 0;
                 n += snprintf(buf + n, buf_cap - n, "%s{\"t\":%u,\"v\":%.3f}",

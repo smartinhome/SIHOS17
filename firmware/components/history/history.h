@@ -65,6 +65,10 @@ bool history_last_known(const char *id_hex, double *out_total, int *out_kind, ui
 void history_set_tracked(const char *id_hex, bool tracked);
 
 // Czy system plikow historii jest sprawny (false = nic sie nie zapisze).
+// Po przywroceniu kopii: przy pierwszej ramce zacznij biezaca dobe od nowa
+// (zuzycie z okresu miedzy kopia a teraz nie zostalo zarejestrowane).
+void history_mark_rebase(void);
+
 bool history_fs_ok(void);
 
 // Suma zuzycia za dobe - liczona tak samo jak slupki wykresu w panelu.

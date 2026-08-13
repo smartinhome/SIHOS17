@@ -154,6 +154,17 @@ int wifi_manager_get_rssi(void) {
 }
 
 void wifi_manager_get_ip(char *buf, size_t len) {
+    // W trybie AP s_ip zostaje "0.0.0.0" (jest ustawiany dopiero po uzyskaniu
+    // adresu w sieci domowej), wiec adres bramki czytamy wprost z interfejsu AP.
+    // Nie wpisujemy 192.168.4.1 na sztywno - gdyby konfiguracja AP kiedys sie
+    // zmienila, adres na ekranie nadal bylby prawdziwy.
+    if (s_state == WIFI_STATE_AP_MODE && s_ap_netif) {
+        esp_netif_ip_info_t ip;
+        if (esp_netif_get_ip_info(s_ap_netif, &ip) == ESP_OK && ip.ip.addr) {
+            snprintf(buf, len, IPSTR, IP2STR(&ip.ip));
+            return;
+        }
+    }
     strlcpy(buf, s_ip, len);
 }
 

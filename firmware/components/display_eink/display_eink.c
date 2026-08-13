@@ -4,6 +4,7 @@
 #include "font_data.h"
 #include "history.h"
 #include "wmbus_decoder.h"
+#include "wifi_manager.h"
 #include "nvs_config.h"
 #include <stdio.h>
 #include <time.h>
@@ -738,7 +739,21 @@ static void draw_diag(void) {
     }
     fb_draw_text(&F14, 4, 74, dl);
 
-    fb_draw_text(&F14, 4, 96, "www.smartinhome.pl");
+    // Adres, pod ktorym dostepny jest panel - w trybie AP adres bramki
+    // punktu dostepowego, po polaczeniu z siecia domowa adres z DHCP.
+    char ip[16]; wifi_manager_get_ip(ip, sizeof(ip));
+    char ipl[40];
+    wifi_state_t wst = wifi_manager_get_state();
+    if (wst == WIFI_STATE_AP_MODE) {
+        snprintf(ipl, sizeof(ipl), "AP: %s", ip);
+    } else if (wst == WIFI_STATE_CONNECTED && strcmp(ip, "0.0.0.0") != 0) {
+        snprintf(ipl, sizeof(ipl), "IP: %s", ip);
+    } else {
+        snprintf(ipl, sizeof(ipl), "IP: brak polaczenia");
+    }
+    fb_draw_text(&F14, 4, 90, ipl);
+
+    fb_draw_text(&F14, 4, 106, "www.smartinhome.pl");
     eink_refresh();
 }
 

@@ -703,7 +703,7 @@ void history_erase_all(void) {
                 const char *nm = de->d_name;
                 if (strncmp(nm, "h_", 2) == 0 || strncmp(nm, "ha_", 3) == 0 ||
                     strcmp(nm, "tracked.txt") == 0 || strncmp(nm, "arc_", 4) == 0) {
-                    snprintf(victims[nv], sizeof(victims[0]), "%s", nm);
+                    snprintf(victims[nv], sizeof(victims[0]), "%.39s", nm);
                     nv++;
                 }
             }

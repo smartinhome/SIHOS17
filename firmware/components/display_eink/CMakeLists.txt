@@ -1,5 +1,5 @@
 idf_component_register(
     SRCS "display_eink.c"
     INCLUDE_DIRS "."
-    REQUIRES driver esp_rom history nvs_config
+    REQUIRES driver esp_rom history nvs_config wmbus_decoder
 )

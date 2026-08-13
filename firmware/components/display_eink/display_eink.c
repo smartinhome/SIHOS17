@@ -3,6 +3,7 @@
 #include "logo_data.h"
 #include "font_data.h"
 #include "history.h"
+#include "wmbus_decoder.h"
 #include "nvs_config.h"
 #include <stdio.h>
 #include <time.h>
@@ -722,16 +723,20 @@ static void draw_diag(void) {
         fb_draw_text(&F14, 4, 56, "(Liczniki -> + przy wartości)");
     }
 
-    // Status czasu (SNTP) - bez czasu historia nie zapisuje.
-    time_t now = time(NULL);
-    if (now > 1700000000) {
-        struct tm tm; localtime_r(&now, &tm);
-        char ts[40];
-        strftime(ts, sizeof(ts), "Czas: %d.%m %H:%M:%S", &tm);
-        fb_draw_text(&F14, 4, 74, ts);
+    // Ile licznikow modul juz uslyszal w eterze (odswiezane co minute razem
+    // z cala strona diagnostyczna).
+    int det = wmbus_decoder_get_count();
+    char dl[40];
+    if (det == 0) {
+        snprintf(dl, sizeof(dl), "Nasluchuje - brak licznikow");
+    } else if (det == 1) {
+        snprintf(dl, sizeof(dl), "Wykryto 1 licznik");
+    } else if (det % 10 >= 2 && det % 10 <= 4 && (det % 100 < 12 || det % 100 > 14)) {
+        snprintf(dl, sizeof(dl), "Wykryto %d liczniki", det);   // 2-4, 22-24...
     } else {
-        fb_draw_text(&F14, 4, 74, "Czas: BRAK - otworz panel WWW");
+        snprintf(dl, sizeof(dl), "Wykryto %d licznikow", det);  // 5+, 11-14...
     }
+    fb_draw_text(&F14, 4, 74, dl);
 
     fb_draw_text(&F14, 4, 96, "www.smartinhome.pl");
     eink_refresh();

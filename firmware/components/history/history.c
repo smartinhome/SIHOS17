@@ -45,7 +45,8 @@ typedef struct {
     // restarcie w srodku dnia baza jest nieznana i liczenie MUSI spasc na
     // kubelki godzinowe - inaczej za punkt odniesienia wzielibysmy stan sprzed
     // restartu i "dzis" spadloby do zera (regresja z bety 264).
-    bool     rebased;                  // czy juz odciety po przywroceniu kopii
+    bool     rebased;                  // czy juz obsluzono przywrocenie kopii
+    uint32_t rebase_ts;                // granica przywrocenia (0 = brak)
     uint32_t day_base_ts;
     float    day_base_total;
     uint32_t last_save_ts;             // ostatni zapis h_ (zapis okresowy, RAM-only)
@@ -589,6 +590,7 @@ static void save_meter(meter_hist_t *m) {
     // liczyc zuzycia i wykres dnia byl pusty.
     fwrite(&m->day_base_ts, sizeof(uint32_t), 1, f);
     fwrite(&m->day_base_total, sizeof(float), 1, f);
+    fwrite(&m->rebase_ts, sizeof(uint32_t), 1, f);
     fclose(f);
     m->last_save_ts = m->last_ts;
 }
@@ -641,6 +643,7 @@ static bool load_meter(meter_hist_t *m, const char *id) {
         m->day_base_ts = 0;
         m->day_base_total = 0;
     }
+    if (fread(&m->rebase_ts, sizeof(uint32_t), 1, f) != 1) m->rebase_ts = 0;
     fclose(f);
     return true;
 }
@@ -1069,20 +1072,13 @@ void history_on_field(const char *id_hex, const char *field, double value,
     {
         uint32_t d0_now = floor_day(ts_unix);
         if (s_rebase_pending && !m->rebased) {
-            // Pierwsza ramka po przywroceniu kopii. Kubelki BIEZACEJ doby pochodza
-            // sprzed kopii i odnosza sie do innego stanu licznika - porownanie z
-            // nowym odczytem dawaloby zmyslone zuzycie. Usuwamy je i zaczynamy dobe
-            // od teraz. Starsze doby zostaja - sa kompletne i wiarygodne.
-            int keep = 0;
-            for (int k = 0; k < m->n_hours; k++)
-                if (m->hours[k].ts < d0_now) m->hours[keep++] = m->hours[k];
-            m->n_hours = keep;
-            m->n_curve = 0;
-            m->n_rt = 0;
-            m->day_base_total = ft;
-            m->day_base_ts    = d0_now;
-            m->rebased        = true;
-            ESP_LOGW(TAG, "%s: doba zaczeta od nowa po przywroceniu kopii", m->id);
+            // Pierwsza ramka po przywroceniu kopii. Danych z kopii NIE ruszamy -
+            // maja zostac. Zapamietujemy tylko granice: zuzycie miedzy ostatnim
+            // stanem z kopii a tym odczytem nie bylo rejestrowane, wiec pokazemy
+            // je jako JEDEN slupek (a nie rozlozone po godzinach).
+            m->rebase_ts = ts_unix;
+            m->rebased   = true;
+            ESP_LOGW(TAG, "%s: przywrocono kopie, roznica pokazana jako jeden slupek", m->id);
         }
         if (m->day_base_ts != d0_now) {
             if (m->last_ts == 0) {
@@ -1091,7 +1087,7 @@ void history_on_field(const char *id_hex, const char *field, double value,
             } else if (floor_day(m->last_ts) < d0_now) {
                 // Realnie przekroczylismy polnoc przy pracujacym module.
                 m->day_base_total = m->last_total;  m->day_base_ts = d0_now;
-            } else if (m->day_base_ts == 0) {
+            } else if (m->day_base_ts == 0 && !m->rebased) {
                 // Baza NIEZNANA mimo trwajacej doby - tak jest po aktualizacji
                 // firmware lub resecie fabrycznym w srodku dnia. Kubelki
                 // godzinowe i dobowe trzymaja OSTATNIA wartosc, wiec nie da sie
@@ -1574,7 +1570,10 @@ int history_get_day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf
                 uint32_t gap_h = (s_day_buf[i].ts - ref->ts) / 3600;
                 float delta = s_day_buf[i].total - ref->total;
                 if (delta < 0) delta = 0;
-                if (gap_h <= 1) {
+                bool restore_edge = (m && m->rebase_ts &&
+                                     ref->ts < m->rebase_ts &&
+                                     s_day_buf[i].ts + 3600 > m->rebase_ts);
+                if (gap_h <= 1 || restore_edge) {
                     n += snprintf(buf + n, buf_cap - n, "%s{\"t\":%u,\"v\":%.3f}",
                                   first ? "" : ",", (unsigned)s_day_buf[i].ts, delta);
                     first = false;

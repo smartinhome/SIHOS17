@@ -11,6 +11,8 @@
 #include "display_eink.h"
 #include "log_buffer.h"
 #include "esp_heap_caps.h"
+#include <time.h>
+#include <stdlib.h>
 
 #include "nvs_flash.h"
 #include "esp_log.h"
@@ -23,6 +25,12 @@ static const char *TAG = "MAIN";
 
 void app_main(void) {
     log_buffer_init();
+    // Strefa czasowa RAZ, na samym starcie. Wczesniej ustawialy ja tylko dwie
+    // sciezki warunkowe (polaczenie z siecia domowa oraz pierwsze ustawienie
+    // czasu z przegladarki), wiec w trybie AP - albo po restarcie z zachowanym
+    // zegarem - zostawal czas uniwersalny i godzina byla o 2 h za mala.
+    setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3", 1);   // Polska, z automatycznym DST
+    tzset();
     ESP_LOGI(TAG, "SIH wMbus Reader v%s — start", FW_VERSION_STR);
 
     // NVS

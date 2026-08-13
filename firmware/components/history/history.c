@@ -3,6 +3,7 @@
 #include "esp_log.h"
 #include <string.h>
 #include <errno.h>
+#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
@@ -671,6 +672,53 @@ static void tracked_load(void) {
         }
     }
     fclose(f);
+}
+
+void history_erase_all(void) {
+    // Reset fabryczny: kasuje CALA historie z flasha i liste sledzonych.
+    // Konfiguracja siedzi w NVS (nvs_config_reset), ale historia to osobny
+    // system plikow - bez tego po resecie zostawaly wykresy i zaznaczone pola.
+    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
+
+    // 1. zwolnij sloty w RAM, zeby nic sie nie zapisalo z powrotem
+    for (int i = 0; i < MAX_HIST_METERS; i++) {
+        if (s_meters[i]) {
+            free_curve(s_meters[i]);
+            free(s_meters[i]);
+            s_meters[i] = NULL;
+        }
+    }
+    s_tracked_count = 0;
+    memset(s_tracked, 0, sizeof(s_tracked));
+
+    // 2. skasuj pliki historii i liste sledzonych
+    int removed = 0;
+    if (s_fs_ok) {
+        DIR *dir = opendir("/spiffs");
+        if (dir) {
+            struct dirent *de;
+            char victims[40][40];
+            int nv = 0;
+            while ((de = readdir(dir)) != NULL && nv < 40) {
+                const char *nm = de->d_name;
+                if (strncmp(nm, "h_", 2) == 0 || strncmp(nm, "ha_", 3) == 0 ||
+                    strcmp(nm, "tracked.txt") == 0 || strncmp(nm, "arc_", 4) == 0) {
+                    snprintf(victims[nv], sizeof(victims[0]), "%s", nm);
+                    nv++;
+                }
+            }
+            closedir(dir);
+            // kasujemy PO zamknieciu katalogu - usuwanie w trakcie readdir
+            // potrafi pominac wpisy
+            for (int i = 0; i < nv; i++) {
+                char path[64];
+                snprintf(path, sizeof(path), "/spiffs/%.50s", victims[i]);
+                if (remove(path) == 0) removed++;
+            }
+        }
+    }
+    if (s_mutex) xSemaphoreGive(s_mutex);
+    ESP_LOGW(TAG, "Reset fabryczny: skasowano %d plikow historii", removed);
 }
 
 size_t history_free_curves(void) {

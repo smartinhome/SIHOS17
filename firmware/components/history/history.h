@@ -70,6 +70,9 @@ bool history_fs_ok(void);
 // Zwalnia bufory krzywych minutowych (odzyskuje RAM np. przed OTA).
 // Zwraca liczbe zwolnionych bajtow. Dane godzinowe pozostaja nietkniete.
 size_t history_free_curves(void);
+
+// Reset fabryczny: kasuje cala historie z flasha oraz liste sledzonych pol.
+void history_erase_all(void);
 // Ile pozycji zajetych / ile maksymalnie na liscie sledzonych.
 void history_tracked_limits(int *used, int *max);
 bool history_is_tracked(const char *id_hex);

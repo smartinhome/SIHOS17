@@ -806,6 +806,9 @@ static esp_err_t handle_restart(httpd_req_t *req) {
 static esp_err_t handle_factory_reset(httpd_req_t *req) {
     resp_ok(req);
     vTaskDelay(pdMS_TO_TICKS(500));
+    // Historia i lista sledzonych pol leza na OSOBNYM systemie plikow, nie w NVS -
+    // bez tego po resecie zostawaly wykresy i zaznaczone wartosci.
+    history_erase_all();
     nvs_config_reset();   // kasuje cala konfiguracje (liczniki, klucze, wifi, dashboard)
     esp_restart();
     return ESP_OK;

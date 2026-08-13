@@ -82,6 +82,9 @@ static uint32_t floor_hour(uint32_t t)  { return t - (t % 3600); }
 // Amiplus ma ~10 pol chwilowych; bez tego progu zaznaczenie ich wszystkich
 // zjadloby ponad 100 KB i wywrocilo moduł. Brak krzywej nie psuje wykresu -
 // dzien rysuje sie wtedy z kubelkow godzinowych (grubsza rozdzielczosc).
+// Bufor na JSON doby przy liczeniu sumy dla e-ink: max ~48 slupkow po ~30 B.
+#define DAY_SUM_BUF 3072
+
 #define CURVE_HEAP_RESERVE (60 * 1024)
 
 static bool ensure_curve(meter_hist_t *m) {
@@ -574,6 +577,11 @@ static void save_meter(meter_hist_t *m) {
     fwrite(&m->n_curve, sizeof(int), 1, f);      // krzywa dnia (pola chwilowe)
     if (m->curve && m->n_curve > 0)
         fwrite(m->curve, sizeof(hist_bucket_t), m->n_curve, f);
+    // Baza doby NA KONCU pliku (stare h_*.bin nadal sie wczytuja). Musi przezyc
+    // restart: bez niej modul uruchomiony ponownie w srodku doby nie ma od czego
+    // liczyc zuzycia i wykres dnia byl pusty.
+    fwrite(&m->day_base_ts, sizeof(uint32_t), 1, f);
+    fwrite(&m->day_base_total, sizeof(float), 1, f);
     fclose(f);
     m->last_save_ts = m->last_ts;
 }
@@ -619,6 +627,12 @@ static bool load_meter(meter_hist_t *m, const char *id) {
         }
     } else {
         m->n_curve = 0;
+    }
+    // Baza doby - dopisana na koncu w nowszych wersjach; brak w starym pliku = 0.
+    if (fread(&m->day_base_ts, sizeof(uint32_t), 1, f) != 1 ||
+        fread(&m->day_base_total, sizeof(float), 1, f) != 1) {
+        m->day_base_ts = 0;
+        m->day_base_total = 0;
     }
     fclose(f);
     return true;
@@ -736,6 +750,29 @@ size_t history_free_curves(void) {
     if (s_mutex) xSemaphoreGive(s_mutex);
     ESP_LOGI(TAG, "Zwolniono %u B buforow krzywych (OTA)", (unsigned)freed);
     return freed;
+}
+
+// Suma zuzycia za dobe liczona DOKLADNIE tak, jak rysuje ja panel: przez
+// wywolanie tej samej funkcji, ktora buduje wykres, i zsumowanie slupkow.
+// Dzieki temu e-ink i UI nie moga sie rozjechac - nie ma dwoch algorytmow.
+bool history_day_sum(const char *key, uint32_t day_ts, float *out_sum) {
+    if (!key || !out_sum) return false;
+    char *buf = malloc(DAY_SUM_BUF);
+    if (!buf) return false;
+    int n = history_get_day_json(key, day_ts, buf, DAY_SUM_BUF);
+    if (n <= 0) { free(buf); return false; }
+    float sum = 0;
+    bool any = false;
+    const char *p = buf;
+    while ((p = strstr(p, "\"v\":")) != NULL) {
+        sum += (float)atof(p + 4);
+        any = true;
+        p += 4;
+    }
+    free(buf);
+    if (!any) return false;
+    *out_sum = sum;
+    return true;
 }
 
 bool history_fs_ok(void) { return s_fs_ok; }
@@ -1705,7 +1742,33 @@ bool history_display_summary(const char *key, hist_display_t *out) {
         }
     }
 
+    bool cumul = m->cumulative;
     if (s_mutex) xSemaphoreGive(s_mutex);
+
+    // JEDNO ZRODLO PRAWDY: dla licznikow kumulacyjnych zuzycie dzis/wczoraj
+    // bierzemy z tej samej funkcji, ktora rysuje wykres w panelu. Wczesniej
+    // e-ink liczyl po swojemu i obie strony potrafily pokazac co innego.
+    // Wywolanie MUSI byc poza sekcja krytyczna - history_get_day_json samo
+    // zaklada blokade.
+    if (cumul) {
+        uint32_t now_ts = (uint32_t)time(NULL);
+        float v;
+        if (history_day_sum(key, now_ts, &v)) {
+            out->today = v; out->has_today = true;
+        } else {
+            out->today = 0; out->has_today = out->has_value;
+        }
+        if (history_day_sum(key, now_ts - 86400, &v)) {
+            out->yesterday = v; out->has_yesterday = true;
+        } else {
+            out->has_yesterday = false;
+        }
+        if (history_day_sum(key, now_ts - 2 * 86400, &v)) {
+            out->day_before = v; out->has_day_before = true;
+        } else {
+            out->has_day_before = false;
+        }
+    }
     return true;
 }
 

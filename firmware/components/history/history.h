@@ -67,6 +67,9 @@ void history_set_tracked(const char *id_hex, bool tracked);
 // Czy system plikow historii jest sprawny (false = nic sie nie zapisze).
 bool history_fs_ok(void);
 
+// Suma zuzycia za dobe - liczona tak samo jak slupki wykresu w panelu.
+bool history_day_sum(const char *key, uint32_t day_ts, float *out_sum);
+
 // Zwalnia bufory krzywych minutowych (odzyskuje RAM np. przed OTA).
 // Zwraca liczbe zwolnionych bajtow. Dane godzinowe pozostaja nietkniete.
 size_t history_free_curves(void);

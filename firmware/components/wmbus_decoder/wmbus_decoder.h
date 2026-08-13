@@ -42,6 +42,8 @@ typedef struct {
 void          wmbus_decoder_init(void);
 void          wmbus_decoder_on_frame(const wmbus_frame_t *frame);
 int           wmbus_decoder_get_count(void);
+// Ile ROZNYCH licznikow uslyszano w eterze (nie tylko 8 aktywnych slotow).
+int           wmbus_decoder_get_seen_count(void);
 meter_data_t *wmbus_decoder_get_meter(int index);
 meter_data_t *wmbus_decoder_find_by_id(const char *id_hex);
 

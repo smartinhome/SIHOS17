@@ -726,7 +726,7 @@ static void draw_diag(void) {
 
     // Ile licznikow modul juz uslyszal w eterze (odswiezane co minute razem
     // z cala strona diagnostyczna).
-    int det = wmbus_decoder_get_count();
+    int det = wmbus_decoder_get_seen_count();
     char dl[40];
     if (det == 0) {
         snprintf(dl, sizeof(dl), "Nasluchuje - brak licznikow");

@@ -342,7 +342,7 @@ static esp_err_t handle_system(httpd_req_t *req) {
         (unsigned)flash_size, (unsigned)app_part_size,
         temp_ok ? temp_c : 0.0f, temp_ok ? "true" : "false",
         mac_str, (unsigned)task_count, (long long)uptime_s,
-        wifi_manager_get_rssi(), sys_ip, wmbus_decoder_get_count(),
+        wifi_manager_get_rssi(), sys_ip, wmbus_decoder_get_seen_count(),
         reset_reason_str(),
         app->idf_ver, app->date, app->time, app->version
     );
@@ -370,7 +370,7 @@ static esp_err_t handle_status(httpd_req_t *req) {
         scfg.wifi_ssid,
         wifi_manager_last_disc_reason(),
         ip,
-        wmbus_decoder_get_count(),
+        wmbus_decoder_get_seen_count(),
         ota_get_partition_label()
     );
     resp_json(req, buf);
@@ -381,7 +381,7 @@ static esp_err_t handle_meters(httpd_req_t *req) {
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     httpd_resp_sendstr_chunk(req, "[");
-    int count = wmbus_decoder_get_count();
+    int count = wmbus_decoder_get_count();   // petla po slotach z danymi
     for (int i = 0; i < count; i++) {
         meter_data_t *m = wmbus_decoder_get_meter(i);
         if (!m) continue;

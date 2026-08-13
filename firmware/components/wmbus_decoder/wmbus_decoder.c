@@ -20,6 +20,22 @@ static const char *TAG = "WMBUS";
 
 static meter_data_t  s_meters[MAX_ACTIVE_METERS] = {0};
 static int           s_meter_count = 0;
+
+// Rejestr WSZYSTKICH uslyszanych ID. s_meters[] ma tylko 8 slotow (pelne dane
+// pol), a w eterze slychac tez liczniki sasiadow - System pokazywal wiec
+// zanizona liczbe. Tu trzymamy same identyfikatory: 64 x 9 B = 576 B.
+#define MAX_SEEN_IDS 64
+static char          s_seen[MAX_SEEN_IDS][9];
+static int           s_seen_count = 0;
+
+static void seen_add(const char *id_hex) {
+    if (!id_hex || !id_hex[0]) return;
+    for (int i = 0; i < s_seen_count; i++)
+        if (strcasecmp(s_seen[i], id_hex) == 0) return;
+    if (s_seen_count >= MAX_SEEN_IDS) return;
+    snprintf(s_seen[s_seen_count], sizeof(s_seen[0]), "%.8s", id_hex);
+    s_seen_count++;
+}
 static SemaphoreHandle_t s_mutex = NULL;
 
 // Bufor pierścieniowy surowych ramek
@@ -211,6 +227,8 @@ void wmbus_decoder_on_frame(const wmbus_frame_t *frame) {
         return;
     }
 
+    seen_add(tmp.id_hex);   // licz KAZDY uslyszany licznik, nie tylko 8 aktywnych
+
     // Sygnalizuj w logach jesli licznik zaszyfrowany a brak klucza
     check_encryption_key(frame->data, frame->len, tmp.id_hex);
 
@@ -255,6 +273,8 @@ void wmbus_decoder_on_frame(const wmbus_frame_t *frame) {
 }
 
 int wmbus_decoder_get_count(void) { return s_meter_count; }
+
+int wmbus_decoder_get_seen_count(void) { return s_seen_count; }
 
 meter_data_t *wmbus_decoder_get_meter(int index) {
     if (index < 0 || index >= s_meter_count) return NULL;

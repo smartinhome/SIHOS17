@@ -1535,11 +1535,9 @@ int history_get_day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf
     }
 
     // Wypisz punkty (zuzycie = roznica wzgledem poprzedniej godziny dla kumulacyjnych).
-    // Gdy miedzy odczytami jest luka (np. restart przy aktualizacji) krotsza niz
-    // GAP_FILL_MAX_H godzin, rozkladamy przyrost rownomiernie na godziny luki i
-    // emitujemy punkt dla kazdej brakujacej godziny (mieszczacej sie w dobie) -
-    // eliminuje artefakt jednego mikroskopijnego slupka po restarcie.
-    const uint32_t GAP_FILL_MAX_H = 6;
+    // Luki NIE sa rozkladane na godziny: godziny bez ramek zostaja puste, a caly
+    // przyrost z przerwy doliczany jest do pierwszego odczytu po niej. Dzieki temu
+    // na wykresie widac, kiedy modul nie pracowal.
     bool first = true;
     for (int i = 0; i < nb && n < buf_cap - 60; i++) {
         if (cumulative) {
@@ -1557,7 +1555,12 @@ int history_get_day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf
             // polnocy. Jest dokladniejszy (stan dokladnie o polnocy, a nie o 23:00)
             // i po przywroceniu kopii to jedyna wiarygodna wartosc - wczorajszy
             // kubelek pochodzi sprzed kopii i odnosi sie do innego stanu licznika.
-            if (i == 0 && m && m->day_base_ts == d0) {
+            // Punkt odniesienia doby tylko GDY BRAK kubelka sprzed polnocy.
+            // Wczesniej mial pierwszenstwo zawsze - a po aktualizacji firmware
+            // w srodku dnia jest ustawiany na biezacy odczyt, wiec pierwszy
+            // slupek wychodzil ujemny i znikal (godzina 00:00 pokazywala zero).
+            // Gdy kubelek sprzed polnocy istnieje, jest dokladniejszy.
+            if (!ref && i == 0 && m && m->day_base_ts == d0) {
                 float delta0 = s_day_buf[0].total - m->day_base_total;
                 if (delta0 < 0) delta0 = 0;
                 n += snprintf(buf + n, buf_cap - n, "%s{\"t\":%u,\"v\":%.3f}",
@@ -1570,26 +1573,13 @@ int history_get_day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf
                 uint32_t gap_h = (s_day_buf[i].ts - ref->ts) / 3600;
                 float delta = s_day_buf[i].total - ref->total;
                 if (delta < 0) delta = 0;
-                bool restore_edge = (m && m->rebase_ts &&
-                                     ref->ts < m->rebase_ts &&
-                                     s_day_buf[i].ts + 3600 > m->rebase_ts);
-                if (gap_h <= 1 || restore_edge) {
-                    n += snprintf(buf + n, buf_cap - n, "%s{\"t\":%u,\"v\":%.3f}",
-                                  first ? "" : ",", (unsigned)s_day_buf[i].ts, delta);
-                    first = false;
-                } else if (gap_h <= GAP_FILL_MAX_H) {
-                    // Rozloz rownomiernie; emituj punkt dla kazdej godziny luki
-                    // ktora wpada w wybrana dobe [d0,d1).
-                    float per = delta / (float)gap_h;
-                    for (uint32_t g = 1; g <= gap_h && n < buf_cap - 60; g++) {
-                        uint32_t tg = ref->ts + g * 3600;
-                        if (tg < d0 || tg >= d1) continue;
-                        n += snprintf(buf + n, buf_cap - n, "%s{\"t\":%u,\"v\":%.3f}",
-                                      first ? "" : ",", (unsigned)tg, per);
-                        first = false;
-                    }
-                } else {
-                    // Luka za dluga (np. modul wylaczony) - nie rozkladaj, jeden punkt.
+                (void)gap_h;
+                // ZAWSZE jeden slupek w godzinie, w ktorej wrocil odczyt - takze
+                // po przerwie. Rozkladanie przyrostu po godzinach luki zostalo
+                // usuniete: godziny bez ramek maja pozostac puste, zeby bylo
+                // widac, kiedy modul nie pracowal, a cale zuzycie z przerwy
+                // doliczamy do pierwszego odczytu po niej.
+                {
                     n += snprintf(buf + n, buf_cap - n, "%s{\"t\":%u,\"v\":%.3f}",
                                   first ? "" : ",", (unsigned)s_day_buf[i].ts, delta);
                     first = false;
@@ -1656,7 +1646,6 @@ static bool day_sum_from_hours_ex(const meter_hist_t *m, uint32_t d0,
     if (!m || m->n_hours == 0) return false;
     if (need_cover && m->hours[0].ts > d0) return false;
     uint32_t d1 = d0 + 86400;
-    const uint32_t GAP_FILL_MAX_H = 6;
     float sum = 0;
     int counted = 0;
     const hist_bucket_t *ref = NULL;
@@ -1669,17 +1658,10 @@ static bool day_sum_from_hours_ex(const meter_hist_t *m, uint32_t d0,
             uint32_t gap_h = (b->ts - ref->ts) / 3600;
             float delta = b->total - ref->total;
             if (delta < 0) delta = 0;
-            if (gap_h <= 1) {
-                sum += delta;
-            } else if (gap_h <= GAP_FILL_MAX_H) {
-                float per = delta / (float)gap_h;
-                for (uint32_t g = 1; g <= gap_h; g++) {
-                    uint32_t tg = ref->ts + g * 3600;
-                    if (tg >= d0 && tg < d1) sum += per;
-                }
-            } else {
-                sum += delta;
-            }
+            // Bez rozkladania na godziny luki - caly przyrost liczy sie do
+            // godziny, w ktorej wrocil odczyt (spojnie z wykresem).
+            (void)gap_h;
+            sum += delta;
         }
         ref = b;
     }

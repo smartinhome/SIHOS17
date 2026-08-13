@@ -922,6 +922,16 @@ static esp_err_t handle_backup_post(httpd_req_t *req) {
     cfg.meter_count = mc;
     p += mlen;
     nvs_config_save(&cfg);
+
+    // WYCZYSC dotychczasowa historie PRZED wgraniem kopii. Kopia zawiera pliki
+    // biezacej historii (h_) i liste sledzonych, ale NIE archiwa (ha_) - te sa
+    // za duze. Bez czyszczenia stare archiwum zostawalo na flashu i przy
+    // budowaniu wykresu bylo SCALANE z przywroconymi danymi: stany licznika z
+    // dwoch roznych momentow dawaly absurdalne slupki (setki litrow w godzinach,
+    // w ktorych nic sie nie dzialo). Czyscimy tez sloty w RAM, zeby nie zapisaly
+    // sie z powrotem w chwili miedzy odpowiedzia a restartem.
+    history_erase_all();
+
     // pliki historii
     int restored = 0;
     while (p < total) {

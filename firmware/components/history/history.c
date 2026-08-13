@@ -1058,8 +1058,21 @@ void history_on_field(const char *id_hex, const char *field, double value,
             } else if (floor_day(m->last_ts) < d0_now) {
                 // Realnie przekroczylismy polnoc przy pracujacym module.
                 m->day_base_total = m->last_total;  m->day_base_ts = d0_now;
+            } else if (m->day_base_ts == 0) {
+                // Baza NIEZNANA mimo trwajacej doby - tak jest po aktualizacji
+                // firmware lub resecie fabrycznym w srodku dnia. Kubelki
+                // godzinowe i dobowe trzymaja OSTATNIA wartosc, wiec nie da sie
+                // z nich odtworzyc stanu sprzed godziny - stad zera na wykresie
+                // i na e-inku az do polnocy. Jedyne zrodlo wczesniejszych
+                // wartosci to bufor odczytow na zywo: bierzemy z niego najstarszy
+                // pomiar biezacej doby.
+                float base = ft;
+                for (int k = 0; k < m->n_rt; k++)
+                    if (m->rt[k].ts >= d0_now && m->rt[k].total < base)
+                        base = m->rt[k].total;
+                m->day_base_total = base;
+                m->day_base_ts    = d0_now;
             }
-            // Restart w srodku dnia: baza NIEZNANA - celowo nie ustawiamy.
         }
     }
     m->last_total = ft;

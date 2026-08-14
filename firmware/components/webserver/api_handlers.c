@@ -822,7 +822,7 @@ static esp_err_t handle_factory_reset(httpd_req_t *req) {
 //     [1B len nazwy][nazwa][4B len danych][dane]
 //   [1B 0x00 = koniec listy plikow]
 #define BACKUP_MAGIC "SBAK"
-#define BACKUP_VER   2
+#define BACKUP_VER   3   // v3: doszly przypiecia do dashboardu i nazwy licznikow
 
 // helper: dopisz do bufora z kontrola pojemnosci
 static int buf_append(char *buf, int *pos, int cap, const void *data, int len) {
@@ -850,6 +850,22 @@ static esp_err_t handle_backup_get(httpd_req_t *req) {
     uint32_t mlen = (uint32_t)mc * sizeof(meter_config_t);
     buf_append(buf, &pos, cap, &mlen, 4);
     buf_append(buf, &pos, cap, cfg.meters, mlen);
+    // Przypiecia do dashboardu i wlasne nazwe licznikow - bez nich po
+    // przywroceniu trzeba bylo wszystko przypinac i nazywac od nowa.
+    {
+        uint8_t np = 0, nn = 0;
+        for (int i = 0; i < MAX_PINS; i++) {
+            if (cfg.pins[i][0]) np++;
+            if (cfg.names[i].id_hex[0] && cfg.names[i].name[0]) nn++;
+        }
+        buf_append(buf, &pos, cap, &np, 1);
+        for (int i = 0; i < MAX_PINS; i++)
+            if (cfg.pins[i][0]) buf_append(buf, &pos, cap, cfg.pins[i], 12);
+        buf_append(buf, &pos, cap, &nn, 1);
+        for (int i = 0; i < MAX_PINS; i++)
+            if (cfg.names[i].id_hex[0] && cfg.names[i].name[0])
+                buf_append(buf, &pos, cap, &cfg.names[i], sizeof(cfg.names[0]));
+    }
     // pliki historii z /spiffs (h_*.bin oraz tracked)
     DIR *dir = opendir("/spiffs");
     if (dir) {
@@ -905,7 +921,10 @@ static esp_err_t handle_backup_post(httpd_req_t *req) {
     }
     int p = 4;
     uint8_t ver = (uint8_t)buf[p]; p += 1;
-    if (ver != BACKUP_VER) { resp_err(req, "zla wersja kopii"); free(buf); return ESP_OK; }
+    // v2 (bez przypiec i nazw) nadal wczytujemy - starsze kopie maja dzialac.
+    if (ver != 2 && ver != BACKUP_VER) {
+        resp_err(req, "zla wersja kopii"); free(buf); return ESP_OK;
+    }
     // tylko definicje licznikow - wczytaj do ISTNIEJACEJ konfiguracji, nie ruszajac
     // WiFi, diod, AP, czestotliwosci, przypiec ani nazw.
     uint8_t mc = (uint8_t)buf[p]; p += 1;
@@ -921,6 +940,30 @@ static esp_err_t handle_backup_post(httpd_req_t *req) {
     memcpy(cfg.meters, buf + p, mlen);     // podmien tylko liczniki
     cfg.meter_count = mc;
     p += mlen;
+    // Przypiecia i nazwy - tylko w formacie v3. Przy v2 zostawiamy
+    // dotychczasowe, zeby stara kopia ich nie kasowala.
+    if (ver >= 3 && p + 1 <= total) {
+        uint8_t np = (uint8_t)buf[p]; p += 1;
+        if (np > MAX_PINS) np = MAX_PINS;
+        memset(cfg.pins, 0, sizeof(cfg.pins));
+        for (int i = 0; i < np && p + 12 <= total; i++) {
+            memcpy(cfg.pins[i], buf + p, 12);
+            cfg.pins[i][11] = 0;
+            p += 12;
+        }
+    }
+    if (ver >= 3 && p + 1 <= total) {
+        uint8_t nn = (uint8_t)buf[p]; p += 1;
+        if (nn > MAX_PINS) nn = MAX_PINS;
+        memset(cfg.names, 0, sizeof(cfg.names));
+        for (int i = 0; i < nn && p + (int)sizeof(cfg.names[0]) <= total; i++) {
+            memcpy(&cfg.names[i], buf + p, sizeof(cfg.names[0]));
+            cfg.names[i].id_hex[sizeof(cfg.names[0].id_hex) - 1] = 0;
+            cfg.names[i].name[sizeof(cfg.names[0].name) - 1] = 0;
+            p += sizeof(cfg.names[0]);
+        }
+    }
+    if (ver >= 3) cfg.pins_migrated = true;   // kopia niesie juz nowy format
     nvs_config_save(&cfg);
 
     // WYCZYSC dotychczasowa historie PRZED wgraniem kopii. Kopia zawiera pliki

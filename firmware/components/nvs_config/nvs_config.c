@@ -151,13 +151,13 @@ void nvs_config_set_meter_name(const char *id_hex, const char *name) {
     if (idx >= 0) {
         if (empty) {
             // Kasuj wpis (pusta nazwa = powrot do ID).
-            memset(&g_cfg.meter_names[idx], 0, sizeof(g_cfg.names[idx]));
+            memset(&g_cfg.names[idx], 0, sizeof(g_cfg.names[idx]));
         } else {
-            strlcpy(g_cfg.meter_names[idx].name, name, sizeof(g_cfg.names[idx].name));
+            strlcpy(g_cfg.names[idx].name, name, sizeof(g_cfg.names[idx].name));
         }
     } else if (!empty && free_idx >= 0) {
-        strlcpy(g_cfg.meter_names[free_idx].id_hex, id_hex, sizeof(g_cfg.names[free_idx].id_hex));
-        strlcpy(g_cfg.meter_names[free_idx].name, name, sizeof(g_cfg.names[free_idx].name));
+        strlcpy(g_cfg.names[free_idx].id_hex, id_hex, sizeof(g_cfg.names[free_idx].id_hex));
+        strlcpy(g_cfg.names[free_idx].name, name, sizeof(g_cfg.names[free_idx].name));
     } else if (!empty) {
         ESP_LOGW(TAG, "Brak miejsca na nazwe licznika %s", id_hex);
         return;

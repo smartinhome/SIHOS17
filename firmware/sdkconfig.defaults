@@ -26,7 +26,9 @@ CONFIG_NVS_ENCRYPTION=n
 
 # Stos tasku main - sih_config_t (~970B) kopiowany na stos w wifi/ota,
 # domyslne 3584B za malo -> stack protection fault. Zwiekszamy do 8KB.
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+# 12 kB zamiast 8 kB: zapas na wypadek duzych ramek stosu podczas startu
+# (konfiguracja urosla do ponad 3 kB po rozszerzeniu przypiec do 32).
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=12288
 
 # Log
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y

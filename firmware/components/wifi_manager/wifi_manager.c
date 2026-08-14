@@ -101,7 +101,7 @@ static void start_ap(const sih_config_t *cfg) {
 
 void wifi_manager_init(void) {
     s_wifi_eg = xEventGroupCreate();
-    sih_config_t cfg = nvs_config_get();
+    const sih_config_t *cfg = nvs_config_ptr();
 
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
                                                &event_handler, NULL));
@@ -112,17 +112,17 @@ void wifi_manager_init(void) {
     ESP_ERROR_CHECK(esp_wifi_init(&init_cfg));
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
 
-    if (strlen(cfg.wifi_ssid) == 0) {
+    if (strlen(cfg->wifi_ssid) == 0) {
         ESP_LOGW(TAG, "Brak SSID — start w trybie AP");
-        start_ap(&cfg);
+        start_ap(cfg);
         return;
     }
 
     s_sta_netif = esp_netif_create_default_wifi_sta();
     esp_netif_set_hostname(s_sta_netif, "sih-wmbus");
     wifi_config_t sta_cfg = {0};
-    strlcpy((char *)sta_cfg.sta.ssid,     cfg.wifi_ssid, sizeof(sta_cfg.sta.ssid));
-    strlcpy((char *)sta_cfg.sta.password, cfg.wifi_pass,  sizeof(sta_cfg.sta.password));
+    strlcpy((char *)sta_cfg.sta.ssid,     cfg->wifi_ssid, sizeof(sta_cfg.sta.ssid));
+    strlcpy((char *)sta_cfg.sta.password, cfg->wifi_pass,  sizeof(sta_cfg.sta.password));
 
     s_sta_autoconnect = true;
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
@@ -139,7 +139,7 @@ void wifi_manager_init(void) {
     if (!(bits & WIFI_CONNECTED_BIT)) {
         ESP_LOGW(TAG, "STA failed — fallback AP");
         esp_wifi_stop();
-        start_ap(&cfg);
+        start_ap(cfg);
     }
 }
 

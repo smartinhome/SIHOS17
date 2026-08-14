@@ -130,11 +130,11 @@ static void add_field(meter_data_t *m, const char *field,
 
 // Mapuj typ z konfiguracji na nazwę
 static void apply_config(meter_data_t *m) {
-    sih_config_t cfg = nvs_config_get();
-    for (int i = 0; i < cfg.meter_count; i++) {
-        if (strcasecmp(cfg.meters[i].id_hex, m->id_hex) == 0) {
-            strlcpy(m->type, cfg.meters[i].type, sizeof(m->type));
-            strlcpy(m->name, cfg.meters[i].name, sizeof(m->name));
+    const sih_config_t *cfg = nvs_config_ptr();
+    for (int i = 0; i < cfg->meter_count; i++) {
+        if (strcasecmp(cfg->meters[i].id_hex, m->id_hex) == 0) {
+            strlcpy(m->type, cfg->meters[i].type, sizeof(m->type));
+            strlcpy(m->name, cfg->meters[i].name, sizeof(m->name));
             return;
         }
     }
@@ -190,11 +190,11 @@ static void check_encryption_key(const uint8_t *data, size_t len, const char *id
     if (!meter_total_needs_key(data, len)) return;
 
     // Sprawdz czy jest klucz w konfiguracji dla tego ID
-    sih_config_t cfg = nvs_config_get();
+    const sih_config_t *cfg = nvs_config_ptr();
     bool has_key = false;
-    for (int i = 0; i < cfg.meter_count; i++) {
-        if (strcasecmp(cfg.meters[i].id_hex, id) == 0) {
-            if (strlen(cfg.meters[i].key) >= 32) has_key = true;
+    for (int i = 0; i < cfg->meter_count; i++) {
+        if (strcasecmp(cfg->meters[i].id_hex, id) == 0) {
+            if (strlen(cfg->meters[i].key) >= 32) has_key = true;
             break;
         }
     }
@@ -255,10 +255,10 @@ void wmbus_decoder_on_frame(const wmbus_frame_t *frame) {
     // --- HISTORIA 24/7: wyciagnij wszystkie pola i zapisz sledzone ---
     {
         const char *key_hex = "";
-        sih_config_t cfg = nvs_config_get();
-        for (int i = 0; i < cfg.meter_count; i++) {
-            if (strcasecmp(cfg.meters[i].id_hex, tmp.id_hex) == 0) {
-                key_hex = cfg.meters[i].key;
+        const sih_config_t *cfg = nvs_config_ptr();
+        for (int i = 0; i < cfg->meter_count; i++) {
+            if (strcasecmp(cfg->meters[i].id_hex, tmp.id_hex) == 0) {
+                key_hex = cfg->meters[i].key;
                 break;
             }
         }

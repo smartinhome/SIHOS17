@@ -60,6 +60,12 @@ void        nvs_config_set_meter_name(const char *id_hex, const char *name);
 
 void         nvs_config_init(void);
 sih_config_t nvs_config_get(void);
+// Wskaznik do konfiguracji BEZ kopiowania. nvs_config_get() zwraca cala
+// strukture przez wartosc (ponad 3 kB po rozszerzeniu przypiec do 32), co
+// przepelnialo stos zadania startowego i zadania odbioru ramek. Do odczytu
+// uzywaj tego akcesora; kopii potrzebuja tylko miejsca, ktore modyfikuja
+// konfiguracje przed nvs_config_save().
+const sih_config_t *nvs_config_ptr(void);
 void         nvs_config_save(const sih_config_t *cfg);
 void         nvs_config_reset(void);
 

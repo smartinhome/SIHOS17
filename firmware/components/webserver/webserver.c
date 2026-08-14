@@ -47,7 +47,9 @@ static esp_err_t favicon_handler(httpd_req_t *req) {
 void webserver_init(void) {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.max_uri_handlers = 40;   // 35 endpointow (api_handlers 33 + / + favicon) z zapasem
-    cfg.stack_size       = 8192;
+    // 12 kB: handlery robia lokalna KOPIE konfiguracji (ponad 3 kB po
+    // rozszerzeniu przypiec do 32), bo modyfikuja ja przed zapisem.
+    cfg.stack_size       = 12288;
     cfg.lru_purge_enable = true;
     cfg.max_open_sockets = 7;   // limit gniazd httpd; reszta z puli LWIP wolna dla OTA
     ESP_ERROR_CHECK(httpd_start(&s_server, &cfg));

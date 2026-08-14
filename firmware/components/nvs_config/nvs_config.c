@@ -102,6 +102,8 @@ sih_config_t nvs_config_get(void) {
     return g_cfg;
 }
 
+const sih_config_t *nvs_config_ptr(void) { return &g_cfg; }
+
 void nvs_config_save(const sih_config_t *cfg) {
     memcpy(&g_cfg, cfg, sizeof(sih_config_t));
     nvs_handle_t h;

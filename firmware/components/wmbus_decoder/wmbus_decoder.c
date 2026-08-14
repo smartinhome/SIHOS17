@@ -25,16 +25,36 @@ static int           s_meter_count = 0;
 // pol), a w eterze slychac tez liczniki sasiadow - System pokazywal wiec
 // zanizona liczbe. Tu trzymamy same identyfikatory: 64 x 9 B = 576 B.
 #define MAX_SEEN_IDS 64
-static char          s_seen[MAX_SEEN_IDS][9];
-static int           s_seen_count = 0;
+// Licznik "znika" z zestawienia, gdy nie odezwie sie przez ten czas. Bez tego
+// wartosc tylko rosla i po testach w innej lokalizacji wisiala na maksimum.
+// 6 h jest bezpieczne nawet dla licznikow nadajacych raz na godzine.
+#define SEEN_TTL_MS (6UL * 3600UL * 1000UL)
+
+typedef struct {
+    char     id[9];
+    uint32_t last_ms;   // uptime ostatniej ramki
+} seen_t;
+static seen_t        s_seen[MAX_SEEN_IDS];
+static int           s_seen_used = 0;   // ile pozycji tablicy jest w uzyciu
 
 static void seen_add(const char *id_hex) {
     if (!id_hex || !id_hex[0]) return;
-    for (int i = 0; i < s_seen_count; i++)
-        if (strcasecmp(s_seen[i], id_hex) == 0) return;
-    if (s_seen_count >= MAX_SEEN_IDS) return;
-    snprintf(s_seen[s_seen_count], sizeof(s_seen[0]), "%.8s", id_hex);
-    s_seen_count++;
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    for (int i = 0; i < s_seen_used; i++)
+        if (strcasecmp(s_seen[i].id, id_hex) == 0) { s_seen[i].last_ms = now_ms; return; }
+    if (s_seen_used < MAX_SEEN_IDS) {
+        snprintf(s_seen[s_seen_used].id, sizeof(s_seen[0].id), "%.8s", id_hex);
+        s_seen[s_seen_used].last_ms = now_ms;
+        s_seen_used++;
+        return;
+    }
+    // Tablica pelna - nadpisz najdawniej slyszany wpis.
+    int oldest = 0;
+    for (int i = 1; i < MAX_SEEN_IDS; i++)
+        if ((uint32_t)(now_ms - s_seen[i].last_ms) > (uint32_t)(now_ms - s_seen[oldest].last_ms))
+            oldest = i;
+    snprintf(s_seen[oldest].id, sizeof(s_seen[0].id), "%.8s", id_hex);
+    s_seen[oldest].last_ms = now_ms;
 }
 static SemaphoreHandle_t s_mutex = NULL;
 
@@ -274,7 +294,14 @@ void wmbus_decoder_on_frame(const wmbus_frame_t *frame) {
 
 int wmbus_decoder_get_count(void) { return s_meter_count; }
 
-int wmbus_decoder_get_seen_count(void) { return s_seen_count; }
+int wmbus_decoder_get_seen_count(void) {
+    // Licz tylko te, ktore odezwaly sie w ostatnich SEEN_TTL_MS.
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    int n = 0;
+    for (int i = 0; i < s_seen_used; i++)
+        if ((uint32_t)(now_ms - s_seen[i].last_ms) <= SEEN_TTL_MS) n++;
+    return n;
+}
 
 meter_data_t *wmbus_decoder_get_meter(int index) {
     if (index < 0 || index >= s_meter_count) return NULL;

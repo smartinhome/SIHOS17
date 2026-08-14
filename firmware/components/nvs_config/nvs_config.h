@@ -4,6 +4,10 @@
 
 #define NVS_NAMESPACE "sih_cfg"
 #define MAX_METERS    8
+// Przypiecia i nazwy: osobny, wiekszy limit niz meters[] (klucze AES).
+// Scenariusz inkasenta/dozorcy: 20-30 licznikow w budynku, kazdy z wlasna
+// nazwa typu "Kwiatowa 5 m. 3", odczyt biezacego stanu z dashboardu.
+#define MAX_PINS      32
 
 typedef struct {
     char     id_hex[12];   // np. "56989134"
@@ -36,6 +40,18 @@ typedef struct {
     bool     led_only_pinned;   // mrugaj tylko dla licznikow z dashboardu
     uint16_t led_blink_ms;      // czas swiecenia po ramce (20-5000 ms, domyslnie 60)
     bool     logs_enabled;      // zakladka Logi widoczna (domyslnie false)
+    // --- Rozszerzone przypiecia i nazwy (MAX_PINS) ---
+    // Dopisane NA KONCU, a stare tablice zostaja nietkniete: konfiguracja jest
+    // zapisywana jako jeden blok, wiec powiekszenie tablic w srodku przesuneloby
+    // wszystkie kolejne pola i po aktualizacji OTA przepadlyby ustawienia.
+    // Przy pierwszym uruchomieniu stare wpisy sa tu przepisywane (patrz
+    // migrate_pins w nvs_config.c) i od tej pory uzywane sa juz tylko te.
+    bool     pins_migrated;
+    char     pins[MAX_PINS][12];               // ID przypietych do dashboardu
+    struct {
+        char id_hex[12];
+        char name[32];
+    } names[MAX_PINS];                         // wlasne nazwy licznikow
 } sih_config_t;
 
 // Pobierz/ustaw wlasna nazwe licznika po ID. Zwraca "" gdy brak.

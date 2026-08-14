@@ -463,21 +463,21 @@ static esp_err_t handle_dashboard(httpd_req_t *req) {
         ESP_LOGI(TAG, "DASH POST: id='%s' want=%d", id, want);
         // znajdz ID na liscie; slot pusty LUB ze smieciem (niepoprawne id) = wolny
         int idx = -1, freeIdx = -1;
-        for (int i = 0; i < MAX_METERS; i++) {
-            if (!valid_meter_id(cfg.dashboard_ids[i])) {
-                cfg.dashboard_ids[i][0] = 0;       // wyczysc smiec
+        for (int i = 0; i < MAX_PINS; i++) {
+            if (!valid_meter_id(cfg.pins[i])) {
+                cfg.pins[i][0] = 0;       // wyczysc smiec
                 if (freeIdx < 0) freeIdx = i;
-            } else if (strcasecmp(cfg.dashboard_ids[i], id) == 0) {
+            } else if (strcasecmp(cfg.pins[i], id) == 0) {
                 idx = i;
             }
         }
         ESP_LOGI(TAG, "DASH POST: idx=%d freeIdx=%d", idx, freeIdx);
         if (want && idx < 0 && freeIdx >= 0) {
-            strlcpy(cfg.dashboard_ids[freeIdx], id, sizeof(cfg.dashboard_ids[freeIdx]));
+            strlcpy(cfg.pins[freeIdx], id, sizeof(cfg.pins[freeIdx]));
             nvs_config_save(&cfg);
             ESP_LOGI(TAG, "DASH POST: ZAPISANO '%s' na pozycji %d", id, freeIdx);
         } else if (!want && idx >= 0) {
-            cfg.dashboard_ids[idx][0] = 0;
+            cfg.pins[idx][0] = 0;
             nvs_config_save(&cfg);
             ESP_LOGI(TAG, "DASH POST: USUNIETO z pozycji %d", idx);
         } else {
@@ -489,10 +489,10 @@ static esp_err_t handle_dashboard(httpd_req_t *req) {
     char buf[256];
     int pos = snprintf(buf, sizeof(buf), "{\"pinned\":[");
     bool first = true;
-    for (int i = 0; i < MAX_METERS; i++) {
-        if (valid_meter_id(cfg.dashboard_ids[i])) {
+    for (int i = 0; i < MAX_PINS; i++) {
+        if (valid_meter_id(cfg.pins[i])) {
             pos += snprintf(buf + pos, sizeof(buf) - pos, "%s\"%s\"",
-                            first ? "" : ",", cfg.dashboard_ids[i]);
+                            first ? "" : ",", cfg.pins[i]);
             first = false;
         }
     }
@@ -522,13 +522,13 @@ static esp_err_t handle_meter_name(httpd_req_t *req) {
     }
     // GET - zwroc mape ID -> nazwa (tylko wpisy z nazwa).
     sih_config_t cfg = nvs_config_get();
-    char buf[MAX_METERS * 48 + 4];
+    char buf[MAX_PINS * 48 + 4];
     int pos = snprintf(buf, sizeof(buf), "{");
     bool first = true;
-    for (int i = 0; i < MAX_METERS; i++) {
-        if (cfg.meter_names[i].id_hex[0] && cfg.meter_names[i].name[0]) {
+    for (int i = 0; i < MAX_PINS; i++) {
+        if (cfg.names[i].id_hex[0] && cfg.names[i].name[0]) {
             pos += snprintf(buf + pos, sizeof(buf) - pos, "%s\"%s\":\"%s\"",
-                            first ? "" : ",", cfg.meter_names[i].id_hex, cfg.meter_names[i].name);
+                            first ? "" : ",", cfg.names[i].id_hex, cfg.names[i].name);
             first = false;
         }
     }

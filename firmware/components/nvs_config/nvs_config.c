@@ -3,6 +3,7 @@
 #include "nvs.h"
 #include "esp_log.h"
 #include <string.h>
+#include <stdio.h>   // snprintf w migracji przypiec
 
 static const char *TAG = "NVS_CFG";
 static sih_config_t g_cfg = {0};
@@ -47,6 +48,24 @@ void nvs_config_init(void) {
         }
     }
     nvs_close(h);
+    if (err == ESP_OK && !g_cfg.pins_migrated) {
+        // Jednorazowo: przenies przypiecia i nazwy ze starych, 8-elementowych
+        // tablic do nowych (MAX_PINS). Stare zostaja w strukturze nietkniete,
+        // zeby nie ruszac ukladu blobu NVS.
+        for (int i = 0; i < MAX_METERS && i < MAX_PINS; i++) {
+            if (g_cfg.dashboard_ids[i][0])
+                snprintf(g_cfg.pins[i], sizeof(g_cfg.pins[0]), "%s", g_cfg.dashboard_ids[i]);
+            if (g_cfg.names[i].id_hex[0]) {
+                snprintf(g_cfg.names[i].id_hex, sizeof(g_cfg.names[0].id_hex), "%s",
+                         g_cfg.meter_names[i].id_hex);
+                snprintf(g_cfg.names[i].name, sizeof(g_cfg.names[0].name), "%s",
+                         g_cfg.meter_names[i].name);
+            }
+        }
+        g_cfg.pins_migrated = true;
+        nvs_config_save(&g_cfg);
+        ESP_LOGI(TAG, "Przypiecia i nazwy przeniesione do wiekszych tablic (limit %d)", MAX_PINS);
+    }
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Błąd odczytu konfiguracji, reset do domyślnej");
         set_defaults(&g_cfg);
@@ -106,10 +125,10 @@ void nvs_config_reset(void) {
 // Zwraca wlasna nazwe licznika po ID (case-insensitive) lub "" gdy brak.
 const char *nvs_config_meter_name(const char *id_hex) {
     if (!id_hex || !id_hex[0]) return "";
-    for (int i = 0; i < MAX_METERS; i++) {
-        if (g_cfg.meter_names[i].id_hex[0] &&
-            strcasecmp(g_cfg.meter_names[i].id_hex, id_hex) == 0) {
-            return g_cfg.meter_names[i].name;
+    for (int i = 0; i < MAX_PINS; i++) {
+        if (g_cfg.names[i].id_hex[0] &&
+            strcasecmp(g_cfg.names[i].id_hex, id_hex) == 0) {
+            return g_cfg.names[i].name;
         }
     }
     return "";
@@ -119,9 +138,9 @@ const char *nvs_config_meter_name(const char *id_hex) {
 void nvs_config_set_meter_name(const char *id_hex, const char *name) {
     if (!id_hex || !id_hex[0]) return;
     int idx = -1, free_idx = -1;
-    for (int i = 0; i < MAX_METERS; i++) {
-        if (g_cfg.meter_names[i].id_hex[0]) {
-            if (strcasecmp(g_cfg.meter_names[i].id_hex, id_hex) == 0) { idx = i; break; }
+    for (int i = 0; i < MAX_PINS; i++) {
+        if (g_cfg.names[i].id_hex[0]) {
+            if (strcasecmp(g_cfg.names[i].id_hex, id_hex) == 0) { idx = i; break; }
         } else if (free_idx < 0) {
             free_idx = i;
         }
@@ -130,13 +149,13 @@ void nvs_config_set_meter_name(const char *id_hex, const char *name) {
     if (idx >= 0) {
         if (empty) {
             // Kasuj wpis (pusta nazwa = powrot do ID).
-            memset(&g_cfg.meter_names[idx], 0, sizeof(g_cfg.meter_names[idx]));
+            memset(&g_cfg.meter_names[idx], 0, sizeof(g_cfg.names[idx]));
         } else {
-            strlcpy(g_cfg.meter_names[idx].name, name, sizeof(g_cfg.meter_names[idx].name));
+            strlcpy(g_cfg.meter_names[idx].name, name, sizeof(g_cfg.names[idx].name));
         }
     } else if (!empty && free_idx >= 0) {
-        strlcpy(g_cfg.meter_names[free_idx].id_hex, id_hex, sizeof(g_cfg.meter_names[free_idx].id_hex));
-        strlcpy(g_cfg.meter_names[free_idx].name, name, sizeof(g_cfg.meter_names[free_idx].name));
+        strlcpy(g_cfg.meter_names[free_idx].id_hex, id_hex, sizeof(g_cfg.names[free_idx].id_hex));
+        strlcpy(g_cfg.meter_names[free_idx].name, name, sizeof(g_cfg.names[free_idx].name));
     } else if (!empty) {
         ESP_LOGW(TAG, "Brak miejsca na nazwe licznika %s", id_hex);
         return;
@@ -146,9 +165,9 @@ void nvs_config_set_meter_name(const char *id_hex, const char *name) {
 
 bool nvs_config_is_pinned(const char *id_hex) {
     if (!id_hex || !id_hex[0]) return false;
-    for (int i = 0; i < MAX_METERS; i++) {
-        if (g_cfg.dashboard_ids[i][0] &&
-            strcasecmp(g_cfg.dashboard_ids[i], id_hex) == 0) return true;
+    for (int i = 0; i < MAX_PINS; i++) {
+        if (g_cfg.pins[i][0] &&
+            strcasecmp(g_cfg.pins[i], id_hex) == 0) return true;
     }
     return false;
 }

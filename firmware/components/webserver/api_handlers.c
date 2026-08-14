@@ -833,47 +833,58 @@ static int buf_append(char *buf, int *pos, int cap, const void *data, int len) {
 }
 
 static esp_err_t handle_backup_get(httpd_req_t *req) {
-    const int cap = 60000;   // historia + config; SPIFFS jest maly
-    char *buf = malloc(cap);   // alokacja tylko na czas tworzenia kopii
-    if (!buf) { resp_err(req, "brak pamieci na kopie"); return ESP_OK; }
+    // Kopia wysylana STRUMIENIOWO. Wczesniej budowala sie w buforze 60 kB w RAM,
+    // przez co miescily sie w niej tylko biezace pliki historii (168 godzin =
+    // 7 dni), a dwuletnie archiwum ha_*.bin bylo pomijane - po roku samo
+    // archiwum to ok. 68 kB na jedno pole. Strumieniowanie znosi limit rozmiaru
+    // i zbija zuzycie pamieci z 60 kB do 2 kB.
+    const int CH = 2048;
+    char *ch = malloc(CH);
+    if (!ch) { resp_err(req, "brak pamieci na kopie"); return ESP_OK; }
+
+    httpd_resp_set_type(req, "application/octet-stream");
+    httpd_resp_set_hdr(req, "Content-Disposition",
+                       "attachment; filename=\"sih-backup.sihbak\"");
+
     int pos = 0;
-    // naglowek
-    buf_append(buf, &pos, cap, BACKUP_MAGIC, 4);
+    long sent = 0;
+    buf_append(ch, &pos, CH, BACKUP_MAGIC, 4);
     uint8_t ver = BACKUP_VER;
-    buf_append(buf, &pos, cap, &ver, 1);
-    // tylko definicje licznikow (meters[] + meter_count) - bez WiFi, diod, AP,
-    // czestotliwosci, przypiec do dashboard i nazw. Kopia = liczniki + historia.
-    sih_config_t cfg = nvs_config_get();
-    uint8_t mc = cfg.meter_count;
+    buf_append(ch, &pos, CH, &ver, 1);
+
+    const sih_config_t *cfg = nvs_config_ptr();
+    uint8_t mc = cfg->meter_count;
     if (mc > MAX_METERS) mc = MAX_METERS;
-    buf_append(buf, &pos, cap, &mc, 1);
+    buf_append(ch, &pos, CH, &mc, 1);
     uint32_t mlen = (uint32_t)mc * sizeof(meter_config_t);
-    buf_append(buf, &pos, cap, &mlen, 4);
-    buf_append(buf, &pos, cap, cfg.meters, mlen);
-    // Przypiecia do dashboardu i wlasne nazwe licznikow - bez nich po
-    // przywroceniu trzeba bylo wszystko przypinac i nazywac od nowa.
-    {
-        uint8_t np = 0, nn = 0;
-        for (int i = 0; i < MAX_PINS; i++) {
-            if (cfg.pins[i][0]) np++;
-            if (cfg.names[i].id_hex[0] && cfg.names[i].name[0]) nn++;
-        }
-        buf_append(buf, &pos, cap, &np, 1);
-        for (int i = 0; i < MAX_PINS; i++)
-            if (cfg.pins[i][0]) buf_append(buf, &pos, cap, cfg.pins[i], 12);
-        buf_append(buf, &pos, cap, &nn, 1);
-        for (int i = 0; i < MAX_PINS; i++)
-            if (cfg.names[i].id_hex[0] && cfg.names[i].name[0])
-                buf_append(buf, &pos, cap, &cfg.names[i], sizeof(cfg.names[0]));
+    buf_append(ch, &pos, CH, &mlen, 4);
+    httpd_resp_send_chunk(req, ch, pos); sent += pos;
+    if (mlen) { httpd_resp_send_chunk(req, (const char *)cfg->meters, mlen); sent += mlen; }
+
+    // przypiecia do dashboardu i wlasne nazwy licznikow
+    uint8_t np = 0, nn = 0;
+    for (int i = 0; i < MAX_PINS; i++) {
+        if (cfg->pins[i][0]) np++;
+        if (cfg->names[i].id_hex[0] && cfg->names[i].name[0]) nn++;
     }
-    // pliki historii z /spiffs (h_*.bin oraz tracked)
+    httpd_resp_send_chunk(req, (const char *)&np, 1); sent += 1;
+    for (int i = 0; i < MAX_PINS; i++)
+        if (cfg->pins[i][0]) { httpd_resp_send_chunk(req, cfg->pins[i], 12); sent += 12; }
+    httpd_resp_send_chunk(req, (const char *)&nn, 1); sent += 1;
+    for (int i = 0; i < MAX_PINS; i++)
+        if (cfg->names[i].id_hex[0] && cfg->names[i].name[0]) {
+            httpd_resp_send_chunk(req, (const char *)&cfg->names[i], sizeof(cfg->names[0]));
+            sent += (long)sizeof(cfg->names[0]);
+        }
+
+    // pliki: biezaca historia (h_), ARCHIWUM (ha_) i lista sledzonych
     DIR *dir = opendir("/spiffs");
     if (dir) {
         struct dirent *de;
         while ((de = readdir(dir)) != NULL) {
             const char *nm = de->d_name;
-            // tylko pliki historii i listy sledzonych
-            if (strncmp(nm, "h_", 2) != 0 && strcmp(nm, "tracked.txt") != 0) continue;
+            if (strncmp(nm, "h_", 2) != 0 && strncmp(nm, "ha_", 3) != 0 &&
+                strcmp(nm, "tracked.txt") != 0) continue;
             char path[96];
             snprintf(path, sizeof(path), "/spiffs/%.80s", nm);
             FILE *f = fopen(path, "rb");
@@ -881,128 +892,157 @@ static esp_err_t handle_backup_get(httpd_req_t *req) {
             fseek(f, 0, SEEK_END);
             long fsz = ftell(f);
             fseek(f, 0, SEEK_SET);
-            if (fsz <= 0 || pos + (int)strlen(nm) + 5 + (int)fsz > cap) { fclose(f); continue; }
+            if (fsz <= 0) { fclose(f); continue; }
             uint8_t nlen = (uint8_t)strlen(nm);
-            buf_append(buf, &pos, cap, &nlen, 1);
-            buf_append(buf, &pos, cap, nm, nlen);
             uint32_t dlen = (uint32_t)fsz;
-            buf_append(buf, &pos, cap, &dlen, 4);
-            int rd = fread(buf + pos, 1, fsz, f);
-            pos += rd;
+            pos = 0;
+            buf_append(ch, &pos, CH, &nlen, 1);
+            buf_append(ch, &pos, CH, nm, nlen);
+            buf_append(ch, &pos, CH, &dlen, 4);
+            httpd_resp_send_chunk(req, ch, pos); sent += pos;
+            long left = fsz;
+            while (left > 0) {
+                int want = (left > CH) ? CH : (int)left;
+                int rd = fread(ch, 1, want, f);
+                if (rd <= 0) break;
+                httpd_resp_send_chunk(req, ch, rd);
+                sent += rd;
+                left -= rd;
+            }
             fclose(f);
         }
         closedir(dir);
     }
     uint8_t endmark = 0;
-    buf_append(buf, &pos, cap, &endmark, 1);
-
-    httpd_resp_set_type(req, "application/octet-stream");
-    httpd_resp_set_hdr(req, "Content-Disposition",
-                       "attachment; filename=\"sih-backup.sihbak\"");
-    httpd_resp_send(req, buf, pos);
-    ESP_LOGI(TAG, "Backup wyeksportowany: %d B", pos);
-    free(buf);
+    httpd_resp_send_chunk(req, (const char *)&endmark, 1); sent += 1;
+    httpd_resp_send_chunk(req, NULL, 0);   // zamknij strumien
+    ESP_LOGI(TAG, "Backup wyeksportowany: %ld B (z archiwum)", sent);
+    free(ch);
     return ESP_OK;
 }
 
+// Dociagnij DOKLADNIE n bajtow z ciala zadania. Bufor pierscieniowy pozwala
+// czytac pola dowolnej dlugosci niezaleznie od tego, jak HTTP podzieli dane.
+static bool bk_read(httpd_req_t *req, void *out, int n,
+                    char *ring, int ring_cap, int *rlen, int *rpos) {
+    char *dst = (char *)out;
+    int got = 0;
+    while (got < n) {
+        if (*rpos < *rlen) {
+            int take = *rlen - *rpos;
+            if (take > n - got) take = n - got;
+            memcpy(dst + got, ring + *rpos, take);
+            *rpos += take; got += take;
+            continue;
+        }
+        int r = httpd_req_recv(req, ring, ring_cap);
+        if (r <= 0) return false;
+        *rlen = r; *rpos = 0;
+    }
+    return true;
+}
+
 static esp_err_t handle_backup_post(httpd_req_t *req) {
-    const int cap = 60000;
-    char *buf = malloc(cap);   // alokacja tylko na czas przywracania kopii
-    if (!buf) { resp_err(req, "brak pamieci na kopie"); return ESP_OK; }
-    int total = 0, ret;
-    while ((ret = httpd_req_recv(req, buf + total, cap - total)) > 0) {
-        total += ret;
-        if (total >= cap) break;
+    // Odczyt STRUMIENIOWY - kopia z archiwum ma setki kilobajtow, a wczesniej
+    // musiala zmiescic sie w calosci w buforze 60 kB w RAM.
+    const int CH = 2048;
+    char *ring = malloc(CH);
+    char *tmp  = malloc(CH);
+    if (!ring || !tmp) {
+        free(ring); free(tmp);
+        resp_err(req, "brak pamieci na kopie"); return ESP_OK;
     }
-    if (total < 9 || memcmp(buf, BACKUP_MAGIC, 4) != 0) {
-        resp_err(req, "zly plik kopii");
-        free(buf);
-        return ESP_OK;
-    }
-    int p = 4;
-    uint8_t ver = (uint8_t)buf[p]; p += 1;
+    int rlen = 0, rpos = 0;
+    int restored = 0;
+    long bytes = 0;
+    uint8_t mc = 0;
+
+    char hdr[5];
+    if (!bk_read(req, hdr, 5, ring, CH, &rlen, &rpos)) goto bad;
+    if (memcmp(hdr, BACKUP_MAGIC, 4) != 0) goto bad;
+    uint8_t ver = (uint8_t)hdr[4];
     // v2 (bez przypiec i nazw) nadal wczytujemy - starsze kopie maja dzialac.
     if (ver != 2 && ver != BACKUP_VER) {
-        resp_err(req, "zla wersja kopii"); free(buf); return ESP_OK;
+        free(ring); free(tmp);
+        resp_err(req, "zla wersja kopii"); return ESP_OK;
     }
-    // tylko definicje licznikow - wczytaj do ISTNIEJACEJ konfiguracji, nie ruszajac
-    // WiFi, diod, AP, czestotliwosci, przypiec ani nazw.
-    uint8_t mc = (uint8_t)buf[p]; p += 1;
-    if (mc > MAX_METERS) { resp_err(req, "za duzo licznikow w kopii"); free(buf); return ESP_OK; }
-    uint32_t mlen; memcpy(&mlen, buf + p, 4); p += 4;
-    if (mlen != (uint32_t)mc * sizeof(meter_config_t) || p + (int)mlen > total) {
-        resp_err(req, "niezgodne dane licznikow");
-        free(buf);
-        return ESP_OK;
-    }
-    sih_config_t cfg = nvs_config_get();   // zachowaj biezaca konfiguracje
+
+    sih_config_t cfg = nvs_config_get();
+    if (!bk_read(req, &mc, 1, ring, CH, &rlen, &rpos)) goto bad;
+    if (mc > MAX_METERS) goto bad;
+    uint32_t mlen;
+    if (!bk_read(req, &mlen, 4, ring, CH, &rlen, &rpos)) goto bad;
+    if (mlen != (uint32_t)mc * sizeof(meter_config_t)) goto bad;
     memset(cfg.meters, 0, sizeof(cfg.meters));
-    memcpy(cfg.meters, buf + p, mlen);     // podmien tylko liczniki
+    if (mlen && !bk_read(req, cfg.meters, (int)mlen, ring, CH, &rlen, &rpos)) goto bad;
     cfg.meter_count = mc;
-    p += mlen;
-    // Przypiecia i nazwy - tylko w formacie v3. Przy v2 zostawiamy
-    // dotychczasowe, zeby stara kopia ich nie kasowala.
-    if (ver >= 3 && p + 1 <= total) {
-        uint8_t np = (uint8_t)buf[p]; p += 1;
-        if (np > MAX_PINS) np = MAX_PINS;
+
+    if (ver >= 3) {
+        uint8_t np;
+        if (!bk_read(req, &np, 1, ring, CH, &rlen, &rpos)) goto bad;
+        if (np > MAX_PINS) goto bad;
         memset(cfg.pins, 0, sizeof(cfg.pins));
-        for (int i = 0; i < np && p + 12 <= total; i++) {
-            memcpy(cfg.pins[i], buf + p, 12);
+        for (int i = 0; i < np; i++) {
+            if (!bk_read(req, cfg.pins[i], 12, ring, CH, &rlen, &rpos)) goto bad;
             cfg.pins[i][11] = 0;
-            p += 12;
         }
-    }
-    if (ver >= 3 && p + 1 <= total) {
-        uint8_t nn = (uint8_t)buf[p]; p += 1;
-        if (nn > MAX_PINS) nn = MAX_PINS;
+        uint8_t nn;
+        if (!bk_read(req, &nn, 1, ring, CH, &rlen, &rpos)) goto bad;
+        if (nn > MAX_PINS) goto bad;
         memset(cfg.names, 0, sizeof(cfg.names));
-        for (int i = 0; i < nn && p + (int)sizeof(cfg.names[0]) <= total; i++) {
-            memcpy(&cfg.names[i], buf + p, sizeof(cfg.names[0]));
+        for (int i = 0; i < nn; i++) {
+            if (!bk_read(req, &cfg.names[i], (int)sizeof(cfg.names[0]),
+                         ring, CH, &rlen, &rpos)) goto bad;
             cfg.names[i].id_hex[sizeof(cfg.names[0].id_hex) - 1] = 0;
             cfg.names[i].name[sizeof(cfg.names[0].name) - 1] = 0;
-            p += sizeof(cfg.names[0]);
         }
+        cfg.pins_migrated = true;
     }
-    if (ver >= 3) cfg.pins_migrated = true;   // kopia niesie juz nowy format
     nvs_config_save(&cfg);
 
-    // WYCZYSC dotychczasowa historie PRZED wgraniem kopii. Kopia zawiera pliki
-    // biezacej historii (h_) i liste sledzonych, ale NIE archiwa (ha_) - te sa
-    // za duze. Bez czyszczenia stare archiwum zostawalo na flashu i przy
-    // budowaniu wykresu bylo SCALANE z przywroconymi danymi: stany licznika z
-    // dwoch roznych momentow dawaly absurdalne slupki (setki litrow w godzinach,
-    // w ktorych nic sie nie dzialo). Czyscimy tez sloty w RAM, zeby nie zapisaly
-    // sie z powrotem w chwili miedzy odpowiedzia a restartem.
+    // Wyczysc dotychczasowa historie PRZED wgraniem kopii - inaczej stare pliki
+    // zostaja i przy budowaniu wykresu mieszaja sie z przywroconymi (stany
+    // licznika z dwoch roznych momentow dawaly absurdalne slupki).
     history_erase_all();
 
-    // pliki historii
-    int restored = 0;
-    while (p < total) {
-        uint8_t nlen = (uint8_t)buf[p]; p += 1;
-        if (nlen == 0) break;   // koniec
-        if (p + nlen + 4 > total) break;
+    while (1) {
+        uint8_t nlen;
+        if (!bk_read(req, &nlen, 1, ring, CH, &rlen, &rpos)) goto bad;
+        if (nlen == 0) break;              // znacznik konca
+        if (nlen >= 64) goto bad;
         char nm[64] = {0};
-        if (nlen >= sizeof(nm)) break;
-        memcpy(nm, buf + p, nlen); p += nlen;
-        uint32_t dlen; memcpy(&dlen, buf + p, 4); p += 4;
-        if (p + (int)dlen > total) break;
+        if (!bk_read(req, nm, nlen, ring, CH, &rlen, &rpos)) goto bad;
+        uint32_t dlen;
+        if (!bk_read(req, &dlen, 4, ring, CH, &rlen, &rpos)) goto bad;
         char path[96];
         snprintf(path, sizeof(path), "/spiffs/%.80s", nm);
         FILE *f = fopen(path, "wb");
-        if (f) {
-            fwrite(buf + p, 1, dlen, f);
-            fclose(f);
-            restored++;
+        uint32_t left = dlen;
+        while (left > 0) {
+            int want = (left > (uint32_t)CH) ? CH : (int)left;
+            if (!bk_read(req, tmp, want, ring, CH, &rlen, &rpos)) {
+                if (f) fclose(f);
+                goto bad;
+            }
+            if (f) fwrite(tmp, 1, want, f);
+            left -= (uint32_t)want; bytes += want;
         }
-        p += dlen;
+        if (f) { fclose(f); restored++; }
     }
+
     // Znacznik: po restarcie pierwsza ramka ma zaczac biezaca dobe od nowa.
     history_mark_rebase();
-    ESP_LOGI(TAG, "Backup przywrocony: %d licznikow + %d plikow historii", mc, restored);
-    free(buf);
+    ESP_LOGI(TAG, "Backup przywrocony: %d licznikow, %d plikow, %ld B",
+             mc, restored, bytes);
+    free(ring); free(tmp);
     resp_ok(req);
     vTaskDelay(pdMS_TO_TICKS(500));
     esp_restart();   // restart wczyta przywrocona konfiguracje i historie
+    return ESP_OK;
+
+bad:
+    free(ring); free(tmp);
+    resp_err(req, "zly plik kopii");
     return ESP_OK;
 }
 

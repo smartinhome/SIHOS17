@@ -18,7 +18,8 @@ typedef struct {
     char         type[16];
     char         name[32];
     int8_t       rssi;
-    uint32_t     last_seen;   // unix timestamp (uptime ms)
+    uint32_t     last_seen;        // monotoniczny czas uruchomienia (ms)
+    uint32_t     last_seen_unix;   // czas rzeczywisty, 0 przed synchronizacja SNTP
     bool         valid;
     uint8_t      field_count;
     meter_field_t fields[MAX_METER_VALUES];

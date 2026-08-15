@@ -391,8 +391,8 @@ static esp_err_t handle_meters(httpd_req_t *req) {
         char header[256];
         snprintf(header, sizeof(header),
             "{\"id\":\"%s\",\"type\":\"%s\",\"name\":\"%s\","
-            "\"rssi\":%d,\"last_seen\":%" PRIu32 ",\"fields\":[",
-            m->id_hex, m->type, m->name, m->rssi, m->last_seen
+            "\"rssi\":%d,\"last_seen\":%" PRIu32 ",\"last_seen_unix\":%" PRIu32 ",\"fields\":[",
+            m->id_hex, m->type, m->name, m->rssi, m->last_seen, m->last_seen_unix
         );
         if (!first_meter) httpd_resp_sendstr_chunk(req, ",");
         first_meter = false;

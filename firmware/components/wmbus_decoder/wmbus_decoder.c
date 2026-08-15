@@ -253,6 +253,8 @@ void wmbus_decoder_on_frame(const wmbus_frame_t *frame) {
     meter_data_t tmp = {0};
     tmp.rssi = frame->rssi;
     tmp.last_seen = (uint32_t)(esp_timer_get_time() / 1000);
+    time_t frame_time = time(NULL);
+    tmp.last_seen_unix = (frame_time > 1700000000) ? (uint32_t)frame_time : 0;
 
     if (!decode_frame(frame->data, frame->len, &tmp)) {
         ESP_LOGW(TAG, "Nie można zdekodować ramki");
@@ -287,6 +289,7 @@ void wmbus_decoder_on_frame(const wmbus_frame_t *frame) {
     if (m) {
         m->rssi      = tmp.rssi;
         m->last_seen = tmp.last_seen;
+        m->last_seen_unix = tmp.last_seen_unix;
         m->valid     = true;
         // Kopiuj pola z tmp
         for (int i = 0; i < tmp.field_count; i++)

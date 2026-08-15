@@ -13,10 +13,8 @@
 
 static const char *TAG = "WMBUS";
 
-// UWAGA: Ten moduł zawiera stub dekodera.
-// Docelowo zastąpić wywołaniami biblioteki wmbusmeters
-// (portowanej jako komponent IDF z repozytorium wmbusmeters/wmbusmeters).
-// Interfejs wmbus_decode_frame() pozostaje taki sam.
+// Odczyty dla API i historii są wyciągane przez meter_total.  Pełne wsparcie
+// kolejnych sterowników można dodawać właśnie do tego komponentu.
 
 static meter_data_t  s_meters[MAX_ACTIVE_METERS] = {0};
 static int           s_meter_count = 0;
@@ -142,10 +140,23 @@ static void apply_config(meter_data_t *m) {
     if (strlen(m->name) == 0) strlcpy(m->name, m->id_hex, sizeof(m->name));
 }
 
-// STUB — docelowo zastąpić wmbusmeters
-// Zwraca true jeśli ramka została zdekodowana
-static bool decode_frame_stub(const uint8_t *data, size_t len,
-                               meter_data_t *out) {
+// Zwraca zapisany klucz AES dla licznika albo pusty napis.  Dekoder i
+// historia muszą korzystać z identycznego klucza; inaczej API mogłoby
+// pokazywać inne dane niż te zapisane na flashu.
+static const char *meter_key_for_id(const char *id_hex) {
+    const sih_config_t *cfg = nvs_config_ptr();
+    for (int i = 0; i < cfg->meter_count; i++) {
+        if (strcasecmp(cfg->meters[i].id_hex, id_hex) == 0)
+            return cfg->meters[i].key;
+    }
+    return "";
+}
+
+// Dekoduje pola obsługiwane przez meter_total.  Ten sam ekstraktor zasila
+// trwałą historię, dzięki czemu /api/meters nie jest już atrapą z samym RSSI.
+// Zwraca true, gdy udało się rozpoznać poprawne ID ramki; brak pól oznacza np.
+// nieobsługiwany typ licznika albo brak klucza AES.
+static bool decode_frame(const uint8_t *data, size_t len, meter_data_t *out) {
     if (len < 12) return false;
 
     char id[12];
@@ -155,8 +166,8 @@ static bool decode_frame_stub(const uint8_t *data, size_t len,
     strlcpy(out->id_hex, id, sizeof(out->id_hex));
     out->valid = true;
 
-    // Odczytaj typ medium z bajtu 3
-    uint8_t medium = data[3];
+    // Medium jest w adresie DLL, w bajcie 9 (bajt 3 należy do producenta).
+    uint8_t medium = data[9];
     switch (medium) {
         case 0x02: strlcpy(out->type, "electricity", sizeof(out->type)); break;
         case 0x07: strlcpy(out->type, "water",       sizeof(out->type)); break;
@@ -165,18 +176,19 @@ static bool decode_frame_stub(const uint8_t *data, size_t len,
         default:   strlcpy(out->type, "unknown",     sizeof(out->type)); break;
     }
 
-    // STUB: dane testowe — zastąpić prawdziwym dekoderem
-    // W docelowej implementacji tutaj wywołujemy wmbusmeters:
-    // wmb_meter_t *meter = wmb_decode(data, len, key);
-    // wmb_get_field(meter, "total_energy_consumption_kwh", &val);
-    add_field(out, "rssi_dbm", (float)out->rssi, "dBm");
+    mtf_field_t fields[MTF_MAX_FIELDS];
+    int kind = 0;
+    int nf = meter_total_extract_fields(data, len, meter_key_for_id(id),
+                                        fields, MTF_MAX_FIELDS, &kind);
+    for (int i = 0; i < nf; i++)
+        add_field(out, fields[i].field, (float)fields[i].value, fields[i].unit);
 
     return true;
 }
 
 void wmbus_decoder_init(void) {
     s_mutex = xSemaphoreCreateMutex();
-    ESP_LOGI(TAG, "Dekoder wMbus gotowy (stub — wymaga wmbusmeters)");
+    ESP_LOGI(TAG, "Dekoder wMbus gotowy");
 }
 
 
@@ -242,7 +254,7 @@ void wmbus_decoder_on_frame(const wmbus_frame_t *frame) {
     tmp.rssi = frame->rssi;
     tmp.last_seen = (uint32_t)(esp_timer_get_time() / 1000);
 
-    if (!decode_frame_stub(frame->data, frame->len, &tmp)) {
+    if (!decode_frame(frame->data, frame->len, &tmp)) {
         ESP_LOGW(TAG, "Nie można zdekodować ramki");
         return;
     }
@@ -254,14 +266,7 @@ void wmbus_decoder_on_frame(const wmbus_frame_t *frame) {
 
     // --- HISTORIA 24/7: wyciagnij wszystkie pola i zapisz sledzone ---
     {
-        const char *key_hex = "";
-        const sih_config_t *cfg = nvs_config_ptr();
-        for (int i = 0; i < cfg->meter_count; i++) {
-            if (strcasecmp(cfg->meters[i].id_hex, tmp.id_hex) == 0) {
-                key_hex = cfg->meters[i].key;
-                break;
-            }
-        }
+        const char *key_hex = meter_key_for_id(tmp.id_hex);
         time_t now = time(NULL);
         uint32_t ts_unix = (now > 1700000000) ? (uint32_t)now : 0;
         if (ts_unix) {

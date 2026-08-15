@@ -3,7 +3,9 @@
 #include <stdbool.h>
 #include "cc1101.h"
 
-#define MAX_METER_VALUES 16
+// Amiplus może zwrócić do 20+ pól (taryfy, napięcia, prądy i energia bierna).
+// Musi odpowiadać pojemności ekstraktora historii, by API nie ucinało danych.
+#define MAX_METER_VALUES 24
 
 typedef struct {
     char    field[32];    // np. "total_energy_consumption_kwh"

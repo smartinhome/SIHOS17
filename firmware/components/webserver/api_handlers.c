@@ -382,25 +382,31 @@ static esp_err_t handle_meters(httpd_req_t *req) {
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     httpd_resp_sendstr_chunk(req, "[");
     int count = wmbus_decoder_get_count();   // petla po slotach z danymi
+    bool first_meter = true;
     for (int i = 0; i < count; i++) {
         meter_data_t *m = wmbus_decoder_get_meter(i);
         if (!m) continue;
-        char mbuf[512];
-        int n = snprintf(mbuf, sizeof(mbuf),
+        // Nie buduj calego licznika w jednym buforze: Amiplus ma do 24 pol
+        // i poprawny JSON bez problemu przekracza 512 B.
+        char header[256];
+        snprintf(header, sizeof(header),
             "{\"id\":\"%s\",\"type\":\"%s\",\"name\":\"%s\","
             "\"rssi\":%d,\"last_seen\":%" PRIu32 ",\"fields\":[",
             m->id_hex, m->type, m->name, m->rssi, m->last_seen
         );
+        if (!first_meter) httpd_resp_sendstr_chunk(req, ",");
+        first_meter = false;
+        httpd_resp_sendstr_chunk(req, header);
         for (int j = 0; j < m->field_count; j++) {
-            n += snprintf(mbuf + n, sizeof(mbuf) - n,
+            char field[128];
+            snprintf(field, sizeof(field),
                 "%s{\"field\":\"%s\",\"value\":%.3f,\"unit\":\"%s\"}",
                 j > 0 ? "," : "",
                 m->fields[j].field, m->fields[j].value, m->fields[j].unit
             );
+            httpd_resp_sendstr_chunk(req, field);
         }
-        snprintf(mbuf + n, sizeof(mbuf) - n, "]}");
-        if (i > 0) httpd_resp_sendstr_chunk(req, ",");
-        httpd_resp_sendstr_chunk(req, mbuf);
+        httpd_resp_sendstr_chunk(req, "]}");
     }
     httpd_resp_sendstr_chunk(req, "]");
     httpd_resp_sendstr_chunk(req, NULL);

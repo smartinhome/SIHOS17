@@ -451,6 +451,42 @@ static bool valid_meter_id(const char *id) {
     return true;
 }
 
+// Po pierwszym zapisaniu licznika od razu śledź jego główny licznik
+// skumulowany.  Wcześniej użytkownik musiał później ręcznie kliknąć "+" przy
+// odpowiednim polu, przez co pierwsze dni zużycia łatwo przepadały.
+// Dodatkowe pola (moc, napięcia, taryfy) nadal są włączane świadomie z UI.
+static void track_default_meter_field(const meter_config_t *meter) {
+    if (!meter || !history_fs_ok()) return;
+
+    const char *field = NULL;
+    const char *type = meter->type;
+    if (strcasecmp(type, "amiplus") == 0 ||
+        strcasecmp(type, "electricity") == 0 ||
+        strcasecmp(type, "sontex") == 0) {
+        field = "energia_kwh";
+    } else if (strcasecmp(type, "izar") == 0 ||
+               strcasecmp(type, "apator") == 0 ||
+               strcasecmp(type, "apator162") == 0 ||
+               strcasecmp(type, "op041a") == 0 ||
+               strcasecmp(type, "mkradio4") == 0 ||
+               strcasecmp(type, "water") == 0 ||
+               strcasecmp(type, "unismart") == 0 ||
+               strcasecmp(type, "gas") == 0) {
+        field = "total_m3";
+    }
+    if (!field) return;  // nie zgadujemy dla nieznanych sterowników
+
+    char key[40];
+    snprintf(key, sizeof(key), "%s:%s", meter->id_hex, field);
+    if (!history_is_tracked(key)) {
+        history_set_tracked(key, true);
+        if (history_is_tracked(key))
+            ESP_LOGI(TAG, "Historia wlaczona automatycznie: %s", key);
+        else
+            ESP_LOGW(TAG, "Brak wolnego slotu historii dla %s", key);
+    }
+}
+
 static esp_err_t handle_dashboard(httpd_req_t *req) {
     sih_config_t cfg = nvs_config_get();
     if (req->method == HTTP_POST) {
@@ -680,9 +716,11 @@ static esp_err_t handle_config_meter(httpd_req_t *req) {
         resp_ok(req);
         return ESP_OK;
     }
+    bool new_meter = false;
     if (idx < 0) {
         if (cfg.meter_count >= MAX_METERS) { resp_err(req, "limit licznikow"); return ESP_OK; }
         idx = cfg.meter_count++;
+        new_meter = true;
         memset(&cfg.meters[idx], 0, sizeof(meter_config_t));
         strlcpy(cfg.meters[idx].id_hex, id, sizeof(cfg.meters[idx].id_hex));
     }
@@ -694,6 +732,7 @@ static esp_err_t handle_config_meter(httpd_req_t *req) {
         strlcpy(cfg.meters[idx].name, id, sizeof(cfg.meters[idx].name));
     cfg.meters[idx].enabled = true;
     nvs_config_save(&cfg);
+    if (new_meter) track_default_meter_field(&cfg.meters[idx]);
     resp_ok(req);
     return ESP_OK;
 }

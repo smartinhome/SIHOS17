@@ -36,10 +36,16 @@ typedef struct {
 // udało się je zdekodować. Web UI pobiera je przez /api/frames i dekoduje
 // po stronie przeglądarki (parsowanie wMbus + AES/Diehl-LFSR + DIF/VIF).
 #define MAX_RAW_FRAMES 40
-#define MAX_RAW_HEX    520   // maks. długość hex (=> 260 bajtów ramki, Amiplus 193B)
+#define MAX_RAW_BYTES  260   // najdluzsza spotykana ramka (Amiplus 193 B) z zapasem
+#define MAX_RAW_HEX    (MAX_RAW_BYTES * 2)
 
+// Ramki trzymamy BINARNIE, nie jako tekst hex. Tekst zajmowal dwa razy wiecej
+// (521 B na ramke zamiast 260 B), a i tak jest potrzebny dopiero w chwili
+// wysylania do panelu - konwersja odbywa sie tam, gdzie budowana jest odpowiedz.
+// Oszczednosc na stercie: ok. 10 KB.
 typedef struct {
-    char     hex[MAX_RAW_HEX + 1];
+    uint8_t  data[MAX_RAW_BYTES];
+    uint16_t len;
     int8_t   rssi;
     uint8_t  lqi;
     uint32_t ts_ms;

@@ -422,10 +422,21 @@ static esp_err_t handle_frames(httpd_req_t *req) {
     for (int i = 0; i < count; i++) {
         const raw_frame_t *r = wmbus_decoder_raw_get(i);
         if (!r) continue;
+        // Ramki trzymane sa binarnie (oszczednosc RAM) - na tekst zamieniamy
+        // dopiero tutaj, przy budowaniu odpowiedzi.
+        char hex[MAX_RAW_HEX + 1];
+        static const char HEXD[] = "0123456789ABCDEF";
+        int hn = r->len;
+        if (hn > MAX_RAW_BYTES) hn = MAX_RAW_BYTES;
+        for (int k = 0; k < hn; k++) {
+            hex[k * 2]     = HEXD[r->data[k] >> 4];
+            hex[k * 2 + 1] = HEXD[r->data[k] & 0x0F];
+        }
+        hex[hn * 2] = 0;
         char buf[MAX_RAW_HEX + 96];
         snprintf(buf, sizeof(buf),
             "%s{\"hex\":\"%s\",\"rssi\":%d,\"lqi\":%u,\"ts\":%" PRIu32 ",\"ts_unix\":%" PRIu32 "}",
-            i > 0 ? "," : "", r->hex, r->rssi, (unsigned)r->lqi, r->ts_ms, r->ts_unix);
+            i > 0 ? "," : "", hex, r->rssi, (unsigned)r->lqi, r->ts_ms, r->ts_unix);
         httpd_resp_sendstr_chunk(req, buf);
     }
     httpd_resp_sendstr_chunk(req, "]");

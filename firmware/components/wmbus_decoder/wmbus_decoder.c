@@ -70,16 +70,11 @@ static void store_raw_frame(const wmbus_frame_t *frame) {
     }
     raw_frame_t *r = &s_raw[s_raw_head];
     size_t n = frame->len;
-    if (n > MAX_RAW_HEX / 2) n = MAX_RAW_HEX / 2;   // przytnij do pojemności hex
-    // Konwersja hex przez tablice zamiast snprintf() na KAZDY bajt: snprintf
-    // parsuje format i wola vsnprintf per bajt (~46x wolniej na tej samej
-    // maszynie). To jest goraca sciezka - wolane dla kazdej odebranej ramki.
-    static const char HEXD[] = "0123456789ABCDEF";
-    for (size_t i = 0; i < n; i++) {
-        r->hex[i * 2]     = HEXD[frame->data[i] >> 4];
-        r->hex[i * 2 + 1] = HEXD[frame->data[i] & 0x0F];
-    }
-    r->hex[n * 2] = 0;
+    if (n > MAX_RAW_BYTES) n = MAX_RAW_BYTES;
+    // Kopia binarna - bez konwersji na tekst. To goraca sciezka, wolana dla
+    // KAZDEJ odebranej ramki, wiec memcpy jest tu takze szybsze niz petla hex.
+    memcpy(r->data, frame->data, n);
+    r->len   = (uint16_t)n;
     r->rssi  = frame->rssi;
     r->lqi   = frame->lqi;
     r->ts_ms = (uint32_t)(esp_timer_get_time() / 1000);

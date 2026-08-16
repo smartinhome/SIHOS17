@@ -16,6 +16,27 @@ static const char *ROOT_HTML =
 "\n"
 "\n";
 
+// Warstwa zgodnosci dla obecnego, wbudowanego UI. ROOT_HTML jest historycznie
+// jednym duzym zasobem C, wiec zamiast ryzykowac reczna edycje zminifikowanego
+// kodu doklejamy mala warstwe po jego zaladowaniu. Preferuje ona trwaly stan
+// firmware (/api/meters); gdy zadne pole nie zostanie jeszcze rozpoznane,
+// zachowuje dotychczasowy dekoder surowych ramek jako fallback.
+static const char *METER_API_PATCH =
+"<script>(function(){"
+"if(typeof fetchFrames!=='function')return;"
+"var rawFetchFrames=fetchFrames;"
+"fetchFrames=async function(){try{"
+"var response=await fetch('/api/meters');"
+"if(!response.ok)throw new Error('meters');"
+"var meters=await response.json();"
+"if(!Array.isArray(meters)||!meters.length)return rawFetchFrames();"
+"var usable=meters.filter(function(m){return Array.isArray(m.fields)&&m.fields.length;});"
+"if(!usable.length)return rawFetchFrames();"
+"return usable.map(function(m){m._ts=m.last_seen||0;m._tsUnix=m.last_seen_unix||0;return m});"
+"}catch(e){return rawFetchFrames();}};"
+"fetchAll();"
+"})();</script>";
+
 static esp_err_t root_handler(httpd_req_t *req) {
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
@@ -33,6 +54,12 @@ static esp_err_t root_handler(httpd_req_t *req) {
         }
         p += n;
         remaining -= n;
+    }
+    esp_err_t patch_err = httpd_resp_send_chunk(req, METER_API_PATCH, strlen(METER_API_PATCH));
+    if (patch_err != ESP_OK) {
+        ESP_LOGW(TAG, "root_handler: wysylka poprawki UI przerwana (%s)",
+                 esp_err_to_name(patch_err));
+        return patch_err;
     }
     httpd_resp_send_chunk(req, NULL, 0);   // koniec
     return ESP_OK;

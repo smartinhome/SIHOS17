@@ -800,27 +800,57 @@ static esp_err_t handle_ota_url(httpd_req_t *req) {
 }
 
 static esp_err_t handle_ota_upload(httpd_req_t *req) {
+    // Zapis STRUMIENIOWY wprost do partycji OTA. Wczesniej caly obraz ladowal
+    // do RAM przez malloc(len) - przy firmware wazacym ponad 1 MB i ok. 240 kB
+    // wolnej sterty alokacja nie miala prawa sie udac, wiec wgrywanie pliku
+    // nigdy nie dzialalo. To jedyna droga aktualizacji w trybie AP, gdzie modul
+    // nie ma dostepu do internetu i nie pobierze niczego z GitHuba.
     size_t len = req->content_len;
-    if (len == 0 || len > 2 * 1024 * 1024) {
-        resp_err(req, "nieprawidlowy rozmiar");
+    if (len < 1024 || len > 2 * 1024 * 1024) {
+        resp_err(req, "nieprawidlowy rozmiar pliku");
         return ESP_OK;
     }
-    uint8_t *buf = malloc(len);
+    const esp_partition_t *part = esp_ota_get_next_update_partition(NULL);
+    if (!part) { resp_err(req, "brak partycji OTA"); return ESP_OK; }
+
+    const int CH = 4096;
+    char *buf = malloc(CH);
     if (!buf) { resp_err(req, "brak pamieci"); return ESP_OK; }
-    int received = 0, ret;
-    while (received < (int)len) {
-        ret = httpd_req_recv(req, (char *)buf + received, len - received);
-        if (ret <= 0) break;
-        received += ret;
+
+    esp_ota_handle_t h = 0;
+    if (esp_ota_begin(part, OTA_WITH_SEQUENTIAL_WRITES, &h) != ESP_OK) {
+        free(buf); resp_err(req, "esp_ota_begin nieudane"); return ESP_OK;
     }
-    if (received != (int)len) {
-        free(buf);
-        resp_err(req, "blad odbioru");
+    history_flush();   // nie trac krzywej dnia przy aktualizacji
+
+    size_t got = 0;
+    bool ok = true;
+    while (got < len) {
+        int want = (len - got > (size_t)CH) ? CH : (int)(len - got);
+        int r = httpd_req_recv(req, buf, want);
+        if (r <= 0) { ok = false; break; }
+        if (esp_ota_write(h, buf, r) != ESP_OK) { ok = false; break; }
+        got += r;
+    }
+    free(buf);
+
+    if (!ok || got != len) {
+        esp_ota_abort(h);
+        resp_err(req, "blad odbioru pliku");
         return ESP_OK;
     }
+    if (esp_ota_end(h) != ESP_OK) {
+        resp_err(req, "obraz niepoprawny");
+        return ESP_OK;
+    }
+    if (esp_ota_set_boot_partition(part) != ESP_OK) {
+        resp_err(req, "nie mozna ustawic partycji");
+        return ESP_OK;
+    }
+    ESP_LOGI(TAG, "OTA z pliku: %u B zapisane do %s, restart", (unsigned)got, part->label);
     resp_ok(req);
-    history_flush();   // nie trac krzywej dnia przy aktualizacji
-    ota_start_from_buffer(buf, len);
+    vTaskDelay(pdMS_TO_TICKS(500));
+    esp_restart();
     return ESP_OK;
 }
 

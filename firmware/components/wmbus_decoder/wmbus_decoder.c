@@ -170,9 +170,20 @@ static bool decode_frame(const uint8_t *data, size_t len, meter_data_t *out) {
     uint8_t medium = data[9];
     switch (medium) {
         case 0x02: strlcpy(out->type, "electricity", sizeof(out->type)); break;
-        case 0x07: strlcpy(out->type, "water",       sizeof(out->type)); break;
-        case 0x03: strlcpy(out->type, "gas",         sizeof(out->type)); break;
-        case 0x06: strlcpy(out->type, "heat",        sizeof(out->type)); break;
+        case 0x03:
+        case 0x0C: strlcpy(out->type, "gas",         sizeof(out->type)); break;
+        case 0x04:
+        case 0x0A:
+        case 0x0B:
+        case 0x0D: strlcpy(out->type, "heat",        sizeof(out->type)); break;
+        // 0x06 woda ciepla, 0x07 woda, 0x16 woda zimna (standard),
+        // 0x62/0x72 warianty Techem (ciepla/zimna) - bez nich licznik Techem
+        // mial typ "unknown" mimo poprawnie zdekodowanego stanu.
+        case 0x06:
+        case 0x07:
+        case 0x16:
+        case 0x62:
+        case 0x72: strlcpy(out->type, "water",       sizeof(out->type)); break;
         default:   strlcpy(out->type, "unknown",     sizeof(out->type)); break;
     }
 

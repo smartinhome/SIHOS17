@@ -94,8 +94,17 @@ static void start_ap(const sih_config_t *cfg) {
     // /api/wifi/scan nie musi przelaczac trybu, co rozlaczalo klientow AP.
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_cfg));
+    // Interfejs STA jest wlaczony WYLACZNIE po to, by dzialalo skanowanie sieci.
+    // Bez jawnie pustej konfiguracji sterownik co ~2 s probuje szukac sieci do
+    // polaczenia i zasypuje log ostrzezeniem "Haven't to connect to a suitable
+    // AP now!". Kazda taka proba zabiera czas antenie wspoldzielonej z AP -
+    // przy duzym ruchu radiowym gubily sie przez to zadania HTTP i panel
+    // potrafil pokazac pusta liste licznikow.
+    wifi_config_t sta_idle = {0};
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_idle));
     ESP_ERROR_CHECK(esp_wifi_start());
     s_state = WIFI_STATE_AP_MODE;
+    esp_wifi_disconnect();   // STA ma byc bezczynny, tylko do skanowania
     ESP_LOGI(TAG, "Tryb AP: %s", cfg->ap_ssid);
 }
 

@@ -14,6 +14,10 @@ bool meter_total_extract(const uint8_t *data, size_t len,
                          const char *key_hex,
                          double *out_total, int *out_kind);
 
+// Krotka nazwa sterownika rozpoznana z naglowka ramki (do logow).
+// Znak zapytania na koncu = medium rozpoznane, ale bez dedykowanego sterownika.
+const char *meter_total_driver_name(const uint8_t *data, size_t len);
+
 // Czy ramka (surowa, z CRC blokow) jest zaszyfrowana (tryb != 0) i wymaga klucza?
 // Zwraca false dla ramek jawnych lub juz odszyfrowanych (payload 2F2F).
 bool meter_total_needs_key(const uint8_t *data, size_t len);

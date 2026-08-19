@@ -241,8 +241,15 @@ void wmbus_decoder_on_frame(const wmbus_frame_t *frame) {
     char hex_log[900] = {0};
     for (int i = 0; i < maxb; i++)
         snprintf(hex_log + i*3, sizeof(hex_log) - i*3, "%02X ", frame->data[i]);
-    ESP_LOGI(TAG, "Ramka [%d B] RSSI:%ddBm: %s",
-             (int)frame->len, frame->rssi, hex_log);
+    // ID licznika i sterownik od razu w naglowku - bez tego przy kilkudziesieciu
+    // licznikach w zasiegu nie da sie rozpoznac, czyja jest ktora ramka.
+    char id_log[12] = "????????";
+    parse_meter_id(frame->data, id_log, sizeof(id_log));
+    if (!id_log[0]) snprintf(id_log, sizeof(id_log), "????????");
+    ESP_LOGI(TAG, "Ramka [%d B] %s/%s RSSI:%ddBm: %s",
+             (int)frame->len, id_log,
+             meter_total_driver_name(frame->data, frame->len),
+             frame->rssi, hex_log);
 
     // Wersja bez spacji + gotowy link do analizatora wmbusmeters.org
     // (wmbusmeters sam usuwa CRC blokow, wiec podajemy surowa ramke z CRC)

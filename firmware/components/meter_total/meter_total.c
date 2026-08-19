@@ -680,6 +680,32 @@ int meter_total_extract_fields(const uint8_t *data, size_t len,
     return 0;
 }
 
+// Nazwa sterownika rozpoznana z samego NAGLOWKA ramki, bez pelnego dekodowania.
+// Dzieki temu mozna ja wypisac w logu od razu po odbiorze, nie przestawiajac
+// kolejnosci - gdyby dekodowanie sie wywalilo, wpis w logu i tak powstanie.
+const char *meter_total_driver_name(const uint8_t *data, size_t len) {
+    if (!data || len < 12) return "?";
+    char mf[4]; manuf3(data, mf);
+    uint8_t ver = data[8], medium = data[9];
+    if (strcmp(mf, "TCH") == 0 && ver == 0x95 &&
+        (medium == 0x62 || medium == 0x72))      return "mkradio4";
+    if (strcmp(mf, "TCH") == 0)                  return "techem?";
+    if (strcmp(mf, "SAP") == 0 || strcmp(mf, "DME") == 0 ||
+        strcmp(mf, "HYD") == 0)                  return "izar";
+    if (strcmp(mf, "APA") == 0) {
+        if (medium == 0x06 || medium == 0x07)    return ver == 0x1A ? "op041a" : "apator16-2";
+        if (medium == 0x02)                      return "amiplus";
+    }
+    if (strcmp(mf, "AMX") == 0 && medium == 0x03) return "unismart";
+    switch (medium) {
+        case 0x02: return "el.?";
+        case 0x03: return "gaz?";
+        case 0x06: case 0x07: case 0x16: return "woda?";
+        case 0x04: case 0x0A: case 0x0B: case 0x0D: return "cieplo?";
+        default:   return "?";
+    }
+}
+
 bool meter_total_extract(const uint8_t *data, size_t len,
                          const char *key_hex,
                          double *out_total, int *out_kind) {

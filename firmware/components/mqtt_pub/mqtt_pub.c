@@ -2,6 +2,7 @@
 #include "nvs_config.h"
 #include "mqtt_client.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -13,7 +14,10 @@ static const char *TAG = "MQTT";
 // Kolejka miedzy zadaniem odbioru ramek a zadaniem publikujacym. Zapis do
 // brokera potrafi trwac dziesiatki milisekund, a zadanie CC1101 ma priorytet 7
 // i nie moze na to czekac - inaczej gubilyby sie ramki.
-#define MQ_LEN        24
+// Amiplus potrafi dac 20 pol w jednej ramce. Przy kolejce 24 wypychal z niej
+// wszystkie inne liczniki, zanim zadanie publikujace zdazylo je wyslac -
+// w Home Assistant pojawial sie wtedy tylko on.
+#define MQ_LEN        96
 #define TOPIC_MAX     96
 #define PAYLOAD_MAX   32
 
@@ -26,12 +30,18 @@ typedef struct {
 // Opis pola do ogloszenia w Home Assistant - zeby encja miala wlasciwa
 // jednostke i klase, a nie byla golym tekstem.
 typedef struct {
-    char id_hex[12];
-    char field[24];
-    char unit[8];
+    char     id_hex[12];
+    char     field[24];
+    char     unit[8];
+    uint32_t last_ms;     // kiedy ostatnio opublikowano to pole
 } ha_item_t;
 
 #define HA_MAX 24
+
+// Najkrotszy odstep miedzy publikacjami TEGO SAMEGO pola. Otus nadaje co
+// kilkanascie sekund i ma ~20 pol - bez tego brokera zalewaloby kilkaset
+// wiadomosci na minute, a wartosci i tak zmieniaja sie wolno.
+#define MIN_INTERVAL_MS 15000
 static ha_item_t     s_ha[HA_MAX];
 static int           s_ha_count = 0;
 
@@ -51,6 +61,18 @@ static void prefix_of(char *out, size_t cap) {
 }
 
 // Klasa urzadzenia i jednostka dla Home Assistant na podstawie jednostki pola.
+// Home Assistant sprawdza jednostke wzgledem klasy urzadzenia i ODRZUCA encje,
+// gdy sie nie zgadza. Dla klasy "water" dopuszcza m3 wylacznie zapisane jako
+// "m3" z indeksem gornym - nasze wewnetrzne "m3" bylo odrzucane i wodomierze
+// w ogole nie pojawialy sie w HA.
+static const char *ha_unit(const char *unit) {
+    if (!unit) return "";
+    if (strcmp(unit, "m3") == 0)  return "m\u00b3";     // m3 z indeksem gornym
+    if (strcmp(unit, "kVARh") == 0) return "kvarh";
+    if (strcmp(unit, "VAR") == 0)   return "var";
+    return unit;
+}
+
 static void ha_class_for(const char *unit, const char **dev_class,
                          const char **state_class) {
     if (strcmp(unit, "kWh") == 0)      { *dev_class = "energy";      *state_class = "total_increasing"; }
@@ -108,7 +130,7 @@ static void ha_announce_one(const ha_item_t *h) {
         devname, h->field,
         pref, h->id_hex, h->field,
         pref, h->id_hex, h->field,
-        h->unit,
+        ha_unit(h->unit),
         pref,
         pref, h->id_hex, devname);
     if (dc[0] && n > 0 && n < (int)sizeof(cfg) - 64)
@@ -123,16 +145,17 @@ static void ha_announce_one(const ha_item_t *h) {
 
 // Zapamietaj pole i ogloś je raz. Kolejne odczyty tego samego pola nie
 // generuja juz ogloszen.
-static void ha_remember(const char *id_hex, const char *field, const char *unit) {
+static ha_item_t *ha_remember(const char *id_hex, const char *field, const char *unit) {
     for (int i = 0; i < s_ha_count; i++)
         if (strcmp(s_ha[i].id_hex, id_hex) == 0 && strcmp(s_ha[i].field, field) == 0)
-            return;
-    if (s_ha_count >= HA_MAX) return;
+            return &s_ha[i];
+    if (s_ha_count >= HA_MAX) return NULL;
     ha_item_t *h = &s_ha[s_ha_count++];
     snprintf(h->id_hex, sizeof(h->id_hex), "%s", id_hex);
     snprintf(h->field,  sizeof(h->field),  "%s", field);
     snprintf(h->unit,   sizeof(h->unit),   "%s", unit ? unit : "");
     if (s_connected) ha_announce_one(h);
+    return h;
 }
 
 static void ha_announce_all(void) {
@@ -240,7 +263,12 @@ bool mqtt_pub_connected(void) { return s_connected; }
 void mqtt_pub_field(const char *id_hex, const char *field,
                     double value, const char *unit, int8_t rssi) {
     if (!s_running || !id_hex || !field) return;
-    ha_remember(id_hex, field, unit);
+    ha_item_t *h = ha_remember(id_hex, field, unit);
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    if (h) {
+        if (h->last_ms && (uint32_t)(now_ms - h->last_ms) < MIN_INTERVAL_MS) return;
+        h->last_ms = now_ms;
+    }
 
     char pref[24]; prefix_of(pref, sizeof(pref));
     char topic[TOPIC_MAX], val[PAYLOAD_MAX];
@@ -248,6 +276,13 @@ void mqtt_pub_field(const char *id_hex, const char *field,
     snprintf(val, sizeof(val), "%.3f", value);
     mq_push(topic, val, true);
 
+    (void)rssi;   // RSSI publikuje mqtt_pub_rssi() raz na ramke
+}
+
+void mqtt_pub_rssi(const char *id_hex, int8_t rssi) {
+    if (!s_running || !id_hex) return;
+    char pref[24]; prefix_of(pref, sizeof(pref));
+    char topic[TOPIC_MAX], val[PAYLOAD_MAX];
     snprintf(topic, sizeof(topic), "%s/%s/rssi", pref, id_hex);
     snprintf(val, sizeof(val), "%d", (int)rssi);
     mq_push(topic, val, false);

@@ -29,6 +29,9 @@ bool mqtt_pub_connected(void);
 void mqtt_pub_field(const char *id_hex, const char *field,
                     double value, const char *unit, int8_t rssi);
 
+// Sila sygnalu - raz na odebrana ramke, nie na kazde pole.
+void mqtt_pub_rssi(const char *id_hex, int8_t rssi);
+
 // Zuzycie za zamknieta dobe (publikowane raz na dobe dla sledzonych pol).
 void mqtt_pub_day(const char *id_hex, const char *field,
                   const char *date_str, double value, const char *unit);

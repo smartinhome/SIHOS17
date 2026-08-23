@@ -290,6 +290,7 @@ void wmbus_decoder_on_frame(const wmbus_frame_t *frame) {
             int kind = 0;
             int nf = meter_total_extract_fields(frame->data, frame->len, key_hex,
                                                 fields, MTF_MAX_FIELDS, &kind);
+            if (nf > 0) mqtt_pub_rssi(tmp.id_hex, frame->rssi);
             for (int i = 0; i < nf; i++) {
                 // zapis tylko sledzonych pol (filtr w history_on_field)
                 history_on_field(tmp.id_hex, fields[i].field, fields[i].value,

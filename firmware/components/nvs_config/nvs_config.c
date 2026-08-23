@@ -24,6 +24,10 @@ static void set_defaults(sih_config_t *c) {
     c->led_blink_ms = 140;           // czas swiecenia po ramce - 140 ms jest
                                      // wyraznie widoczne dla oka
     c->logs_enabled = false;         // zakladka Logi domyslnie ukryta
+    c->mqtt_enabled = false;         // MQTT domyslnie wylaczony
+    c->mqtt_port = 1883;
+    snprintf(c->mqtt_prefix, sizeof(c->mqtt_prefix), "sihos17");
+    c->mqtt_ha_discovery = true;     // encje HA tworza sie same
 }
 
 void nvs_config_init(void) {

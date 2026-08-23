@@ -52,6 +52,15 @@ typedef struct {
         char id_hex[12];
         char name[32];
     } names[MAX_PINS];                         // wlasne nazwy licznikow
+    // --- MQTT ---
+    // Dopisane NA KONCU struktury (zgodnosc blobu NVS przy aktualizacji OTA).
+    bool     mqtt_enabled;
+    char     mqtt_host[64];      // adres brokera (IP lub nazwa)
+    uint16_t mqtt_port;          // domyslnie 1883
+    char     mqtt_user[32];
+    char     mqtt_pass[64];
+    char     mqtt_prefix[24];    // prefiks tematow, domyslnie "sihos17"
+    bool     mqtt_ha_discovery;  // ogloszenia dla Home Assistant
 } sih_config_t;
 
 // Pobierz/ustaw wlasna nazwe licznika po ID. Zwraca "" gdy brak.

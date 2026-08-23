@@ -1,5 +1,6 @@
 #include "wifi_manager.h"
 #include "nvs_config.h"
+#include "mqtt_pub.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -65,6 +66,7 @@ static void event_handler(void *arg, esp_event_base_t base,
         snprintf(s_ip, sizeof(s_ip), IPSTR, IP2STR(&ev->ip_info.ip));
         s_retry = 0;
         s_state = WIFI_STATE_CONNECTED;
+        mqtt_pub_start();   // broker dostepny dopiero z adresem IP
         s_last_disc_reason = 0;  // polaczono - wyczysc powod bledu
         xEventGroupSetBits(s_wifi_eg, WIFI_CONNECTED_BIT);
         ESP_LOGI(TAG, "Połączono: %s", s_ip);
@@ -104,6 +106,7 @@ static void start_ap(const sih_config_t *cfg) {
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_idle));
     ESP_ERROR_CHECK(esp_wifi_start());
     s_state = WIFI_STATE_AP_MODE;
+    mqtt_pub_stop();   // w trybie AP nie ma dostepu do brokera
     esp_wifi_disconnect();   // STA ma byc bezczynny, tylko do skanowania
     ESP_LOGI(TAG, "Tryb AP: %s", cfg->ap_ssid);
 }

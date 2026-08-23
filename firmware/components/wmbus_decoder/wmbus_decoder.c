@@ -1,6 +1,7 @@
 #include "wmbus_decoder.h"
 #include "nvs_config.h"
 #include "meter_total.h"
+#include "mqtt_pub.h"
 #include "history.h"
 #include "led_rx.h"
 #include "esp_log.h"
@@ -293,6 +294,9 @@ void wmbus_decoder_on_frame(const wmbus_frame_t *frame) {
                 // zapis tylko sledzonych pol (filtr w history_on_field)
                 history_on_field(tmp.id_hex, fields[i].field, fields[i].value,
                                  kind, fields[i].cumulative, ts_unix);
+                // Publikacja przez MQTT - kolejkuje i wraca, nie blokuje odbioru.
+                mqtt_pub_field(tmp.id_hex, fields[i].field, fields[i].value,
+                               fields[i].unit, frame->rssi);
             }
         }
     }

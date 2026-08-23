@@ -6,6 +6,7 @@
 #include "wifi_manager.h"
 #include "ota_manager.h"
 #include "history.h"
+#include "mqtt_pub.h"
 #include "led_rx.h"
 #include "led_status.h"
 #include "log_buffer.h"
@@ -918,6 +919,59 @@ static int buf_append(char *buf, int *pos, int cap, const void *data, int len) {
     return 1;
 }
 
+static esp_err_t handle_mqtt_cfg(httpd_req_t *req) {
+    sih_config_t cfg = nvs_config_get();
+    if (req->method == HTTP_GET) {
+        uint32_t sent = 0, failed = 0;
+        mqtt_pub_stats(&sent, &failed);
+        char buf[400];
+        // Hasla NIE zwracamy - panel pokazuje tylko, czy jest ustawione.
+        snprintf(buf, sizeof(buf),
+            "{\"enabled\":%s,\"host\":\"%s\",\"port\":%u,\"user\":\"%s\","
+            "\"has_pass\":%s,\"prefix\":\"%s\",\"ha\":%s,"
+            "\"connected\":%s,\"sent\":%" PRIu32 ",\"failed\":%" PRIu32 "}",
+            cfg.mqtt_enabled ? "true" : "false", cfg.mqtt_host,
+            (unsigned)cfg.mqtt_port, cfg.mqtt_user,
+            cfg.mqtt_pass[0] ? "true" : "false", cfg.mqtt_prefix,
+            cfg.mqtt_ha_discovery ? "true" : "false",
+            mqtt_pub_connected() ? "true" : "false", sent, failed);
+        resp_json(req, buf);
+        return ESP_OK;
+    }
+    char body[400];
+    int len = httpd_req_recv(req, body, sizeof(body) - 1);
+    if (len <= 0) { resp_err(req, "brak danych"); return ESP_OK; }
+    body[len] = 0;
+
+    cfg.mqtt_enabled      = (strstr(body, "\"enabled\":true") != NULL);
+    cfg.mqtt_ha_discovery = (strstr(body, "\"ha\":true") != NULL);
+    const char *p2;
+    if ((p2 = strstr(body, "\"host\":\"")))
+        sscanf(p2, "\"host\":\"%63[^\"]\"", cfg.mqtt_host);
+    if ((p2 = strstr(body, "\"user\":\"")))
+        sscanf(p2, "\"user\":\"%31[^\"]\"", cfg.mqtt_user);
+    if ((p2 = strstr(body, "\"prefix\":\"")))
+        sscanf(p2, "\"prefix\":\"%23[^\"]\"", cfg.mqtt_prefix);
+    // Puste haslo = zostaw dotychczasowe (panel go nie zna i wysyla pusty ciag).
+    if ((p2 = strstr(body, "\"pass\":\""))) {
+        char pass[64] = {0};
+        sscanf(p2, "\"pass\":\"%63[^\"]\"", pass);
+        if (pass[0]) snprintf(cfg.mqtt_pass, sizeof(cfg.mqtt_pass), "%s", pass);
+    }
+    const char *pp = strstr(body, "\"port\":");
+    if (pp) { int v = atoi(pp + 7); if (v > 0 && v < 65536) cfg.mqtt_port = (uint16_t)v; }
+    if (!cfg.mqtt_port) cfg.mqtt_port = 1883;
+    if (!cfg.mqtt_prefix[0]) snprintf(cfg.mqtt_prefix, sizeof(cfg.mqtt_prefix), "sihos17");
+
+    nvs_config_save(&cfg);
+    // Przelacz klienta od razu, bez restartu modulu.
+    mqtt_pub_stop();
+    if (cfg.mqtt_enabled && wifi_manager_get_state() == WIFI_STATE_CONNECTED)
+        mqtt_pub_start();
+    resp_ok(req);
+    return ESP_OK;
+}
+
 static esp_err_t handle_backup_get(httpd_req_t *req) {
     // Kopia wysylana STRUMIENIOWO. Wczesniej budowala sie w buforze 60 kB w RAM,
     // przez co miescily sie w niej tylko biezace pliki historii (168 godzin =
@@ -1196,6 +1250,8 @@ void api_register_handlers(httpd_handle_t server) {
         { .uri="/api/ota/status",  .method=HTTP_GET,  .handler=handle_ota_status,  .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/restart",     .method=HTTP_POST, .handler=handle_restart,     .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/factory-reset",.method=HTTP_POST,.handler=handle_factory_reset,.user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/mqtt",        .method=HTTP_GET,  .handler=handle_mqtt_cfg,    .user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/mqtt",        .method=HTTP_POST, .handler=handle_mqtt_cfg,    .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/backup",      .method=HTTP_GET,  .handler=handle_backup_get,  .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/backup",      .method=HTTP_POST, .handler=handle_backup_post, .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/logs",        .method=HTTP_GET,  .handler=handle_logs,        .user_ctx=NULL, .is_websocket=false },

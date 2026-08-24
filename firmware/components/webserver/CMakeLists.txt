@@ -5,11 +5,20 @@
 # Kopiujemy .gz do build/ przez configure_file(COPYONLY), zeby symbol binarny
 # tworzony przez EMBED_FILES mial krotka nazwe (_binary_index_html_gz_start)
 # zamiast dlugiej z podkreslnikami dla kazdego segmentu sciezki.
-set(WEB_GZ_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../../../webui/index.html.gz")
+#
+# WAZNE: uzywamy CMAKE_CURRENT_LIST_DIR zamiast CMAKE_CURRENT_SOURCE_DIR.
+# ESP-IDF w fazie component_get_requirements wczytuje CMakeLists.txt komponentu
+# przez include() ze swojego skryptu w /opt/esp/idf/tools/cmake/scripts/ - w tym
+# kontekscie CMAKE_CURRENT_SOURCE_DIR wskazuje na SKRYPT ESP-IDF, nie na folder
+# komponentu. CMAKE_CURRENT_LIST_DIR jest ZAWSZE folderem TEGO pliku, nawet gdy
+# jest include'd - jedyna bezpieczna opcja dla resolwowania sciezek wzgledem
+# folderu komponentu.
+set(WEB_GZ_SRC "${CMAKE_CURRENT_LIST_DIR}/../../../webui/index.html.gz")
 set(WEB_GZ_DST "${CMAKE_CURRENT_BINARY_DIR}/index.html.gz")
 if(NOT EXISTS "${WEB_GZ_SRC}")
     message(FATAL_ERROR
-        "Brak webui/index.html.gz. Wygeneruj go z webui/index.html komenda:\n"
+        "Brak webui/index.html.gz (szukam: ${WEB_GZ_SRC}). "
+        "Wygeneruj go z webui/index.html komenda:\n"
         "  python -c \"import gzip; open('webui/index.html.gz','wb').write("
         "gzip.compress(open('webui/index.html','rb').read(), 9))\"")
 endif()

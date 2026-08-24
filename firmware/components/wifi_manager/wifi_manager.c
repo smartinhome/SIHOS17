@@ -28,7 +28,15 @@ static bool               s_sta_autoconnect = false;
 static volatile int       s_ap_clients = 0;
 static esp_netif_t       *s_ap_netif  = NULL;
 static int                s_retry = 0;
+// Fallback dla runtime-loss STA: po pierwszym udanym GOT_IP flaga jest true.
+// Jesli STA padnie na dluzej i s_runtime_retry przekroczy prog, robimy
+// esp_restart() - wtedy wifi_manager_init sprobuje znowu STA (15 s timeout)
+// i przy braku sieci sam skoczy do trybu AP. Bez tego moduł po runtime-loss
+// STA zawisl w niekonczacych sie retry, znikajac z sieci na zawsze.
+static bool               s_got_ip_once = false;
+static int                s_runtime_retry = 0;
 #define MAX_RETRY 5
+#define RUNTIME_MAX_RETRY 60    // ~5-10 minut ciaglych probowan po utracie STA
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT      BIT1
 
@@ -52,7 +60,24 @@ static void event_handler(void *arg, esp_event_base_t base,
         wifi_event_sta_disconnected_t *dis = (wifi_event_sta_disconnected_t *)data;
         if (dis) { ESP_LOGW(TAG, "Rozlaczono z WiFi, powod = %d", dis->reason); s_last_disc_reason = dis->reason; }
         if (!s_sta_autoconnect) return;   // tryb AP - nie ponawiaj polaczen STA
-        if (s_retry < MAX_RETRY) {
+        if (s_got_ip_once) {
+            // Runtime-loss: bylismy juz raz podlaczeni, wiec probujemy w kolko.
+            // Po RUNTIME_MAX_RETRY nieudanych probach robimy restart, zeby
+            // wifi_manager_init mogl zrobic czysty start-up (i ewentualnie
+            // przejsc do trybu AP po 15 s czekania na WIFI_CONNECTED_BIT).
+            esp_wifi_connect();
+            s_runtime_retry++;
+            s_state = WIFI_STATE_CONNECTING;
+            if (s_runtime_retry <= RUNTIME_MAX_RETRY) {
+                ESP_LOGW(TAG, "Runtime retry %d/%d - probuje odzyskac STA",
+                         s_runtime_retry, RUNTIME_MAX_RETRY);
+            } else {
+                ESP_LOGE(TAG, "Runtime retry przekroczony - restart modulu "
+                              "(przy braku STA wifi_manager_init przejdzie do AP)");
+                esp_restart();   // deferred, bezpieczne z event_handler
+            }
+        } else if (s_retry < MAX_RETRY) {
+            // Boot-time retry: krotszy limit, po nim fallback do AP przez WIFI_FAIL_BIT.
             esp_wifi_connect();
             s_retry++;
             ESP_LOGW(TAG, "Ponowne łączenie... (%d/%d)", s_retry, MAX_RETRY);
@@ -65,6 +90,8 @@ static void event_handler(void *arg, esp_event_base_t base,
         ip_event_got_ip_t *ev = (ip_event_got_ip_t *)data;
         snprintf(s_ip, sizeof(s_ip), IPSTR, IP2STR(&ev->ip_info.ip));
         s_retry = 0;
+        s_runtime_retry = 0;
+        s_got_ip_once = true;
         s_state = WIFI_STATE_CONNECTED;
         mqtt_pub_start();   // broker dostepny dopiero z adresem IP
         s_last_disc_reason = 0;  // polaczono - wyczysc powod bledu

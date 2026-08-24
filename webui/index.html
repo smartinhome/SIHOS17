@@ -455,12 +455,21 @@ function showPage(name) {
 }
 
 // ── Fetch helpers ──────────────────────────────────────────
+// Timeout 8s (AbortController) + jawny check r.ok. Bez tego zawieszony ESP32
+// wisial request wiecznie, a odpowiedzi 500/404 dawaly r.json() → wyjatek →
+// wolajacy tylko widzial "if (!d)" i nie wiedzial co poszlo nie tak.
 async function apiFetch(path, opts = {}) {
+  const ctrl = new AbortController();
+  const to = setTimeout(() => ctrl.abort(), 8000);
   try {
-    const r = await fetch(API + path, opts);
+    const r = await fetch(API + path, { ...opts, signal: ctrl.signal });
+    clearTimeout(to);
+    if (!r.ok) { console.warn('API', path, 'HTTP', r.status); return null; }
     return await r.json();
   } catch(e) {
-    console.error('API error', path, e);
+    clearTimeout(to);
+    if (e.name === 'AbortError') console.warn('API timeout', path);
+    else console.error('API error', path, e);
     return null;
   }
 }
@@ -540,24 +549,27 @@ function renderMeterCard(m) {
   const lastSeen = m.last_seen > 0
     ? new Date(m.last_seen).toLocaleTimeString('pl') : '–';
 
+  // WSZYSTKIE pola z m.* i f.* pochodza z ramki radiowej lub konfiguracji
+  // usera - musza byc esc()-owane przed innerHTML, bo atakujacy z zasiegu radia
+  // moze wyslac ramke z ASCII VIF zawierajaca <img onerror=fetch('/api/...')>.
   const fields = m.fields.map(f => `
     <div class="field-item">
-      <div class="field-name">${f.field.replace(/_/g,' ')}</div>
-      <div class="field-val">${f.value.toFixed(3)} <small style="color:var(--muted)">${f.unit}</small></div>
+      <div class="field-name">${esc(String(f.field || '').replace(/_/g,' '))}</div>
+      <div class="field-val">${esc(Number(f.value).toFixed(3))} <small style="color:var(--muted)">${esc(f.unit)}</small></div>
     </div>`).join('');
 
   return `
   <div class="meter-card">
     <div class="meter-header">
       <div>
-        <div class="meter-name">${m.name || m.id}</div>
-        <div class="meter-id">${m.id}</div>
+        <div class="meter-name">${esc(m.name || m.id)}</div>
+        <div class="meter-id">${esc(m.id)}</div>
       </div>
-      <span class="meter-type ${typeClass}">${typeLabel}</span>
+      <span class="meter-type ${typeClass}">${esc(typeLabel)}</span>
     </div>
     <div class="fields-grid">${fields || '<div style="color:var(--muted);font-size:.85rem">Brak zdekodowanych pól</div>'}</div>
     <div class="rssi-bar"><div class="rssi-fill" style="width:${rssiW}%"></div></div>
-    <div class="rssi-label">Sygnał: ${m.rssi} dBm · ostatni odczyt: ${lastSeen}</div>
+    <div class="rssi-label">Sygnał: ${Number(m.rssi)|0} dBm · ostatni odczyt: ${esc(lastSeen)}</div>
   </div>`;
 }
 
@@ -594,9 +606,9 @@ async function fetchConfig() {
     <tr><th>ID</th><th>Typ</th><th>Nazwa</th><th>Status</th></tr>
     ${cfg.meters.map(m => `
     <tr>
-      <td><code>${m.id}</code></td>
-      <td>${m.type}</td>
-      <td>${m.name}</td>
+      <td><code>${esc(m.id)}</code></td>
+      <td>${esc(m.type)}</td>
+      <td>${esc(m.name)}</td>
       <td><span class="badge ${m.enabled?'green':'red'}">
         <span class="dot"></span>${m.enabled?'Aktywny':'Wyłączony'}
       </span></td>
@@ -858,15 +870,29 @@ function decodeAndShow(hex, keyHex) {
 }
 
 function infoItem(label, val) {
+  // label pochodzi z kodu (safe), val z ramki/API (musi byc esc).
   return `<div class="field-item"><div class="field-name">${label}</div>
-    <div class="field-val" style="font-size:.95rem">${val || '—'}</div></div>`;
+    <div class="field-val" style="font-size:.95rem">${val == null || val === '' ? '—' : esc(val)}</div></div>`;
 }
 function fmtVal(v) {
   if (typeof v === 'number')
     return Number.isInteger(v) ? v : (Math.round(v * 1000) / 1000);
   return v == null ? '—' : v;
 }
-function escAttr(s) { return (s == null ? '' : String(s)).replace(/"/g, '&quot;'); }
+// Escape pelny dla kontekstu HTML - kryje wszystkie 5 znakow (&, <, >, ", ').
+// Musi byc uzyty wszedzie gdzie interpolujemy dane z /api (nazwy licznikow,
+// pola f.field/f.unit itd. - te moga zawierac payload z ramki radiowej!).
+function esc(s) {
+  return (s == null ? '' : String(s))
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+// Dla wartosci wstawianych w atrybutach HTML - to samo co esc(), bo w HTML
+// oba konteksty (tekst i atrybut) obsluguja te same encje.
+function escAttr(s) { return esc(s); }
 function driverToType(res) {
   if (res.driver === 'izar') return 'izar';
   return (res.link && res.link.typeName) || 'unknown';
@@ -898,16 +924,16 @@ function renderResult(res, hex) {
   }
 
   if (res.warnings && res.warnings.length)
-    body += res.warnings.map(w => `<div class="msg err">⚠ ${w}</div>`).join('');
+    body += res.warnings.map(w => `<div class="msg err">⚠ ${esc(w)}</div>`).join('');
 
   if (res.error && !(res.fields && res.fields.length))
-    body += `<div class="msg err">${res.error}</div>`;
+    body += `<div class="msg err">${esc(res.error)}</div>`;
 
   if (res.fields && res.fields.length) {
     body += `<div class="fields-grid" style="margin-top:6px">
       ${res.fields.map(f => `<div class="field-item">
-        <div class="field-name">${f.name.replace(/_/g, ' ')}</div>
-        <div class="field-val">${fmtVal(f.value)} <small style="color:var(--muted)">${f.unit || ''}</small></div>
+        <div class="field-name">${esc(String(f.name || '').replace(/_/g, ' '))}</div>
+        <div class="field-val">${esc(fmtVal(f.value))} <small style="color:var(--muted)">${esc(f.unit || '')}</small></div>
       </div>`).join('')}
     </div>`;
 
@@ -926,7 +952,7 @@ function renderResult(res, hex) {
   }
 
   if (res.decryptedHex)
-    body += `<p class="hint mono" style="margin-top:14px;word-break:break-all">payload: ${res.decryptedHex}</p>`;
+    body += `<p class="hint mono" style="margin-top:14px;word-break:break-all">payload: ${esc(res.decryptedHex)}</p>`;
 
   el.innerHTML = head + body;
   document.getElementById('cap-result-card').scrollIntoView({ behavior:'smooth', block:'nearest' });

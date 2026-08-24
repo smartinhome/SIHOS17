@@ -224,6 +224,11 @@ static void check_encryption_key(const uint8_t *data, size_t len, const char *id
 
 void wmbus_decoder_on_frame(const wmbus_frame_t *frame) {
     if (!frame || frame->len < 12) return;
+    // Ochrona przed wywolaniem callbacku PRZED wmbus_decoder_init() -
+    // xSemaphoreTake(NULL, portMAX_DELAY) leci na configASSERT i wywala system.
+    // Sytuacja mozliwa gdy cc1101_start() wystartuje task RX zanim main.c zdazy
+    // zainicjalizowac dekoder (kolejnosc bootu w app_main).
+    if (!s_mutex) return;
 
     // Blysk diody RX: domyslnie przy KAZDYM telegramie; w trybie
     // "tylko dashboard" wylacznie gdy ramka pochodzi od licznika

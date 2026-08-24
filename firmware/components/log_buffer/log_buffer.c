@@ -12,6 +12,11 @@ static char              s_buf[LOG_BUF_SIZE];
 static size_t            s_head = 0;     // pozycja zapisu
 static bool              s_wrapped = false;
 static SemaphoreHandle_t s_mutex = NULL;
+// Licznik linii logow zgubionych, gdy mutex byl zajety. Poprzednio
+// xSemaphoreTake(mutex, 0) po prostu drop-owalo linie bez sladu -
+// pod obciazeniem (dump HTTP + strumien ramek) w buforze wygladalo to
+// jak "cisza w logach", co utrudnialo diagnoze.
+static volatile uint32_t s_dropped = 0;
 #include <time.h>
 
 static vprintf_like_t    s_orig_vprintf = NULL;
@@ -33,7 +38,19 @@ static int log_vprintf(const char *fmt, va_list args) {
     // Chroniony tym samym mutexem co zapis do bufora kolowego.
     static char line[768];
     int n = 0;
-    if (s_mutex && xSemaphoreTake(s_mutex, 0) == pdTRUE) {
+    // Timeout 1 tick (~10 ms) zamiast 0: pozwol krotko poczekac na mutex zamiast
+    // od razu drop-owac linii. Pod normalnym obciazeniem dump HTTP trzyma mutex
+    // milisekundy, wiec 1 tick prawie zawsze wystarczy.
+    if (s_mutex && xSemaphoreTake(s_mutex, 1) == pdTRUE) {
+        // Jesli w miedzyczasie zgubily sie linie, dopisz o tym marker do bufora
+        // ZANIM zapiszemy biezaca linie - dzieki temu widac gdzie byla luka.
+        if (s_dropped > 0) {
+            char drop_msg[64];
+            int dn = snprintf(drop_msg, sizeof(drop_msg),
+                              "[LOG: dropped %u lines]\n", (unsigned)s_dropped);
+            if (dn > 0) append_to_buf(drop_msg, (size_t)dn);
+            s_dropped = 0;
+        }
         va_list args_copy;
         va_copy(args_copy, args);
         n = vsnprintf(line, sizeof(line), fmt, args_copy);
@@ -53,6 +70,9 @@ static int log_vprintf(const char *fmt, va_list args) {
             append_to_buf(line, len);
         }
         xSemaphoreGive(s_mutex);
+    } else if (s_mutex) {
+        // Mutex zajety dluzej niz tick - odnotuj drop dla nastepnego udanego wpisu.
+        s_dropped++;
     }
 
     // Przekaz dalej do oryginalnego (UART)
@@ -70,7 +90,10 @@ void log_buffer_init(void) {
 }
 
 size_t log_buffer_dump(char *out, size_t out_max) {
-    if (!s_mutex) { out[0] = 0; return 0; }
+    if (!s_mutex || !out) return 0;
+    // Guard: out_max < 2 znaczy nawet terminatora nie zmiescimy. Bez tego linie
+    // ponizej robily `out_max - 1` (size_t) → underflow do SIZE_MAX → memcpy setek MB.
+    if (out_max < 2) { if (out_max) out[0] = 0; return 0; }
     size_t written = 0;
     xSemaphoreTake(s_mutex, portMAX_DELAY);
 

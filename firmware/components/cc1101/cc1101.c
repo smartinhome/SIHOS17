@@ -238,7 +238,13 @@ static void configure_wmbus(void) {
     ESP_LOGI(TAG, "PARTNUM=0x%02X VERSION=0x%02X (oczekiwane 0x00 / 0x04|0x14)",
              partnum, version);
     if (version == 0x00 || version == 0xFF) {
-        ESP_LOGE(TAG, "CC1101 nie wykryty! Sprawdz SPI (CS/MOSI/MISO/SCK/VCC/GND)");
+        // Chip nieobecny lub sink SPI zwrocil same 0/1. Przerywamy KONFIGURACJE
+        // zamiast leciec dalej z ESP_ERROR_CHECK na kazdym write_reg - kazde
+        // takie pisanie po nieobecnym chipie konczylo sie panic i reboot loop.
+        // Task RX (linia ~340) rozpozna brak konfiguracji po braku ramek i
+        // panel HTTP w trybie AP pozwoli userowi zdiagnozowac SPI.
+        ESP_LOGE(TAG, "CC1101 nie wykryty! Sprawdz SPI (CS/MOSI/MISO/SCK/VCC/GND) - konfiguracja pominieta");
+        return;
     }
 
     for (size_t i = 0; i < sizeof(WMBUS_CFG)/sizeof(WMBUS_CFG[0]); i++)

@@ -114,19 +114,26 @@ static void free_curve(meter_hist_t *m) {
     m->n_curve = 0;
 }
 
+// tm_isdst = -1: pozwol mktime wyliczyc czy w tym momencie obowiazuje CEST czy CET.
+// Bez tego w dobie zmiany czasu (marzec/pazdziernik) mktime przyjmowal biezacy DST
+// dla polnocy poprzedniej doby - kubelek doby przesuwal sie o 1 h, rebase w
+// history_on_reading (day_base_ts != d0_now) potrafil zdublowac lub zgubic slupek.
 static uint32_t floor_day(uint32_t t) {
     time_t tt = t; struct tm tm; localtime_r(&tt, &tm);
     tm.tm_hour = 0; tm.tm_min = 0; tm.tm_sec = 0;
+    tm.tm_isdst = -1;
     return (uint32_t)mktime(&tm);
 }
 static uint32_t floor_month(uint32_t t) {
     time_t tt = t; struct tm tm; localtime_r(&tt, &tm);
     tm.tm_mday = 1; tm.tm_hour = 0; tm.tm_min = 0; tm.tm_sec = 0;
+    tm.tm_isdst = -1;
     return (uint32_t)mktime(&tm);
 }
 static uint32_t floor_year(uint32_t t) {
     time_t tt = t; struct tm tm; localtime_r(&tt, &tm);
     tm.tm_mon = 0; tm.tm_mday = 1; tm.tm_hour = 0; tm.tm_min = 0; tm.tm_sec = 0;
+    tm.tm_isdst = -1;
     return (uint32_t)mktime(&tm);
 }
 

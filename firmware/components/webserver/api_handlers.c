@@ -374,6 +374,19 @@ static esp_err_t handle_status(httpd_req_t *req) {
         wmbus_decoder_get_seen_count(),
         ota_get_partition_label()
     );
+    // Doklej stan MQTT i czas modulu - pasek naglowka pokazuje je na kazdej
+    // podstronie, wiec musza przyjsc razem ze statusem, bez osobnego zapytania.
+    {
+        const sih_config_t *mc2 = nvs_config_ptr();
+        time_t now2 = time(NULL);
+        size_t l2 = strlen(buf);
+        if (l2 > 1 && buf[l2 - 1] == '}')
+            snprintf(buf + l2 - 1, sizeof(buf) - l2 + 1,
+                     ",\"mqtt_on\":%s,\"mqtt_conn\":%s,\"now\":%" PRIu32 "}",
+                     mc2->mqtt_enabled ? "true" : "false",
+                     mqtt_pub_connected() ? "true" : "false",
+                     (uint32_t)(now2 > 1700000000 ? now2 : 0));
+    }
     resp_json(req, buf);
     return ESP_OK;
 }

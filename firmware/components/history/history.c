@@ -2333,6 +2333,18 @@ int history_curve_day(const char *key, uint32_t day_ts, hist_bucket_t *out, int 
                     if (m->curve[i].ts >= d0 && m->curve[i].ts < d1) out[n++] = m->curve[i];
                 }
             }
+            // FAZA 5a fix: nadpisz OSTATNI punkt biezacym last_total, zeby "teraz"
+            // na wykresie historii bylo identyczne z dashboardem. Bez tego ostatni
+            // punkt to running average jeszcze otwartego 5-min bucketu (curve_sum
+            // /curve_count po kilku ramkach) - a dashboard pokazuje ostatnia
+            // ramke wprost. Zamkniete buckety zostaja jako srednia z okna
+            // (intencja FAZY 5a). Ruszamy tylko out[] zwracanego do JSON,
+            // m->curve[] pozostaje z running average dla wewnetrznej logiki.
+            if (n > 0 && m->curve_bucket_ts != 0 &&
+                out[n-1].ts == m->curve_bucket_ts &&
+                m->last_ts >= m->curve_bucket_ts) {
+                out[n-1].total = m->last_total;
+            }
         }
     }
     if (s_mutex) xSemaphoreGive(s_mutex);

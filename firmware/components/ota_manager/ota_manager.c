@@ -57,9 +57,12 @@ static void ota_url_task(void *arg) {
     // odpowiedz API teoretycznie moze zostac zmanipulowana MITM. Ponowna
     // walidacja tutaj gwarantuje ze zaden nieznany host nie zostanie odpytany.
     if (!ota_url_allowed(url)) {
-        ESP_LOGE(TAG, "OTA: URL '%s' nie jest na liscie dozwolonych - abort", url);
+        // Pelna lista dozwolonych w logu (ma miejsce), s_status.error ma tylko 64 B
+        // wiec krotki komunikat dla UI (uzytkownik zajrzy do logow po szczegoly).
+        ESP_LOGE(TAG, "OTA: URL '%s' nie na whitelist (dozwolone: github.com, "
+                      "objects.githubusercontent.com, api.github.com, www.smartinhome.pl)", url);
         snprintf(s_status.error, sizeof(s_status.error),
-                 "URL poza whitelist (dozwolone: github.com, objects.githubusercontent.com, api.github.com, www.smartinhome.pl)");
+                 "URL poza whitelist (szczegoly w logach)");
         s_status.state = OTA_STATE_FAILED;
         if (url) free(url);
         vTaskDelete(NULL);

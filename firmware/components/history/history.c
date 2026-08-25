@@ -622,6 +622,36 @@ static void restore_from_archive(meter_hist_t *m) {
              hdr_ok ? (h.v2 ? "v2" : "v1->v2") : "brak/nowy");
 }
 
+// --- FAZA 3b: wersjonowanie h_*.bin (magic + version + CRC32) ---
+// Wczesniej h_ nie mial magic ani sumy kontrolnej - bit-flip na SPIFFS (nawet
+// po latach) dawal odczyt smieci jako n_hours/n_days, ratowal tylko bounds-check
+// ktory zerowal historie do zera. Teraz kazdy plik zaczyna sie od 12-bajtowego
+// naglowka:
+//   [0..3]  uint32 magic  = "SIH1" (0x53494831 LE)
+//   [4..7]  uint32 version = 1
+//   [8..11] uint32 payload_crc32 (IEEE 802.3, wyliczone po zapisaniu payload)
+//   [12..]  payload = ten sam format co stary v0 (kind, last_total, ...)
+// Backward compat: load_meter sniffuje pierwszy uint32; jesli != MAGIC to plik
+// v0, te 4 bajty to `kind` (male 0-3, nie moze przypadkiem trafic w 1397909041)
+// -> wczytujemy po staremu bez CRC. Migracja v0->v1 przy nastepnym save_meter
+// (transparentna).
+#define METER_MAGIC 0x53494831u   // "SIH1" (little-endian)
+#define METER_VER   1u
+#define METER_HDR   12            // magic(4) + ver(4) + crc(4)
+
+// CRC32 IEEE 802.3 (jak w gzip/PNG) - bez lookup table, bez zaleznosci od
+// esp_rom_crc.h/esp_crc.h. Dla ~14 KB pliku licznika liczy sie w mikrosekundach.
+static uint32_t hist_crc32_update(uint32_t crc, const void *data, size_t len) {
+    const uint8_t *p = (const uint8_t *)data;
+    crc = ~crc;
+    while (len--) {
+        crc ^= *p++;
+        for (int i = 0; i < 8; i++)
+            crc = (crc >> 1) ^ (0xEDB88320u & -(crc & 1));
+    }
+    return ~crc;
+}
+
 static void save_meter(meter_hist_t *m) {
     if (!s_fs_ok) return;
     char path[64]; meter_path(m->id, path, sizeof(path));
@@ -631,24 +661,47 @@ static void save_meter(meter_hist_t *m) {
     char tmp[64]; path_to_tmp(path, tmp, sizeof(tmp));
     FILE *f = fopen(tmp, "wb");
     if (!f) { ESP_LOGW(TAG, "nie moge zapisac %s", tmp); return; }
-    // Zapis: kind, last_total, last_ts, potem kazda seria (n + dane)
-    fwrite(&m->kind, sizeof(int), 1, f);
-    fwrite(&m->last_total, sizeof(float), 1, f);
-    fwrite(&m->last_ts, sizeof(uint32_t), 1, f);
-    fwrite(&m->n_hours, sizeof(int), 1, f);  fwrite(m->hours, sizeof(hist_bucket_t), m->n_hours, f);
-    fwrite(&m->n_days, sizeof(int), 1, f);   fwrite(m->days, sizeof(hist_bucket_t), m->n_days, f);
-    fwrite(&m->n_months, sizeof(int), 1, f); fwrite(m->months, sizeof(hist_bucket_t), m->n_months, f);
-    fwrite(&m->n_years, sizeof(int), 1, f);  fwrite(m->years, sizeof(hist_bucket_t), m->n_years, f);
-    fwrite(&m->cumulative, sizeof(int), 1, f);  // na koncu (kompatybilnosc starych plikow)
-    fwrite(&m->n_curve, sizeof(int), 1, f);      // krzywa dnia (pola chwilowe)
+    // Naglowek v1: magic + version + CRC placeholder (0). Prawdziwe CRC
+    // wpisujemy po zakonczeniu zapisu (fseek do 8-go bajta).
+    uint32_t magic = METER_MAGIC, ver = METER_VER, crc_placeholder = 0;
+    fwrite(&magic, sizeof(uint32_t), 1, f);
+    fwrite(&ver, sizeof(uint32_t), 1, f);
+    fwrite(&crc_placeholder, sizeof(uint32_t), 1, f);
+    // Payload + on-the-fly CRC. Makro W: fwrite + hist_crc32_update jednym
+    // ruchem, zeby zaden zapis nie zostal pominiety w sumie kontrolnej.
+    uint32_t crc = 0;
+    #define W(ptr, sz) do { \
+        fwrite((ptr), (sz), 1, f); \
+        crc = hist_crc32_update(crc, (ptr), (sz)); \
+    } while (0)
+    #define WARR(ptr, elsz, n) do { \
+        if ((n) > 0) { \
+            fwrite((ptr), (elsz), (n), f); \
+            crc = hist_crc32_update(crc, (ptr), (size_t)(elsz) * (size_t)(n)); \
+        } \
+    } while (0)
+    W(&m->kind, sizeof(int));
+    W(&m->last_total, sizeof(float));
+    W(&m->last_ts, sizeof(uint32_t));
+    W(&m->n_hours, sizeof(int));   WARR(m->hours,  sizeof(hist_bucket_t), m->n_hours);
+    W(&m->n_days, sizeof(int));    WARR(m->days,   sizeof(hist_bucket_t), m->n_days);
+    W(&m->n_months, sizeof(int));  WARR(m->months, sizeof(hist_bucket_t), m->n_months);
+    W(&m->n_years, sizeof(int));   WARR(m->years,  sizeof(hist_bucket_t), m->n_years);
+    W(&m->cumulative, sizeof(int));
+    W(&m->n_curve, sizeof(int));
     if (m->curve && m->n_curve > 0)
-        fwrite(m->curve, sizeof(hist_bucket_t), m->n_curve, f);
+        WARR(m->curve, sizeof(hist_bucket_t), m->n_curve);
     // Baza doby NA KONCU pliku (stare h_*.bin nadal sie wczytuja). Musi przezyc
     // restart: bez niej modul uruchomiony ponownie w srodku doby nie ma od czego
     // liczyc zuzycia i wykres dnia byl pusty.
-    fwrite(&m->day_base_ts, sizeof(uint32_t), 1, f);
-    fwrite(&m->day_base_total, sizeof(float), 1, f);
-    fwrite(&m->rebase_ts, sizeof(uint32_t), 1, f);
+    W(&m->day_base_ts, sizeof(uint32_t));
+    W(&m->day_base_total, sizeof(float));
+    W(&m->rebase_ts, sizeof(uint32_t));
+    #undef W
+    #undef WARR
+    // Wpisz obliczone CRC w miejscu placeholdera (offset 8 = po magic+ver).
+    fseek(f, 8, SEEK_SET);
+    fwrite(&crc, sizeof(uint32_t), 1, f);
     flush_to_flash(f);   // wymuszona synchronizacja z flashem przed rename
     fclose(f);
     if (rename(tmp, path) != 0) {
@@ -668,47 +721,125 @@ static bool load_meter(meter_hist_t *m, const char *id) {
     memset(m, 0, sizeof(*m));
     strncpy(m->id, id, sizeof(m->id) - 1);
     m->used = true;
-    size_t r = 0;
-    r += fread(&m->kind, sizeof(int), 1, f);
-    r += fread(&m->last_total, sizeof(float), 1, f);
-    r += fread(&m->last_ts, sizeof(uint32_t), 1, f);
-    fread(&m->n_hours, sizeof(int), 1, f);
-    if (m->n_hours < 0 || m->n_hours > HIST_HOURS) m->n_hours = 0;
-    m->n_hours = (int)fread(m->hours, sizeof(hist_bucket_t), m->n_hours, f);
-    fread(&m->n_days, sizeof(int), 1, f);
-    if (m->n_days < 0 || m->n_days > HIST_DAYS) m->n_days = 0;
-    m->n_days = (int)fread(m->days, sizeof(hist_bucket_t), m->n_days, f);
-    fread(&m->n_months, sizeof(int), 1, f);
-    if (m->n_months < 0 || m->n_months > HIST_MONTHS) m->n_months = 0;
-    m->n_months = (int)fread(m->months, sizeof(hist_bucket_t), m->n_months, f);
-    fread(&m->n_years, sizeof(int), 1, f);
-    if (m->n_years < 0 || m->n_years > HIST_YEARS) m->n_years = 0;
-    m->n_years = (int)fread(m->years, sizeof(hist_bucket_t), m->n_years, f);
-    // cumulative na koncu (nowe pliki). Stary plik go nie ma - fread zwroci 0,
-    // wtedy wnioskujemy z pola id: napiecie/moc = chwilowe, reszta = kumulacyjne.
-    if (fread(&m->cumulative, sizeof(int), 1, f) != 1) {
+
+    // FAZA 3b: sniff naglowka. Pierwszy uint32 == METER_MAGIC -> plik v1 z CRC.
+    // Kolizja z v0 (gdzie 1. uint32 to `kind` typu int, wartosc 0-3) niemozliwa
+    // bo METER_MAGIC = 1397909041 (0x53494831). Po detekcji v1 wczytujemy ver+crc,
+    // reszte payload z on-the-fly CRC. Na koncu porownujemy - mismatch = warn
+    // (dane wczytujemy mimo to, bo bounds-check na kazdym n_xxx jak wczesniej;
+    // pojedynczy bit-flip w zerowanym polu i tak by nie zmienil widocznego stanu).
+    uint32_t sniff = 0;
+    if (fread(&sniff, sizeof(uint32_t), 1, f) != 1) { fclose(f); return false; }
+    bool v1 = (sniff == METER_MAGIC);
+    uint32_t expected_crc = 0;
+    uint32_t crc = 0;
+    if (v1) {
+        uint32_t ver = 0;
+        if (fread(&ver, sizeof(uint32_t), 1, f) != 1 ||
+            fread(&expected_crc, sizeof(uint32_t), 1, f) != 1) {
+            ESP_LOGW(TAG, "load_meter %s: uciety naglowek v1", id);
+            fclose(f); return false;
+        }
+        if (ver != METER_VER) {
+            ESP_LOGW(TAG, "load_meter %s: nieznana wersja v%u (obsluguje v%u)", id, (unsigned)ver, METER_VER);
+            // Nie porzucamy - probujemy wczytac po staremu (moze byc nadzbior).
+        }
+        // Payload wczytujemy dalej z on-the-fly CRC (poczatek payloadu = kind).
+    } else {
+        // Plik v0 - pierwszy uint32 to `kind`. Przypisz i kontynuuj po staremu.
+        m->kind = (int)sniff;
+    }
+
+    // Makro R: fread + hist_crc32_update (tylko dla v1, dla v0 CRC nie liczymy).
+    #define R(ptr, sz) do { \
+        if (fread((ptr), (sz), 1, f) == 1 && v1) \
+            crc = hist_crc32_update(crc, (ptr), (sz)); \
+    } while (0)
+    #define RARR_INTO(field, cap, field_max) do { \
+        R(&(field), sizeof(int)); \
+        if ((field) < 0 || (field) > (field_max)) (field) = 0; \
+        size_t got = fread((cap), sizeof(hist_bucket_t), (size_t)(field), f); \
+        if (v1) crc = hist_crc32_update(crc, (cap), got * sizeof(hist_bucket_t)); \
+        (field) = (int)got; \
+    } while (0)
+
+    if (v1) {
+        // Payload kind czytamy dopiero teraz (dla v0 juz jest w m->kind z sniff).
+        R(&m->kind, sizeof(int));
+    }
+    R(&m->last_total, sizeof(float));
+    R(&m->last_ts, sizeof(uint32_t));
+    RARR_INTO(m->n_hours,  m->hours,  HIST_HOURS);
+    RARR_INTO(m->n_days,   m->days,   HIST_DAYS);
+    RARR_INTO(m->n_months, m->months, HIST_MONTHS);
+    RARR_INTO(m->n_years,  m->years,  HIST_YEARS);
+
+    // cumulative na koncu (nowe pliki v0 mialy go, starsze nie - fallback z id).
+    int cum = 0;
+    size_t got_cum = fread(&cum, sizeof(int), 1, f);
+    if (got_cum == 1) {
+        if (v1) crc = hist_crc32_update(crc, &cum, sizeof(int));
+        m->cumulative = cum;
+    } else {
         bool instant = (strstr(id, "napiecie") || strstr(id, "moc"));
         m->cumulative = instant ? 0 : 1;
     }
+
     // Krzywa dnia - dopisana na koncu w nowszych wersjach; brak = 0 punktow.
-    if (fread(&m->n_curve, sizeof(int), 1, f) == 1) {
-        if (m->n_curve < 0 || m->n_curve > HIST_CURVE) m->n_curve = 0;
-        if (m->n_curve > 0 && ensure_curve(m)) {
-            m->n_curve = (int)fread(m->curve, sizeof(hist_bucket_t), m->n_curve, f);
+    int nc = 0;
+    size_t got_nc = fread(&nc, sizeof(int), 1, f);
+    if (got_nc == 1) {
+        if (v1) crc = hist_crc32_update(crc, &nc, sizeof(int));
+        if (nc < 0 || nc > HIST_CURVE) nc = 0;
+        m->n_curve = nc;
+        if (nc > 0 && ensure_curve(m)) {
+            size_t got_c = fread(m->curve, sizeof(hist_bucket_t), nc, f);
+            if (v1) crc = hist_crc32_update(crc, m->curve, got_c * sizeof(hist_bucket_t));
+            m->n_curve = (int)got_c;
         } else {
             m->n_curve = 0;
         }
     } else {
         m->n_curve = 0;
     }
+
     // Baza doby - dopisana na koncu w nowszych wersjach; brak w starym pliku = 0.
-    if (fread(&m->day_base_ts, sizeof(uint32_t), 1, f) != 1 ||
-        fread(&m->day_base_total, sizeof(float), 1, f) != 1) {
+    uint32_t dbt = 0; float dbtot = 0.0f; uint32_t rbt = 0;
+    if (fread(&dbt, sizeof(uint32_t), 1, f) == 1 &&
+        fread(&dbtot, sizeof(float), 1, f) == 1) {
+        if (v1) {
+            crc = hist_crc32_update(crc, &dbt, sizeof(uint32_t));
+            crc = hist_crc32_update(crc, &dbtot, sizeof(float));
+        }
+        m->day_base_ts = dbt;
+        m->day_base_total = dbtot;
+    } else {
         m->day_base_ts = 0;
         m->day_base_total = 0;
     }
-    if (fread(&m->rebase_ts, sizeof(uint32_t), 1, f) != 1) m->rebase_ts = 0;
+    if (fread(&rbt, sizeof(uint32_t), 1, f) == 1) {
+        if (v1) crc = hist_crc32_update(crc, &rbt, sizeof(uint32_t));
+        m->rebase_ts = rbt;
+    } else {
+        m->rebase_ts = 0;
+    }
+    #undef R
+    #undef RARR_INTO
     fclose(f);
+
+    // Weryfikacja CRC dla v1. Konserwatywnie: warn ale zaakceptuj (dane juz
+    // ograniczone przez bounds-check na kazdym n_xxx, a pojedynczy bit-flip w
+    // pustej sekcji nie zmieni widocznego stanu). Kolejny save_meter przelicze
+    // CRC i sytuacja sie zsynchronizuje.
+    if (v1 && crc != expected_crc) {
+        ESP_LOGW(TAG, "load_meter %s: CRC mismatch (0x%08x vs 0x%08x) - "
+                      "prawdopodobny bit-flip na SPIFFS lub uciety zapis",
+                 id, (unsigned)crc, (unsigned)expected_crc);
+    } else if (v1) {
+        ESP_LOGI(TAG, "load_meter %s: OK (v1, CRC 0x%08x)", id, (unsigned)crc);
+    } else {
+        ESP_LOGI(TAG, "load_meter %s: OK (v0, brak CRC)", id);
+    }
     return true;
 }
 

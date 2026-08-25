@@ -24,6 +24,7 @@
 #include "driver/temperature_sensor.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "cJSON.h"
 #include <stdlib.h>
 #include <inttypes.h>
 #include <string.h>
@@ -49,10 +50,31 @@ static void resp_err(httpd_req_t *req, const char *msg) {
     resp_json(req, buf);
 }
 
+// Zwraca liczbe bajtow tresci lub -1 przy bledzie. Wolajacy powinien sprawdzic
+// wartosc zwrotna PRZED parsowaniem - poprzednia wersja ignorowala ujemne
+// wartosci z httpd_req_recv (timeout HTTPD_SOCK_ERR_TIMEOUT = -408) i cicho
+// zapisywala fragmentarycznie odebrany JSON jako "poprawny" (klucze AES, wifi
+// pass, mqtt pass moglo trafic w NVS urwane w polowie).
+// Odrzucamy tez zadania z content_len >= max (potrzeba miejsca na terminator).
 static int read_body(httpd_req_t *req, char *buf, size_t max) {
-    int total = 0, ret;
-    while ((ret = httpd_req_recv(req, buf + total, max - total - 1)) > 0)
-        total += ret;
+    if (!buf || max < 1) return -1;
+    // Terminator na buf[0] ustawiamy PRZED czymkolwiek innym. Starsze handlery
+    // nie sprawdzaja return value i wolaja strstr(body, ...) - bez terminatora
+    // strstr czytalby smieci ze stosu. Terminator + return -1 = deterministycznie
+    // pusty bufor przy bledzie, zaden pattern strstr nie zostanie znaleziony.
+    buf[0] = 0;
+    if (max < 2) return -1;
+    // req->content_len jest 0 dla chunked-encoding albo braku naglowka; wtedy
+    // limit max i tak nas chroni. Dla zadeklarowanego content_len sprawdzamy.
+    if (req->content_len > 0 && req->content_len >= max) return -1;
+    int total = 0;
+    while ((size_t)total < max - 1) {
+        int ret = httpd_req_recv(req, buf + total, max - total - 1);
+        if (ret > 0) { total += ret; continue; }
+        if (ret == 0) break;                        // koniec strumienia
+        if (ret == HTTPD_SOCK_ERR_TIMEOUT) { buf[0] = 0; return -1; }  // niekompletne body
+        buf[0] = 0; return -1;                       // inny blad socketu
+    }
     buf[total] = 0;
     return total;
 }
@@ -715,22 +737,37 @@ static esp_err_t handle_led_status(httpd_req_t *req) {
 
 static esp_err_t handle_config_meter(httpd_req_t *req) {
     char body[512];
-    read_body(req, body, sizeof(body));
-    char id[12] = {0}, type[16] = {0}, key[33] = {0}, name[32] = {0};
-    char *p;
-    if ((p = strstr(body, "\"id\":\"")))   sscanf(p, "\"id\":\"%11[^\"]\"",   id);
-    if ((p = strstr(body, "\"type\":\""))) sscanf(p, "\"type\":\"%15[^\"]\"", type);
-    if ((p = strstr(body, "\"key\":\"")))  sscanf(p, "\"key\":\"%32[^\"]\"",  key);
-    if ((p = strstr(body, "\"name\":\""))) sscanf(p, "\"name\":\"%31[^\"]\"", name);
-    if (strlen(id) == 0) { resp_err(req, "brak id"); return ESP_OK; }
+    int blen = read_body(req, body, sizeof(body));
+    if (blen <= 0) { resp_err(req, "pusty lub uszkodzony body"); return ESP_OK; }
+
+    // Poprzednio bylo strstr(body, "\"id\":\"") + sscanf - podatne na injection
+    // (np. wartosc "foo\"id\":\"HACK" innego pola sprawiala ze sscanf lapal
+    // podszyte ID) i na sfalszowane typy JSON. cJSON parsuje ze scisla typologia
+    // i zapewnia terminator na kazdym stringu.
+    cJSON *root = cJSON_Parse(body);
+    if (!root) { resp_err(req, "zly JSON"); return ESP_OK; }
+    const cJSON *jid   = cJSON_GetObjectItemCaseSensitive(root, "id");
+    const cJSON *jtype = cJSON_GetObjectItemCaseSensitive(root, "type");
+    const cJSON *jkey  = cJSON_GetObjectItemCaseSensitive(root, "key");
+    const cJSON *jname = cJSON_GetObjectItemCaseSensitive(root, "name");
+    const cJSON *jdel  = cJSON_GetObjectItemCaseSensitive(root, "del");
+    if (!cJSON_IsString(jid) || !jid->valuestring || !*jid->valuestring) {
+        cJSON_Delete(root); resp_err(req, "brak id"); return ESP_OK;
+    }
+    char id[12]   = {0}; strlcpy(id, jid->valuestring, sizeof(id));
+    char type[16] = {0}; if (cJSON_IsString(jtype) && jtype->valuestring) strlcpy(type, jtype->valuestring, sizeof(type));
+    char key[33]  = {0}; if (cJSON_IsString(jkey)  && jkey->valuestring)  strlcpy(key,  jkey->valuestring,  sizeof(key));
+    char name[32] = {0}; if (cJSON_IsString(jname) && jname->valuestring) strlcpy(name, jname->valuestring, sizeof(name));
+    bool do_del = (jdel != NULL);   // dowolna obecnosc pola "del" oznacza usun
+    cJSON_Delete(root);
 
     sih_config_t cfg = nvs_config_get();
     int idx = -1;
     for (int i = 0; i < cfg.meter_count; i++)
         if (strcasecmp(cfg.meters[i].id_hex, id) == 0) { idx = i; break; }
 
-    // Usuwanie licznika: body zawiera "del":1
-    if (strstr(body, "\"del\"")) {
+    // Usuwanie licznika: body zawiera "del":1 (lub cokolwiek pod kluczem "del")
+    if (do_del) {
         if (idx >= 0) {
             for (int i = idx; i < cfg.meter_count - 1; i++)
                 cfg.meters[i] = cfg.meters[i + 1];
@@ -786,14 +823,20 @@ static esp_err_t handle_config_get(httpd_req_t *req) {
 
 static esp_err_t handle_config_wifi(httpd_req_t *req) {
     char body[256];
-    read_body(req, body, sizeof(body));
-    char ssid[64] = {0}, pass[64] = {0};
-    char *p;
-    if ((p = strstr(body, "\"ssid\":\"")))
-        sscanf(p, "\"ssid\":\"%63[^\"]\"", ssid);
-    if ((p = strstr(body, "\"password\":\"")))
-        sscanf(p, "\"password\":\"%63[^\"]\"", pass);
-    if (strlen(ssid) == 0) { resp_err(req, "brak ssid"); return ESP_OK; }
+    int blen = read_body(req, body, sizeof(body));
+    if (blen <= 0) { resp_err(req, "pusty lub uszkodzony body"); return ESP_OK; }
+    cJSON *root = cJSON_Parse(body);
+    if (!root) { resp_err(req, "zly JSON"); return ESP_OK; }
+    const cJSON *jssid = cJSON_GetObjectItemCaseSensitive(root, "ssid");
+    const cJSON *jpass = cJSON_GetObjectItemCaseSensitive(root, "password");
+    if (!cJSON_IsString(jssid) || !jssid->valuestring || !*jssid->valuestring) {
+        cJSON_Delete(root); resp_err(req, "brak ssid"); return ESP_OK;
+    }
+    char ssid[64] = {0}; strlcpy(ssid, jssid->valuestring, sizeof(ssid));
+    char pass[64] = {0};
+    if (cJSON_IsString(jpass) && jpass->valuestring)
+        strlcpy(pass, jpass->valuestring, sizeof(pass));
+    cJSON_Delete(root);
     resp_ok(req);
     vTaskDelay(pdMS_TO_TICKS(500));
     wifi_manager_reconnect(ssid, pass);
@@ -802,12 +845,29 @@ static esp_err_t handle_config_wifi(httpd_req_t *req) {
 
 static esp_err_t handle_ota_url(httpd_req_t *req) {
     char body[512];
-    read_body(req, body, sizeof(body));
+    int blen = read_body(req, body, sizeof(body));
+    if (blen <= 0) { resp_err(req, "pusty lub uszkodzony body"); return ESP_OK; }
+    cJSON *root = cJSON_Parse(body);
+    if (!root) { resp_err(req, "zly JSON"); return ESP_OK; }
+    const cJSON *jurl = cJSON_GetObjectItemCaseSensitive(root, "url");
+    if (!cJSON_IsString(jurl) || !jurl->valuestring || !*jurl->valuestring) {
+        cJSON_Delete(root); resp_err(req, "brak url"); return ESP_OK;
+    }
     char url[480] = {0};
-    char *p;
-    if ((p = strstr(body, "\"url\":\"")))
-        sscanf(p, "\"url\":\"%479[^\"]\"", url);
-    if (strlen(url) == 0) { resp_err(req, "brak url"); return ESP_OK; }
+    strlcpy(url, jurl->valuestring, sizeof(url));
+    cJSON_Delete(root);
+
+    // Fail-fast whitelist: jesli URL nie zaczyna sie od dozwolonego prefiksu,
+    // NIE uruchamiamy nawet taska OTA - zwracamy 400 od razu. Zapisujemy do
+    // logu dla diagnostyki (userpanel widzi tez blad). ota_url_task ma ten sam
+    // check jako defence-in-depth (URL z GitHub API mogl teoretycznie podac cos
+    // spoza whitelisty gdyby response byl zmanipulowany).
+    if (!ota_url_allowed(url)) {
+        ESP_LOGW(TAG, "OTA: URL '%s' odrzucony (poza whitelist)", url);
+        httpd_resp_set_status(req, "400 Bad Request");
+        resp_json(req, "{\"error\":\"URL poza whitelist (github.com, objects.githubusercontent.com, api.github.com, www.smartinhome.pl); wymagane https://\"}");
+        return ESP_OK;
+    }
     resp_ok(req);
     ota_start_from_url(url);
     return ESP_OK;
@@ -826,6 +886,16 @@ static esp_err_t handle_ota_upload(httpd_req_t *req) {
     }
     const esp_partition_t *part = esp_ota_get_next_update_partition(NULL);
     if (!part) { resp_err(req, "brak partycji OTA"); return ESP_OK; }
+    // Sanity: content_len ktore nie miesci sie w partycji nigdy nie moze byc
+    // poprawnym obrazem. Wczesniej brak tego checka pozwalal esp_ota_end zwrocic
+    // sukces z niepelnym obrazem (jesli klient zamknal polaczenie w polowie) i
+    // esp_ota_set_boot_partition ustawial cegle - restart w nieuruchamialny bin.
+    if (len > part->size) {
+        ESP_LOGW(TAG, "OTA upload: content_len %u > partycja %u", (unsigned)len, (unsigned)part->size);
+        httpd_resp_set_status(req, "413 Payload Too Large");
+        resp_json(req, "{\"error\":\"obraz wiekszy od partycji OTA\"}");
+        return ESP_OK;
+    }
 
     const int CH = 4096;
     char *buf = malloc(CH);
@@ -1167,6 +1237,33 @@ static esp_err_t handle_backup_post(httpd_req_t *req) {
         if (!bk_read(req, nm, nlen, ring, CH, &rlen, &rpos)) goto bad;
         uint32_t dlen;
         if (!bk_read(req, &dlen, 4, ring, CH, &rlen, &rpos)) goto bad;
+        // Walidacja nazwy: path traversal jest tu realny, bo nm pochodzi ze
+        // strumienia HTTP wgrywanego z panelu. Bez tego backup z nm="../boot/xxx"
+        // albo nm="config.bin" nadpisywalby dowolny plik na SPIFFS - brick albo
+        // podszycie konfiguracji. Dopuszczalne tylko pliki historii z whitelisty
+        // prefiksow (h_/ha_) lub tracked.txt; zadnych "/" ani "..".
+        bool nm_ok = true;
+        if (nlen == 0) nm_ok = false;
+        for (uint8_t i = 0; i < nlen && nm_ok; i++) {
+            unsigned char c = (unsigned char)nm[i];
+            // Alfanumeryczne + _ . - . Zero backslashy/ukosnikow/kropek na starcie.
+            if (!(c == '_' || c == '.' || c == '-' || (c >= '0' && c <= '9')
+                  || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')))
+                nm_ok = false;
+        }
+        if (nm_ok && nm[0] == '.') nm_ok = false;              // "." albo "..*"
+        if (nm_ok && strstr(nm, "..") != NULL) nm_ok = false;  // sekwencja ..
+        if (nm_ok) {
+            // Whitelist prefiksow zgodna z backup_get.
+            bool allowed = (strncmp(nm, "h_", 2) == 0)
+                        || (strncmp(nm, "ha_", 3) == 0)
+                        || (strcmp(nm, "tracked.txt") == 0);
+            if (!allowed) nm_ok = false;
+        }
+        if (!nm_ok) {
+            ESP_LOGW(TAG, "backup_post: odrzucona nazwa '%.63s' (walidacja)", nm);
+            goto bad;
+        }
         char path[96];
         snprintf(path, sizeof(path), "/spiffs/%.80s", nm);
         FILE *f = fopen(path, "wb");

@@ -25,3 +25,9 @@ void          ota_start_from_github(bool beta_channel);
 ota_status_t  ota_get_status(void);
 const char   *ota_get_running_version(void);
 const char   *ota_get_partition_label(void);
+
+// Whitelist source-of-truth dla OTA. Zwraca true tylko dla https:// URL-i
+// zaczynajacych sie od dozwolonego prefiksu (github.com, objects.githubusercontent.com,
+// api.github.com, www.smartinhome.pl). Wolane rowniez z api_handlers.c
+// przed uruchomieniem OTA - defence-in-depth (fail-fast 400 zanim task startuje).
+bool          ota_url_allowed(const char *url);

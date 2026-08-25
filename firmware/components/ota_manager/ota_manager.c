@@ -21,11 +21,50 @@
 static const char *TAG = "OTA";
 static ota_status_t s_status = { .state = OTA_STATE_IDLE };
 
+// Whitelist dozwolonych zrodel OTA. Bez tego /api/ota/url przyjmowal DOWOLNY
+// URL - atakujacy w LAN mogl wskazac obraz z wlasnego serwera i przejac modul
+// (SSRF + RCE). Kazde URL musi zaczynac sie od jednego z tych prefiksow:
+// - https://github.com/                    (releases attachments, redirect)
+// - https://objects.githubusercontent.com/  (rzeczywisty CDN GitHub po redirect)
+// - https://api.github.com/                 (metadata dla ota_start_from_github)
+// - https://www.smartinhome.pl/             (autorski serwer usera)
+// Wymuszamy https:// - plain HTTP jest zaslepione (MITM = podmiana firmware).
+static const char * const OTA_URL_WHITELIST[] = {
+    "https://github.com/",
+    "https://objects.githubusercontent.com/",
+    "https://api.github.com/",
+    "https://www.smartinhome.pl/",
+    NULL
+};
+
+bool ota_url_allowed(const char *url) {
+    if (!url || url[0] == 0) return false;
+    for (int i = 0; OTA_URL_WHITELIST[i] != NULL; i++) {
+        size_t plen = strlen(OTA_URL_WHITELIST[i]);
+        if (strncmp(url, OTA_URL_WHITELIST[i], plen) == 0) return true;
+    }
+    return false;
+}
+
 // Task OTA z URL (GitHub Releases)
 static void ota_url_task(void *arg) {
     char *url = (char *)arg;
     s_status.state        = OTA_STATE_DOWNLOADING;
     s_status.progress_pct = 0;
+
+    // Defence-in-depth: whitelist juz sprawdzona w handle_ota_url, ale
+    // ota_url_task wolany jest tez z ota_github_task (URL z API GitHub) - tam
+    // odpowiedz API teoretycznie moze zostac zmanipulowana MITM. Ponowna
+    // walidacja tutaj gwarantuje ze zaden nieznany host nie zostanie odpytany.
+    if (!ota_url_allowed(url)) {
+        ESP_LOGE(TAG, "OTA: URL '%s' nie jest na liscie dozwolonych - abort", url);
+        snprintf(s_status.error, sizeof(s_status.error),
+                 "URL poza whitelist (dozwolone: github.com, objects.githubusercontent.com, api.github.com, www.smartinhome.pl)");
+        s_status.state = OTA_STATE_FAILED;
+        if (url) free(url);
+        vTaskDelete(NULL);
+        return;
+    }
 
     // Zatrzymaj radio jesli jeszcze dziala (gdy wolane bezposrednio z URL)
     cc1101_stop();
@@ -35,7 +74,11 @@ static void ota_url_task(void *arg) {
         .url                         = url,
         .timeout_ms                  = 60000,
         .crt_bundle_attach           = esp_crt_bundle_attach,
-        .skip_cert_common_name_check = true,
+        // skip_cert_common_name_check = false: wymuszamy walidacje CN certyfikatu
+        // wzgledem hosta URL. Wczesniej true pozwalalo kazdemu certowi z bundle
+        // CA na podszycie sie za dowolna domene - MITM przez uzyskanie ANY cert
+        // od zaufanego CA (Let's Encrypt, DigiCert...) mogl podac wlasny firmware.
+        .skip_cert_common_name_check = false,
         .max_redirection_count       = 10,
         .buffer_size                 = 8192,
         .buffer_size_tx              = 4096,
@@ -215,7 +258,9 @@ static bool github_get_latest_bin_url(char *out_url, size_t out_max, bool beta_c
         .url                         = GITHUB_API_URL,
         .timeout_ms                  = 10000,
         .crt_bundle_attach           = esp_crt_bundle_attach,
-        .skip_cert_common_name_check = true,
+        // false: wymuszaj walidacje CN cert. api.github.com ma prawidlowy cert
+        // dla tego dokladnie hosta. Poprzednie true bylo mimowolnym MITM-holem.
+        .skip_cert_common_name_check = false,
         .max_redirection_count       = 10,
         .buffer_size                 = 4096,
         .buffer_size_tx              = 1024,

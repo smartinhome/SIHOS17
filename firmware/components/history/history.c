@@ -1083,8 +1083,12 @@ static void hist_recover_stale_tmp(void) {
         size_t nlen = strlen(name);
         if (nlen < 5 || strcmp(name + nlen - 4, ".tmp") != 0) continue;
 
-        char src_path[80]; snprintf(src_path, sizeof(src_path), "/spiffs/%s", name);
-        char dst_path[80];
+        // struct dirent::d_name w newlib ma 256 B. SPIFFS w praktyce ogranicza
+        // nazwe do ~31 znakow, ale GCC z -Werror=format-truncation nie zna tego
+        // runtime-limitu, wiec bufor musi teoretycznie zmiescic caly d_name.
+        // 264 = 256 (d_name) + 8 ("/spiffs/").
+        char src_path[264]; snprintf(src_path, sizeof(src_path), "/spiffs/%s", name);
+        char dst_path[264];
         // tracked.tmp -> tracked.txt (specjalny case), inaczej *.tmp -> *.bin.
         if (strcmp(name, "tracked.tmp") == 0) {
             snprintf(dst_path, sizeof(dst_path), "/spiffs/tracked.txt");

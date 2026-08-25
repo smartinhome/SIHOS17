@@ -198,6 +198,68 @@ void wmbus_decoder_init(void) {
     ESP_LOGI(TAG, "Dekoder wMbus gotowy");
 }
 
+// --- FAZA 4a-1: CRC-16/EN13757 per-block WARN-ONLY -------------------------
+// Standard EN 13757-4 wMbus: ramka jest podzielona na bloki, kazdy z wlasnym CRC.
+// - Block 1: 10 bajtow danych (L + C + M + A) + 2 bajty CRC = 12 na "wire"
+// - Block 2..N-1: 16 bajtow danych + 2 CRC = 18 na "wire"
+// - Ostatni: 1..16 bajtow + 2 CRC
+// CRC-16/EN13757: poly 0x3D65, init 0x0000, RefIn=false, RefOut=false, XorOut=0xFFFF.
+// Byte order na wire: MSB pierwszy.
+//
+// TRYB WARN-ONLY: liczy CRC per-block i loguje mismatch (przy silnym zakloceniu
+// radia widac ile ramek jest uszkodzonych), ALE nie odrzuca ramki - nadal
+// idzie do meter_total i history. Powod: nie wszystkie liczniki w praktyce
+// nadaja idealnie CRC-poprawne, a bez pewnosci ze zero % Twoich licznikow
+// nadaje "poza standardem" wolimy dane niz brak danych. Po tygodniu obserwacji
+// mozna przelaczyc w strict-mode (odrzucanie).
+static uint16_t wmbus_crc16_en13757(const uint8_t *data, size_t len) {
+    uint16_t crc = 0x0000;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= (uint16_t)data[i] << 8;
+        for (int b = 0; b < 8; b++) {
+            crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x3D65) : (uint16_t)(crc << 1);
+        }
+    }
+    return crc ^ 0xFFFF;
+}
+
+static void wmbus_check_block_crc_warn(const uint8_t *data, size_t len, const char *id_hex) {
+    if (!data || len < 12) return;
+    size_t pos = 0;
+    int block_num = 0;
+    int blocks_ok = 0, blocks_fail = 0;
+    while (pos + 2 <= len) {
+        // Rozmiar danych w tym bloku (bez CRC).
+        size_t data_size;
+        if (block_num == 0) {
+            data_size = 10;
+        } else {
+            size_t remaining = len - pos - 2;   // co zostalo minus miejsce na CRC
+            data_size = (remaining > 16) ? 16 : remaining;
+        }
+        if (data_size == 0) break;
+        if (pos + data_size + 2 > len) break;   // niekompletny blok - nie licz
+
+        uint16_t crc_calc  = wmbus_crc16_en13757(data + pos, data_size);
+        uint16_t crc_frame = ((uint16_t)data[pos + data_size] << 8) |
+                              (uint16_t)data[pos + data_size + 1];
+        if (crc_calc == crc_frame) {
+            blocks_ok++;
+        } else {
+            blocks_fail++;
+            ESP_LOGW(TAG, "Ramka %s: CRC blok %d ZLY (calc=0x%04X vs frame=0x%04X, off=%u data=%uB) - PRZEPUSZCZONA (warn-only)",
+                     id_hex, block_num, crc_calc, crc_frame,
+                     (unsigned)pos, (unsigned)data_size);
+        }
+        pos += data_size + 2;
+        block_num++;
+    }
+    if (blocks_fail > 0) {
+        ESP_LOGW(TAG, "Ramka %s: %d/%d blokow CRC zle - ramka moze zawierac smieci",
+                 id_hex, blocks_fail, blocks_ok + blocks_fail);
+    }
+}
+
 
 // Sprawdza czy ramka jest zaszyfrowana (na podstawie CI-field i tpl-cfg)
 // oraz czy dla danego ID jest zapisany klucz w konfiguracji.
@@ -263,6 +325,12 @@ void wmbus_decoder_on_frame(const wmbus_frame_t *frame) {
     for (int i = 0; i < maxb; i++)
         snprintf(hex_raw + i*2, sizeof(hex_raw) - i*2, "%02x", frame->data[i]);
     ESP_LOGI(TAG, "  -> https://wmbusmeters.org/analyze/%s", hex_raw);
+
+    // FAZA 4a-1: weryfikacja CRC-16/EN13757 per-block (WARN-ONLY - nie odrzuca).
+    // Warning w logu = ramka miala uszkodzony blok, oznacza zakłocenia radiowe
+    // albo licznik nadaje niestandardowo. Warto obserwowac przez tydzien i
+    // ewentualnie przelaczyc w strict-mode (odrzucanie) w kolejnej fazie.
+    wmbus_check_block_crc_warn(frame->data, frame->len, id_log);
 
     // Zachowaj surową ramkę do bufora (nawet jeśli dekoder jej nie rozpozna)
     xSemaphoreTake(s_mutex, portMAX_DELAY);

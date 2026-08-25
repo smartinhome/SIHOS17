@@ -10,7 +10,14 @@
 #define HIST_MONTHS  24    // 24 miesiace
 #define HIST_YEARS   10    // 10 lat
 #define HIST_REALTIME 60   // ostatnie 60 surowych odczytow
-#define HIST_CURVE 1440    // krzywa dnia dla pol chwilowych: kubelki 1-min (24h)
+// FAZA 5a: krzywa dnia dla pol chwilowych - kubelki 5-MINUTOWE (24h = 288 pkt).
+// Wczesniej 1440 (1-min) zjadalo 11.5 KB heap per aktywna krzywa; przy 4 polach
+// chwilowych to bylo 46 KB co grozilo fragmentacja przy OTA HTTPS handshake.
+// 288 pkt × 2 (dzis + wczoraj) = 4.6 KB per krzywa = ~18 KB dla 4 pol = oszczednosc ~28 KB.
+// Wartosc w kazdym kubelku = SREDNIA z ramek w tym oknie (jak HA state_class=measurement),
+// nie last-write-wins jak wczesniej - dokladniejsza reprezentacja szumu (np. wahania napiecia).
+#define HIST_CURVE 288
+#define HIST_CURVE_INTERVAL_SEC 300   // dlugosc jednego kubelka (5 min)
 
 // Pojedynczy kubelek: czas poczatku okresu + total licznika na koniec okresu
 typedef struct {

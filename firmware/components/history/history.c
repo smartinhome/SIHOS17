@@ -68,10 +68,25 @@ typedef struct {
     hist_bucket_t years[HIST_YEARS];   int n_years;
     hist_rt_t     rt[HIST_REALTIME];   int n_rt;
     // Krzywa dnia (styl Home Assistant) dla pol CHWILOWYCH (moc, napiecie):
-    // ostatnia wartosc w kazdym kubelku 1-MINUTOWYM, ring 24h (1440 pkt).
-    // Bufor DYNAMICZNY (11.5KB) - alokowany tylko dla pol, ktore go uzywaja;
-    // statycznie dla 16 slotow zjadloby to 184KB RAM.
+    // SREDNIA z ramek w kazdym kubelku 5-MINUTOWYM, ring 24h (288 pkt).
+    // Bufor DYNAMICZNY (2.3KB) - alokowany tylko dla pol, ktore go uzywaja.
+    // FAZA 5a zmiana: wczesniej 1440 pkt LWW (last-write-wins), teraz 288 pkt
+    // ze srednia obliczana on-the-fly (running sum + count przy przejsciu bucketu).
     hist_bucket_t *curve;              int n_curve;
+    // Running average state dla BIEZACEGO (jeszcze niezamknietego) kubelka curve.
+    // Kazda nowa ramka: curve_sum += value, curve_count++. Przy zmianie bucket_ts:
+    // srednia = sum/count, zapisuje sie do curve[], reset sum/count.
+    // TYLKO W RAM (nie zapisywane) - stan tymczasowy jednego okna.
+    float    curve_sum;
+    int      curve_count;
+    uint32_t curve_bucket_ts;          // TS aktualnego 5-min bucket (0 = brak)
+    // FAZA 5a: krzywa dnia POPRZEDNIEGO - dla wykresu wczoraj (symetria z dzis).
+    // Rotacja: przy zmianie doby (floor_day) kopiujemy curve -> curve_yesterday,
+    // ustawiamy curve_yesterday_day_ts = poprzednia doba, reset curve.
+    // Bufor DYNAMICZNY alokowany PRZY PIERWSZEJ ROTACJI (leniwie) - pierwszego
+    // dnia po flashu jest NULL, wczoraj fallback do archiwum godzinnego (jak dotad).
+    hist_bucket_t *curve_yesterday;    int n_curve_yesterday;
+    uint32_t curve_yesterday_day_ts;   // TS doby (floor_day) dla ktorej to jest wczoraj
     // Stan licznika o polnocy - REZERWA na pierwsze godziny po instalacji, gdy
     // nie ma jeszcze kubelka sprzed polnocy. TYLKO W RAM (nie zapisywane): po
     // restarcie w srodku dnia baza jest nieznana i liczenie MUSI spasc na
@@ -144,6 +159,84 @@ static bool ensure_curve(meter_hist_t *m) {
 static void free_curve(meter_hist_t *m) {
     if (m->curve) { free(m->curve); m->curve = NULL; }
     m->n_curve = 0;
+    // FAZA 5a: curve_yesterday zwalniane razem - alokowane parami przy rotacji.
+    if (m->curve_yesterday) { free(m->curve_yesterday); m->curve_yesterday = NULL; }
+    m->n_curve_yesterday = 0;
+    m->curve_yesterday_day_ts = 0;
+    m->curve_sum = 0.0f;
+    m->curve_count = 0;
+    m->curve_bucket_ts = 0;
+}
+
+// Forward declarations dla curve_add_sample_avg (uzywa floor_day/series_update
+// ktore sa zdefiniowane pozniej w tym pliku).
+static uint32_t floor_day(uint32_t t);
+static void series_update(hist_bucket_t *arr, int *n, int cap, uint32_t bts, float total);
+
+// FAZA 5a: dodaje probke do krzywej dnia z running average.
+// - Detekcja przejscia bucketu 5-min: zamyka poprzedni sredniej (sum/count),
+//   otwiera nowy z reset sum/count.
+// - Detekcja przejscia doby (nowy day floor): kopiuje curve -> curve_yesterday
+//   (leniwa alokacja przy pierwszej rotacji), resetuje curve dla nowej doby.
+// - Kazda ramka aktualizuje curve[bucket] BIEŻĄCĄ srednia - dzieki temu wykres
+//   biezacego bucketu ~"zmienia sie" w czasie rzeczywistym, nie zawiesza na starej.
+static void curve_add_sample_avg(meter_hist_t *m, float value, uint32_t ts_unix) {
+    if (!ensure_curve(m)) return;
+    uint32_t bucket_ts = ts_unix - (ts_unix % HIST_CURVE_INTERVAL_SEC);
+
+    // 1. Detekcja przejscia doby - rotacja curve -> curve_yesterday.
+    if (m->curve_bucket_ts != 0) {
+        uint32_t old_day = floor_day(m->curve_bucket_ts);
+        uint32_t new_day = floor_day(ts_unix);
+        if (old_day != new_day) {
+            // Zamknij ostatni bucket poprzedniej doby (jesli byla otwarta srednia).
+            if (m->curve_count > 0) {
+                series_update(m->curve, &m->n_curve, HIST_CURVE,
+                              m->curve_bucket_ts,
+                              m->curve_sum / (float)m->curve_count);
+            }
+            // Alokuj curve_yesterday jesli jeszcze nie ma (pierwszy dzien po flashu = NULL).
+            if (!m->curve_yesterday) {
+                m->curve_yesterday = calloc(HIST_CURVE, sizeof(hist_bucket_t));
+            }
+            if (m->curve_yesterday) {
+                memcpy(m->curve_yesterday, m->curve, HIST_CURVE * sizeof(hist_bucket_t));
+                m->n_curve_yesterday = m->n_curve;
+                m->curve_yesterday_day_ts = old_day;
+                ESP_LOGI(TAG, "%s: curve->curve_yesterday (%d pkt, day_ts=%u)",
+                         m->id, m->n_curve_yesterday, (unsigned)old_day);
+            } else {
+                ESP_LOGW(TAG, "%s: brak RAM na curve_yesterday - wczoraj z godzinnego", m->id);
+                m->n_curve_yesterday = 0;
+            }
+            // Reset curve na nowa dobe.
+            m->n_curve = 0;
+            m->curve_sum = 0.0f;
+            m->curve_count = 0;
+            m->curve_bucket_ts = 0;
+            memset(m->curve, 0, HIST_CURVE * sizeof(hist_bucket_t));
+        }
+    }
+
+    // 2. Detekcja przejscia bucketu 5-min - zamknij poprzedni (final srednia).
+    if (m->curve_bucket_ts != bucket_ts) {
+        if (m->curve_count > 0 && m->curve_bucket_ts != 0) {
+            series_update(m->curve, &m->n_curve, HIST_CURVE,
+                          m->curve_bucket_ts,
+                          m->curve_sum / (float)m->curve_count);
+        }
+        m->curve_bucket_ts = bucket_ts;
+        m->curve_sum = 0.0f;
+        m->curve_count = 0;
+    }
+
+    // 3. Dodaj probke do biezacej sredniej + zapisz partial average do curve
+    //    (dzieki temu bufor pokazuje aktualna srednia BIEZACEGO bucketu, nie
+    //    zamknieta poprzednia).
+    m->curve_sum += value;
+    m->curve_count++;
+    series_update(m->curve, &m->n_curve, HIST_CURVE,
+                  bucket_ts, m->curve_sum / (float)m->curve_count);
 }
 
 // tm_isdst = -1: pozwol mktime wyliczyc czy w tym momencie obowiazuje CEST czy CET.
@@ -636,8 +729,9 @@ static void restore_from_archive(meter_hist_t *m) {
 // v0, te 4 bajty to `kind` (male 0-3, nie moze przypadkiem trafic w 1397909041)
 // -> wczytujemy po staremu bez CRC. Migracja v0->v1 przy nastepnym save_meter
 // (transparentna).
-#define METER_MAGIC 0x53494831u   // "SIH1" (little-endian)
-#define METER_VER   1u
+#define METER_MAGIC 0x53494831u   // "SIH1" (little-endian, historyczna nazwa - kolejne wersje maja rosnacy METER_VER)
+#define METER_VER   2u            // v2 = FAZA 5a: dopisany curve_yesterday (day_ts + n + tablica)
+#define METER_VER_V1 1u           // v1 = FAZA 3b: pierwsza wersja z magic + CRC (bez curve_yesterday)
 #define METER_HDR   12            // magic(4) + ver(4) + crc(4)
 
 // CRC32 IEEE 802.3 (jak w gzip/PNG) - bez lookup table, bez zaleznosci od
@@ -698,6 +792,17 @@ static void save_meter(meter_hist_t *m) {
     W(&m->day_base_ts, sizeof(uint32_t));
     W(&m->day_base_total, sizeof(float));
     W(&m->rebase_ts, sizeof(uint32_t));
+    // FAZA 5a (v2): curve_yesterday - kopia krzywej z dnia poprzedniego dla
+    // symetrycznego wykresu wczoraj (te same 5-min bucket'y co dzis). Pola
+    // TYLKO v2 - stare pliki v1 nie mialy, load_meter musi obsluzyc oba warianty.
+    // Zapisujemy nawet gdy pusta - pusta = zero curve_yesterday_day_ts + zero n.
+    uint32_t cy_day = m->curve_yesterday_day_ts;
+    int      cy_n   = m->n_curve_yesterday;
+    if (cy_n < 0 || cy_n > HIST_CURVE) cy_n = 0;
+    W(&cy_day, sizeof(uint32_t));
+    W(&cy_n,   sizeof(int));
+    if (cy_n > 0 && m->curve_yesterday)
+        WARR(m->curve_yesterday, sizeof(hist_bucket_t), cy_n);
     #undef W
     #undef WARR
     // Wpisz obliczone CRC w miejscu placeholdera (offset 8 = po magic+ver).
@@ -746,10 +851,15 @@ static bool load_meter(meter_hist_t *m, const char *id) {
             ESP_LOGW(TAG, "load_meter %s: uciety naglowek v1", id);
             fclose(f); return false;
         }
-        if (ver != METER_VER) {
-            ESP_LOGW(TAG, "load_meter %s: nieznana wersja v%u (obsluguje v%u)", id, (unsigned)ver, METER_VER);
+        if (ver != METER_VER && ver != METER_VER_V1) {
+            ESP_LOGW(TAG, "load_meter %s: nieznana wersja v%u (obsluguje v%u/v%u)",
+                     id, (unsigned)ver, METER_VER_V1, METER_VER);
             // Nie porzucamy - probujemy wczytac po staremu (moze byc nadzbior).
         }
+        // v1 = FAZA 3b (bez curve_yesterday), v2 = FAZA 5a (z curve_yesterday).
+        // Migrator v1->v2 jest transparentny: pola nowe nie istnieja w pliku v1,
+        // fread zwroci 0, curve_yesterday zostanie puste, nastepny save_meter
+        // zapisze plik jako v2 (z pustym curve_yesterday na start).
         // Payload wczytujemy dalej z on-the-fly CRC (poczatek payloadu = kind).
     } else {
         // Plik v0 - pierwszy uint32 to `kind`. Przypisz i kontynuuj po staremu.
@@ -828,6 +938,37 @@ static bool load_meter(meter_hist_t *m, const char *id) {
         m->rebase_ts = rbt;
     } else {
         m->rebase_ts = 0;
+    }
+
+    // FAZA 5a (format v2): curve_yesterday - opcjonalny, obecny tylko w plikach
+    // v2. Dla v1 fread zwroci 0 -> curve_yesterday pusty (do rotacji przy pierwszym
+    // przejsciu doby). Kolejnosc pol: day_ts, n, tablica curve_yesterday.
+    uint32_t cy_day = 0;
+    int      cy_n = 0;
+    if (fread(&cy_day, sizeof(uint32_t), 1, f) == 1) {
+        if (v1) crc = hist_crc32_update(crc, &cy_day, sizeof(uint32_t));
+        if (fread(&cy_n, sizeof(int), 1, f) == 1) {
+            if (v1) crc = hist_crc32_update(crc, &cy_n, sizeof(int));
+            if (cy_n < 0 || cy_n > HIST_CURVE) cy_n = 0;
+            if (cy_n > 0) {
+                m->curve_yesterday = calloc(HIST_CURVE, sizeof(hist_bucket_t));
+                if (m->curve_yesterday) {
+                    size_t got = fread(m->curve_yesterday, sizeof(hist_bucket_t), cy_n, f);
+                    if (v1) crc = hist_crc32_update(crc, m->curve_yesterday,
+                                                     got * sizeof(hist_bucket_t));
+                    m->n_curve_yesterday = (int)got;
+                    m->curve_yesterday_day_ts = cy_day;
+                } else {
+                    ESP_LOGW(TAG, "load_meter %s: brak RAM na curve_yesterday - pominiete", id);
+                    // Skip rekordy w pliku zeby CRC dalej sie zgadzalo.
+                    hist_bucket_t tmp;
+                    for (int k = 0; k < cy_n; k++) {
+                        if (fread(&tmp, sizeof(tmp), 1, f) != 1) break;
+                        if (v1) crc = hist_crc32_update(crc, &tmp, sizeof(tmp));
+                    }
+                }
+            }
+        }
     }
     #undef R
     #undef RARR_INTO
@@ -965,13 +1106,14 @@ size_t history_free_curves(void) {
     size_t freed = 0;
     if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
     for (int i = 0; i < MAX_HIST_METERS; i++) {
-        if (s_meters[i] && s_meters[i]->curve) {
-            freed += HIST_CURVE * sizeof(hist_bucket_t);
-            free_curve(s_meters[i]);
-        }
+        if (!s_meters[i]) continue;
+        if (s_meters[i]->curve)           freed += HIST_CURVE * sizeof(hist_bucket_t);
+        if (s_meters[i]->curve_yesterday) freed += HIST_CURVE * sizeof(hist_bucket_t);
+        if (s_meters[i]->curve || s_meters[i]->curve_yesterday)
+            free_curve(s_meters[i]);   // zwalnia oba
     }
     if (s_mutex) xSemaphoreGive(s_mutex);
-    ESP_LOGI(TAG, "Zwolniono %u B buforow krzywych (OTA)", (unsigned)freed);
+    ESP_LOGI(TAG, "Zwolniono %u B buforow krzywych + curve_yesterday (OTA)", (unsigned)freed);
     return freed;
 }
 
@@ -1303,8 +1445,8 @@ void history_on_reading(const char *id_hex, double total, int kind, uint32_t ts_
     series_update(m->months, &m->n_months, HIST_MONTHS, floor_month(ts_unix), ft);
     series_update(m->years,  &m->n_years,  HIST_YEARS,  floor_year(ts_unix),  ft);
     rt_update(m, ts_unix, ft);
-    if (!m->cumulative && ensure_curve(m))
-        series_update(m->curve, &m->n_curve, HIST_CURVE, ts_unix - (ts_unix % 60), ft);
+    if (!m->cumulative)
+        curve_add_sample_avg(m, ft, ts_unix);   // FAZA 5a: 5-min bucket + srednia
 
     // Archiwum godzinowe co ramke - ale tylko dla SLEDZONYCH licznikow (nie pisz
     // na flash dla kazdego zaslyszanego sasiada). To zrodlo odtwarzania stanu
@@ -1385,8 +1527,8 @@ void history_on_field(const char *id_hex, const char *field, double value,
     series_update(m->months, &m->n_months, HIST_MONTHS, floor_month(ts_unix), ft);
     series_update(m->years,  &m->n_years,  HIST_YEARS,  floor_year(ts_unix),  ft);
     rt_update(m, ts_unix, ft);
-    if (!m->cumulative && ensure_curve(m))
-        series_update(m->curve, &m->n_curve, HIST_CURVE, ts_unix - (ts_unix % 60), ft);
+    if (!m->cumulative)
+        curve_add_sample_avg(m, ft, ts_unix);   // FAZA 5a: 5-min bucket + srednia
 
     // Archiwum godzinowe na flash dla sledzonego pola - z throttlingiem 60 s:
     // ramki co ~10 s daja 6x mniej goracych zapisow (mniejsze ryzyko przerwania
@@ -1687,8 +1829,20 @@ int history_get_day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf
     // na flashu dla KAZDEGO sledzonego pola, takze mocy i napiec. Wczesniej
     // ta galaz przechwytywala pole chwilowe zawsze i dla dni starszych niz
     // doba zwracala pusta liste, co wygladalo jak brak historii napiec/mocy.
+    // FAZA 5a: wybor zrodla krzywej. curve_yesterday ma priorytet gdy jego
+    // day_ts pasuje do zadanej doby (symetryczny wykres wczoraj/dzis 5-min).
+    // Inaczej curve biezaca (jak dotad). Dla dni starszych niz wczoraj -
+    // fallback do godzinnego archiwum ha_*.bin (kod ponizej).
     bool use_curve = false;
-    if (m && !cumulative && m->curve && m->n_curve > 0) {
+    hist_bucket_t *curve_src = NULL;
+    int curve_src_n = 0;
+    if (m && !cumulative && m->curve_yesterday && m->n_curve_yesterday > 0 &&
+        m->curve_yesterday_day_ts == d0) {
+        // Wczoraj z 5-min curve
+        curve_src = m->curve_yesterday;
+        curve_src_n = m->n_curve_yesterday;
+        use_curve = true;
+    } else if (m && !cumulative && m->curve && m->n_curve > 0) {
         bool has_day = false;
         for (int i = 0; i < m->n_curve; i++) {
             if (m->curve[i].ts >= d0 && m->curve[i].ts < d1) { has_day = true; break; }
@@ -1699,18 +1853,22 @@ int history_get_day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf
             // Dzien historyczny tylko CZESCIOWO zahaczony przez ring (np. koncowka
             // wczorajszej doby) NIE moze przeslaniac pelnych 24 godzin z archiwum.
             use_curve = is_current_day || fully_covered;
+            if (use_curve) {
+                curve_src = m->curve;
+                curve_src_n = m->n_curve;
+            }
         }
     }
-    if (use_curve) {
+    if (use_curve && curve_src) {
         int n2 = snprintf(buf, buf_cap,
                           "{\"id\":\"%s\",\"kind\":%d,\"cumulative\":0,\"curve\":1,\"points\":[",
                           id_hex ? id_hex : "", kind);
         bool first2 = true;
-        for (int i = 0; i < m->n_curve && n2 < buf_cap - 48; i++) {
-            uint32_t t = m->curve[i].ts;
+        for (int i = 0; i < curve_src_n && n2 < buf_cap - 48; i++) {
+            uint32_t t = curve_src[i].ts;
             if (t < d0 || t >= d1) continue;
             n2 += snprintf(buf + n2, buf_cap - n2, "%s{\"t\":%u,\"v\":%.3f}",
-                           first2 ? "" : ",", (unsigned)t, m->curve[i].total);
+                           first2 ? "" : ",", (unsigned)t, curve_src[i].total);
             first2 = false;
         }
         n2 += snprintf(buf + n2, buf_cap - n2, "]}");
@@ -2151,13 +2309,29 @@ int history_curve_day(const char *key, uint32_t day_ts, hist_bucket_t *out, int 
     int n = 0;
     if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
     meter_hist_t *m = get_or_load(key, false);
-    if (m && !m->cumulative && m->curve && m->n_curve > 0) {
+    if (m && !m->cumulative) {
         uint32_t d0 = floor_day(day_ts), d1 = d0 + 86400;
-        bool is_current_day = (m->last_ts >= d0 && m->last_ts < d1);
-        bool fully_covered  = (m->curve[0].ts <= d0);
-        if (is_current_day || fully_covered) {
-            for (int i = 0; i < m->n_curve && n < cap; i++) {
-                if (m->curve[i].ts >= d0 && m->curve[i].ts < d1) out[n++] = m->curve[i];
+
+        // FAZA 5a: jesli szukana doba pokrywa sie z curve_yesterday_day_ts,
+        // zwrocic krzywa poprzedniego dnia (te same 5-min bucket'y co dzis,
+        // symetryczny wykres). curve_yesterday jest zapisywana przy rotacji
+        // doby i wczytywana z pliku h_*.bin v2 przy starcie modulu.
+        if (m->curve_yesterday && m->n_curve_yesterday > 0 &&
+            m->curve_yesterday_day_ts == d0) {
+            for (int i = 0; i < m->n_curve_yesterday && n < cap; i++) {
+                if (m->curve_yesterday[i].ts >= d0 && m->curve_yesterday[i].ts < d1)
+                    out[n++] = m->curve_yesterday[i];
+            }
+        }
+        // Fallback: krzywa dnia biezacego (jak dotad - lub gdy szukana doba to
+        // "dzisiaj" wg last_ts i pokrywa sie z zakresem curve).
+        else if (m->curve && m->n_curve > 0) {
+            bool is_current_day = (m->last_ts >= d0 && m->last_ts < d1);
+            bool fully_covered  = (m->curve[0].ts <= d0);
+            if (is_current_day || fully_covered) {
+                for (int i = 0; i < m->n_curve && n < cap; i++) {
+                    if (m->curve[i].ts >= d0 && m->curve[i].ts < d1) out[n++] = m->curve[i];
+                }
             }
         }
     }

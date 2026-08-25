@@ -94,7 +94,13 @@ static void ota_url_task(void *arg) {
     esp_https_ota_config_t ota_cfg = {
         .http_config           = &http_cfg,
         .bulk_flash_erase      = false,
-        .partial_http_download = false,
+        // FAZA 5a: partial_http_download=true - esp_https_ota pobiera firmware
+        // w mniejszych chunk'ach zamiast trzymac calosc w buforach TLS. Mniejsze
+        // spójne alokacje w heap podczas OTA = mniejsze ryzyko OOM przy TLS
+        // handshake i wieksze prawdopodobienstwo powodzenia auto-OTA z GitHub
+        // (wczesniej user musial recznie wgrywac bin przez /api/ota/upload).
+        .partial_http_download = true,
+        .max_http_request_size = 8192,   // rozmiar jednego HTTP GET zakresu
     };
 
     // Zwolnij bufory krzywych minutowych - TLS do GitHuba potrzebuje duzego,

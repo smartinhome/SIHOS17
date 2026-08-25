@@ -7,11 +7,42 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include <unistd.h>       // fsync, unlink, fileno
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "esp_heap_caps.h"
+
+// FAZA 3a: helper do atomic write. Przyjmuje docelowa sciezke z ".bin" na koncu,
+// zwraca sciezke z ".tmp" (ta sama dlugosc - SPIFFS ogranicza nazwy do 31 znakow,
+// wiec dodawanie sufiksu ".tmp" do juz maksymalnej sciezki by ja przekroczylo).
+// Bez atomic write reset zasilania w srodku fwrite() ucinal plik - historia dnia
+// (lub calego licznika) znikala. Z atomic: reset zostawia ".tmp" jako smiec ALE
+// oryginalny ".bin" jest nietkniety, wiec przy nastepnym starcie modul ma pelna
+// wersje historii sprzed zapisu.
+static void path_to_tmp(const char *path, char *tmp, size_t cap) {
+    // Zamien koncowke ".bin" na ".tmp". Zaklada ze wszystkie h_/ha_/tracked pliki
+    // koncza sie na ".bin" (tracked.txt obsluzone osobno - patrz tracked_save).
+    strlcpy(tmp, path, cap);
+    size_t n = strlen(tmp);
+    if (n >= 4 && strcmp(tmp + n - 4, ".bin") == 0) {
+        memcpy(tmp + n - 4, ".tmp", 4);
+    } else {
+        // Fallback: dopisz .tmp gdyby ktos zmienil rozszerzenie
+        strlcat(tmp, ".tmp", cap);
+    }
+}
+
+// Wymus flush z bufora C stdio i z bufora VFS/SPIFFS na flash. Wolane przed
+// atomic rename - bez tego dane wisza w bufirze VFS a rename podmienialby
+// "pusty" plik. SPIFFS wspiera fsync w ESP-IDF.
+static void flush_to_flash(FILE *f) {
+    if (!f) return;
+    fflush(f);
+    int fd = fileno(f);
+    if (fd >= 0) fsync(fd);
+}
 
 static const char *TAG = "HISTORY";
 // Tyle samo, ile MAX_TRACKED - inaczej czesc sledzonych pol nie dostawala
@@ -247,14 +278,25 @@ static bool arc_read_header2(FILE *f, arc_hdr_t *h) {
 }
 
 // Zapis naglowka v2 na poczatku pliku.
+// FAZA 3a: skladamy caly 20-bajtowy naglowek w RAM buforze i piszemy JEDNYM
+// fwrite. Poprzednio bylo 5 osobnych fwrite - reset zasilania miedzy 1. a 2.
+// zostawial magic zapisany ale count=smiec z poprzedniego pliku, a arc_read_header2
+// widzial 'v2 z nieprawidlowa count' -> ponizej bounds-check ustawial count=0,
+// glowe=0 i traktowal archiwum jako puste (17520 rekordow godzinowych efektywnie
+// porzucone). Pojedynczy fwrite = SPIFFS albo zapisuje calosc, albo nie zapisuje.
 static void arc_write_header_v2(FILE *f, const arc_hdr_t *h) {
+    uint8_t buf[ARC_HDR_V2];   // ARC_HDR_V2 = 20 (uint32 + int*2 + uint32 + float)
+    _Static_assert(ARC_HDR_V2 == sizeof(uint32_t) + sizeof(int)*2 + sizeof(uint32_t) + sizeof(float),
+                   "arc_hdr_t rozmiar zmieniony - aktualizuj arc_write_header_v2");
     uint32_t magic = ARC_MAGIC_V2;
+    size_t off = 0;
+    memcpy(buf + off, &magic,        sizeof(uint32_t)); off += sizeof(uint32_t);
+    memcpy(buf + off, &h->count,     sizeof(int));      off += sizeof(int);
+    memcpy(buf + off, &h->head,      sizeof(int));      off += sizeof(int);
+    memcpy(buf + off, &h->last_ts,   sizeof(uint32_t)); off += sizeof(uint32_t);
+    memcpy(buf + off, &h->last_total,sizeof(float));    off += sizeof(float);
     fseek(f, 0, SEEK_SET);
-    fwrite(&magic, sizeof(uint32_t), 1, f);
-    fwrite(&h->count, sizeof(int), 1, f);
-    fwrite(&h->head,  sizeof(int), 1, f);
-    fwrite(&h->last_ts, sizeof(uint32_t), 1, f);
-    fwrite(&h->last_total, sizeof(float), 1, f);
+    fwrite(buf, off, 1, f);
 }
 
 // Pozycja w pliku (bajty) rekordu fizycznego o indeksie phys (naglowek hdr B).
@@ -411,6 +453,10 @@ static void archive_append_hour(const char *id, uint32_t hour_ts, float total,
             fseek(f, arc_rec_off2(h.hdr, last_phys), SEEK_SET);
             fwrite(&last, sizeof(last), 1, f);
             arc_write_header_v2(f, &h);
+            // FAZA 3a: wymus flush do flasha przed fclose. Bez tego SPIFFS trzyma
+            // rekord w bufferze VFS - reset zasilania w oknie ~kilku sek moglby
+            // stracic zapisane odczyty mimo tego ze fclose sam nie flushuje SPIFFS.
+            flush_to_flash(f);
             fclose(f);
             return;
         }
@@ -429,6 +475,7 @@ static void archive_append_hour(const char *id, uint32_t hour_ts, float total,
     fseek(f, arc_rec_off2(h.hdr, write_phys), SEEK_SET);
     fwrite(&rec, sizeof(rec), 1, f);
     arc_write_header_v2(f, &h);
+    flush_to_flash(f);
     fclose(f);
 }
 
@@ -578,8 +625,12 @@ static void restore_from_archive(meter_hist_t *m) {
 static void save_meter(meter_hist_t *m) {
     if (!s_fs_ok) return;
     char path[64]; meter_path(m->id, path, sizeof(path));
-    FILE *f = fopen(path, "wb");
-    if (!f) { ESP_LOGW(TAG, "nie moge zapisac %s", path); return; }
+    // Atomic write: zapis do .tmp, potem fsync + rename. Reset zasilania w
+    // srodku fwrite() zostawia .tmp jako smiec (zignorowany przy starcie),
+    // ale oryginalny .bin jest nadal caly - historia sie nie traci.
+    char tmp[64]; path_to_tmp(path, tmp, sizeof(tmp));
+    FILE *f = fopen(tmp, "wb");
+    if (!f) { ESP_LOGW(TAG, "nie moge zapisac %s", tmp); return; }
     // Zapis: kind, last_total, last_ts, potem kazda seria (n + dane)
     fwrite(&m->kind, sizeof(int), 1, f);
     fwrite(&m->last_total, sizeof(float), 1, f);
@@ -598,7 +649,13 @@ static void save_meter(meter_hist_t *m) {
     fwrite(&m->day_base_ts, sizeof(uint32_t), 1, f);
     fwrite(&m->day_base_total, sizeof(float), 1, f);
     fwrite(&m->rebase_ts, sizeof(uint32_t), 1, f);
+    flush_to_flash(f);   // wymuszona synchronizacja z flashem przed rename
     fclose(f);
+    if (rename(tmp, path) != 0) {
+        ESP_LOGW(TAG, "atomic rename %s -> %s nieudany (errno=%d)", tmp, path, errno);
+        unlink(tmp);   // sprzatnij smiec, historia zostaje w starym .bin
+        return;
+    }
     m->last_save_ts = m->last_ts;
 }
 
@@ -676,14 +733,24 @@ static meter_hist_t *find_meter(const char *id, bool create) {
 // ---------- Inicjalizacja ----------
 // ---------- Sledzenie licznikow ----------
 #define TRACKED_PATH "/spiffs/tracked.txt"
+#define TRACKED_TMP  "/spiffs/tracked.tmp"
 
 static void tracked_save(void) {
     if (!s_fs_ok) return;
-    FILE *f = fopen(TRACKED_PATH, "wb");
+    // Atomic write: reset zasilania podczas przepisywania listy tracked
+    // (ustawianie/usuwanie sledzenia licznika) mogl zostawic uciety plik ->
+    // po restarcie modul tracil sledzenie czesci licznikow. Tmp + rename
+    // gwarantuje ze zawsze widzimy albo stara pelna liste, albo nowa pelna.
+    FILE *f = fopen(TRACKED_TMP, "wb");
     if (!f) return;
     for (int i = 0; i < s_tracked_count; i++)
         fprintf(f, "%s\n", s_tracked[i]);
+    flush_to_flash(f);
     fclose(f);
+    if (rename(TRACKED_TMP, TRACKED_PATH) != 0) {
+        ESP_LOGW(TAG, "tracked atomic rename nieudany (errno=%d)", errno);
+        unlink(TRACKED_TMP);
+    }
 }
 
 static void tracked_load(void) {

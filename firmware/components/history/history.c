@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <time.h>
 #include <unistd.h>       // fsync, unlink, fileno
+#include <sys/stat.h>     // stat() dla recovery sierotek .tmp
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "nvs_flash.h"
@@ -704,9 +705,14 @@ static void save_meter(meter_hist_t *m) {
     fwrite(&crc, sizeof(uint32_t), 1, f);
     flush_to_flash(f);   // wymuszona synchronizacja z flashem przed rename
     fclose(f);
+    // SPIFFS ESP-IDF NIE potrafi zrename nad istniejacy plik (POSIX pozwala,
+    // SPIFFS zwraca EIO=5). Musimy usunac dst przed rename. Mikrookno miedzy
+    // remove i rename (reset zasilania -> tylko .tmp na dysku, brak .bin)
+    // jest naprawiane przez hist_recover_stale_tmp() przy starcie modulu.
+    remove(path);
     if (rename(tmp, path) != 0) {
         ESP_LOGW(TAG, "atomic rename %s -> %s nieudany (errno=%d)", tmp, path, errno);
-        unlink(tmp);   // sprzatnij smiec, historia zostaje w starym .bin
+        unlink(tmp);   // sprzatnij smiec, historia zostaje w starym .bin (juz usuniety!)
         return;
     }
     m->last_save_ts = m->last_ts;
@@ -878,6 +884,8 @@ static void tracked_save(void) {
         fprintf(f, "%s\n", s_tracked[i]);
     flush_to_flash(f);
     fclose(f);
+    // SPIFFS wymaga usuniecia dst przed rename (patrz komentarz w save_meter).
+    remove(TRACKED_PATH);
     if (rename(TRACKED_TMP, TRACKED_PATH) != 0) {
         ESP_LOGW(TAG, "tracked atomic rename nieudany (errno=%d)", errno);
         unlink(TRACKED_TMP);
@@ -1059,6 +1067,56 @@ void history_set_tracked(const char *id_hex, bool tracked) {
 
 static meter_hist_t *get_or_load(const char *id, bool create_if_missing);
 
+// FAZA 3a hotfix: sirotki .tmp po reset zasilania w mikrooknie miedzy remove(dst)
+// a rename(tmp, dst) w save_meter/tracked_save. Iteruje /spiffs i dla kazdego
+// pliku *.tmp: jesli docelowy .bin (lub tracked.txt) istnieje -> tmp to smiec,
+// unlink. Jesli docelowy nie istnieje -> odzyskaj przez rename (dane w .tmp sa
+// swiezsze niz brak pliku). Sensowne tylko po SPIFFS mount, przed load_meter.
+static void hist_recover_stale_tmp(void) {
+    if (!s_fs_ok) return;
+    DIR *d = opendir("/spiffs");
+    if (!d) return;
+    int recovered = 0, cleaned = 0;
+    struct dirent *ent;
+    while ((ent = readdir(d)) != NULL) {
+        const char *name = ent->d_name;
+        size_t nlen = strlen(name);
+        if (nlen < 5 || strcmp(name + nlen - 4, ".tmp") != 0) continue;
+
+        char src_path[80]; snprintf(src_path, sizeof(src_path), "/spiffs/%s", name);
+        char dst_path[80];
+        // tracked.tmp -> tracked.txt (specjalny case), inaczej *.tmp -> *.bin.
+        if (strcmp(name, "tracked.tmp") == 0) {
+            snprintf(dst_path, sizeof(dst_path), "/spiffs/tracked.txt");
+        } else {
+            snprintf(dst_path, sizeof(dst_path), "/spiffs/%s", name);
+            size_t dlen = strlen(dst_path);
+            memcpy(dst_path + dlen - 4, ".bin", 4);
+        }
+
+        struct stat st;
+        if (stat(dst_path, &st) == 0) {
+            // Docelowy istnieje - tmp to smiec po nieudanym rename (dst byl OK).
+            unlink(src_path);
+            cleaned++;
+        } else {
+            // Brak docelowego - tmp to najswiezsze co mamy, odzyskaj.
+            if (rename(src_path, dst_path) == 0) {
+                recovered++;
+                ESP_LOGI(TAG, "Odzyskano sierotke: %s -> %s", src_path, dst_path);
+            } else {
+                ESP_LOGW(TAG, "Nie moge odzyskac %s (errno=%d) - usuwam", src_path, errno);
+                unlink(src_path);
+                cleaned++;
+            }
+        }
+    }
+    closedir(d);
+    if (recovered + cleaned > 0) {
+        ESP_LOGI(TAG, "Recovery .tmp: %d odzyskanych, %d usunietych", recovered, cleaned);
+    }
+}
+
 void history_init(void) {
     s_mutex = xSemaphoreCreateMutex();
     esp_vfs_spiffs_conf_t conf = {
@@ -1103,6 +1161,9 @@ void history_init(void) {
         ESP_LOGW(TAG, "SPIFFS sformatowany - historia bedzie zapisywana");
     }
     s_fs_ok = true;
+    // FAZA 3a hotfix: przed jakimkolwiek load_meter posprzataj sierotki .tmp
+    // po ewentualnym reset zasilania w mikrooknie miedzy remove i rename.
+    hist_recover_stale_tmp();
     {   // znacznik po przywroceniu kopii - kasujemy od razu, dziala jednorazowo
         FILE *rf = fopen(REBASE_FLAG, "rb");
         if (rf) { fclose(rf); remove(REBASE_FLAG); s_rebase_pending = true;

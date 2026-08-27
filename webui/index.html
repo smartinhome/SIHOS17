@@ -92,6 +92,9 @@
   #page-system .led-tab tbody td{border-bottom:none; padding:8px 0; text-align:left}
   #page-system .led-tab tbody td:first-child{width:auto; font-size:.72rem; color:var(--mut); text-transform:uppercase; letter-spacing:.4px; font-weight:400}
   #page-system .led-tab tbody td.na{text-align:left}
+  #page-system .led-tab tbody td:nth-child(2)::before{content:"Dioda RX (pomarańczowa)"; display:block; font-size:.68rem; color:var(--mut); text-transform:uppercase; letter-spacing:.5px; margin-bottom:6px; font-weight:600}
+  #page-system .led-tab tbody td:nth-child(3)::before{content:"Dioda statusu (RGB)"; display:block; font-size:.68rem; color:var(--mut); text-transform:uppercase; letter-spacing:.5px; margin-bottom:6px; font-weight:600}
+  #page-system .led-tab tbody td:first-child::before{content:none}
 }
 
 
@@ -371,17 +374,6 @@
         <input type="file" id="fw-file" accept=".bin" style="display:none" onchange="doUpload(this)">
         <div id="fw-msg" class="msg" style="margin-top:8px"></div>
       </div>
-    </div>
-    <div class="card">
-      <div class="card-h">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v10M12 12l4 4M12 12l-4 4"/></svg>
-        Status ostatniej aktualizacji
-      </div>
-      <dl class="info">
-        <dt>Stan</dt><dd><span class="dot ok"></span> bezczynny <small>(gotowy do aktualizacji)</small></dd>
-        <dt>Ostatnia próba</dt><dd>25.08.2026 20:56 &middot; <span style="color:var(--ok)">sukces</span> &middot; z GitHub kanału beta</dd>
-        <dt>Pobrano</dt><dd>1 240 KB w 47 s <small>(~26 KB/s)</small></dd>
-      </dl>
     </div>
   </section>
 

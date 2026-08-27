@@ -161,7 +161,7 @@
           <label>Hasło</label>
           <input class="input" type="password" id="pass" placeholder="hasło do wybranej sieci">
         </div>
-        <button class="btn primary" onclick="mock('Zapisano. Moduł restartuje się i łączy...')">Podłącz</button>
+        <button class="btn primary" onclick="saveWifi()">Podłącz</button>
       </div>
     </div>
   </section>
@@ -211,7 +211,7 @@
       </div>
       <div class="actions-row">
         <button class="btn primary" onclick="saveMqtt()">Zapisz i podłącz</button>
-        <button class="btn" onclick="mqttTestPublish()">Test publikacji</button>
+        <button class="btn" onclick="alert('Funkcja Test publikacji zostanie dodana w przyszlej becie')">Test publikacji</button>
       </div>
     </div>
   </section>
@@ -308,14 +308,14 @@
         <div style="border:1px solid var(--line);border-radius:8px;padding:12px">
           <div style="font-weight:600;margin-bottom:4px">Wersja oficjalna <small style="color:var(--mut);font-weight:400">(zalecane)</small></div>
           <p style="font-size:.8rem;color:var(--mut);margin:0 0 10px">Stabilne, sprawdzone wydania.</p>
-          <button class="btn primary" onclick="otaGithub('stable')">Aktualizuj do oficjalnej</button>
+          <button class="btn primary" style="width:100%" onclick="otaGithub('stable')">Aktualizuj do oficjalnej</button>
           <div id="ver-stable" style="font-size:.78rem;color:var(--mut);margin-top:8px;text-align:center">Sprawdzanie...</div>
           <div id="chg-stable" style="display:none;margin-top:10px;border-top:1px solid var(--line);padding-top:8px"></div>
         </div>
         <div style="border:1px solid var(--line);border-radius:8px;padding:12px">
           <div style="font-weight:600;margin-bottom:4px">Wersja beta</div>
           <p style="font-size:.8rem;color:var(--mut);margin:0 0 10px">Najnowsze funkcje, może zawierać błędy.</p>
-          <button class="btn primary" onclick="otaGithub('beta')">Aktualizuj do beta</button>
+          <button class="btn primary" style="width:100%" onclick="otaGithub('beta')">Aktualizuj do beta</button>
           <div id="ver-beta" style="font-size:.78rem;color:var(--mut);margin-top:8px;text-align:center">Sprawdzanie...</div>
           <div id="chg-beta" style="display:none;margin-top:10px;border-top:1px solid var(--line);padding-top:8px"></div>
         </div>
@@ -376,9 +376,9 @@
       </label>
       <div class="check-desc">Bufor kołowy - nowe wpisy nadpisują najstarsze. Wpisy giną przy restarcie.</div>
       <div class="actions-row">
-        <button class="btn" onclick="mock('Otwieram zakładkę Logi...')">Otwórz podgląd logów</button>
-        <button class="btn" onclick="mock('Bufor logów wyczyszczony.')">Wyczyść bufor</button>
-        <button class="btn" onclick="mock('Zapisano konfigurację logów.')">Zapisz ustawienie</button>
+        <button class="btn" onclick="showPage('logs')">Otwórz podgląd logów</button>
+        <button class="btn" onclick="clearLogs()">Wyczyść bufor</button>
+        <button class="btn" onclick="saveLogsCfg()">Zapisz ustawienie</button>
       </div>
     </div>
   </section>
@@ -398,7 +398,7 @@
       <div class="grid-2">
         <div>
           <label style="display:block; font-size:.78rem; color:var(--mut); margin-bottom:5px; font-weight:500">Pobierz z modułu</label>
-          <button class="btn" onclick="mock('Pobieranie kopii .sihbak (streaming, może potrwać do 1 min)...')">
+          <button class="btn" onclick="doBackup()">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
             Pobierz kopię zapasową
           </button>
@@ -407,7 +407,7 @@
           <label style="display:block; font-size:.78rem; color:var(--mut); margin-bottom:5px; font-weight:500">Przywróć z pliku</label>
           <div class="file-in">
             <label class="file-in-label" for="bak-file" id="bak-label">Wybierz plik .sihbak</label>
-            <input type="file" id="bak-file" accept=".sihbak" onchange="pickFileBk(this)">
+            <input type="file" id="bak-file" accept=".sihbak" style="display:none" onchange="doRestore(this)">
             <button class="btn primary" onclick="confirm('Przywrócić kopię? Bieżąca konfiguracja i historia zostaną nadpisane.') && uploadBackup()">Przywróć</button>
           </div>
         </div>

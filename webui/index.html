@@ -303,16 +303,26 @@
         Aktualizacja z GitHub
         <span class="status">GitHub Releases</span>
       </div>
-      <div class="field">
-        <label>Kanał wydania</label>
-        <div class="radio-group">
-          <label class="radio"><input type="radio" name="ch" value="stable" checked> Stabilny <span class="help">(zalecane)</span></label>
-          <label class="radio"><input type="radio" name="ch" value="beta"> Beta <span class="help">(najnowsze funkcje, może mieć błędy)</span></label>
+      <p style="font-size:.85rem; color:var(--mut); margin:0 0 12px">Pobiera firmware z GitHub Releases i wgrywa bezprzewodowo. Wybierz kanał wydania:</p>
+      <div class="grid-2">
+        <div style="border:1px solid var(--line);border-radius:8px;padding:12px">
+          <div style="font-weight:600;margin-bottom:4px">Wersja oficjalna <small style="color:var(--mut);font-weight:400">(zalecane)</small></div>
+          <p style="font-size:.8rem;color:var(--mut);margin:0 0 10px">Stabilne, sprawdzone wydania.</p>
+          <button class="btn primary" onclick="otaGithub('stable')">Aktualizuj do oficjalnej</button>
+          <div id="ver-stable" style="font-size:.78rem;color:var(--mut);margin-top:8px;text-align:center">Sprawdzanie...</div>
+          <div id="chg-stable" style="display:none;margin-top:10px;border-top:1px solid var(--line);padding-top:8px"></div>
+        </div>
+        <div style="border:1px solid var(--line);border-radius:8px;padding:12px">
+          <div style="font-weight:600;margin-bottom:4px">Wersja beta</div>
+          <p style="font-size:.8rem;color:var(--mut);margin:0 0 10px">Najnowsze funkcje, może zawierać błędy.</p>
+          <button class="btn primary" onclick="otaGithub('beta')">Aktualizuj do beta</button>
+          <div id="ver-beta" style="font-size:.78rem;color:var(--mut);margin-top:8px;text-align:center">Sprawdzanie...</div>
+          <div id="chg-beta" style="display:none;margin-top:10px;border-top:1px solid var(--line);padding-top:8px"></div>
         </div>
       </div>
-      <div class="actions-row no-border">
-        <button class="btn primary" onclick="otaGithub(document.querySelector('input[name=ch]:checked').value)">Sprawdź i zainstaluj</button>
-      </div>
+      <div id="ota-ap-warn" style="display:none;border:1px solid var(--warn);border-radius:8px;padding:10px;margin-top:10px;font-size:.82rem;color:var(--warn)">Modul pracuje w trybie AP i nie ma dostepu do internetu - pobranie aktualizacji z GitHuba sie nie powiedzie. Uzyj opcji <b>Wgraj plik firmware</b> ponizej.</div>
+      <div id="ota-pbar" style="display:none;margin-top:10px"><div id="ota-bar" style="height:6px;background:var(--accent);border-radius:3px;width:0%;transition:width .3s"></div></div>
+      <div id="ota-msg" class="msg" style="margin-top:8px"></div>
     </div>
     <div class="grid-2">
       <div class="card">
@@ -332,12 +342,10 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 3v6h6M14 3l6 6M14 3H6a2 2 0 00-2 2v14a2 2 0 002 2h12a2 2 0 002-2V9"/></svg>
           Wgraj plik firmware
         </div>
-        <div class="file-in">
-          <label class="file-in-label" for="fw-file" id="fw-label">Wybierz plik .bin z dysku</label>
-          <input type="file" id="fw-file" accept=".bin" onchange="pickFirmware(this)">
-        </div>
-        <div class="check-desc" style="margin-left:0; margin-top:6px">Ręczne wgranie - bez potrzeby internetu.</div>
-        <div class="actions-row no-border"><button class="btn" onclick="doUpload()">Wgraj</button></div>
+        <p style="font-size:.82rem; color:var(--mut); margin:0 0 10px">Recznie wgrane firmware, bez potrzeby internetu. Wybierz plik <b>sih-wmbus-reader.bin</b> pobrany wczesniej.</p>
+        <button class="btn primary" onclick="pickFirmware()">Wybierz plik .bin</button>
+        <input type="file" id="fw-file" accept=".bin" style="display:none" onchange="doUpload(this)">
+        <div id="fw-msg" class="msg" style="margin-top:8px"></div>
       </div>
     </div>
     <div class="card">

@@ -450,6 +450,46 @@ int wmbus_decoder_clear_untracked(void) {
         }
     }
 
+    // FAZA 7 fix: rowniez wyczysc s_raw[] (surowe ramki - z tej listy panel
+    // Liczniki dekoduje wykryte liczniki po stronie przegladarki). Bez tego
+    // panel dalej pokazywalby wszystkie liczniki. Ring buffer - kompresja
+    // przez tymczasowy bufor: zebrac zachowane, przepisac od poczatku ringa.
+    if (s_raw && s_raw_count > 0) {
+        raw_frame_t *tmp = calloc(s_raw_count, sizeof(raw_frame_t));
+        if (tmp) {
+            int kept = 0;
+            for (int i = 0; i < s_raw_count; i++) {
+                int phys = (s_raw_head - s_raw_count + i + 2 * MAX_RAW_FRAMES) % MAX_RAW_FRAMES;
+                char id[12] = "";
+                parse_meter_id(s_raw[phys].data, id, sizeof(id));
+                bool keep = false;
+                if (id[0]) {
+                    for (int j = 0; j < cfg->meter_count && !keep; j++)
+                        if (strcasecmp(cfg->meters[j].id_hex, id) == 0) keep = true;
+                    for (int j = 0; j < n_tracked && !keep; j++)
+                        if (strcasecmp(tracked_ids[j], id) == 0) keep = true;
+                }
+                if (keep) tmp[kept++] = s_raw[phys];
+                else cleared++;
+            }
+            // Przepisz zachowane od poczatku ringa, reszta zero
+            memset(s_raw, 0, sizeof(raw_frame_t) * MAX_RAW_FRAMES);
+            for (int i = 0; i < kept; i++) s_raw[i] = tmp[i];
+            s_raw_head = kept % MAX_RAW_FRAMES;
+            s_raw_count = kept;
+            free(tmp);
+        } else {
+            // Brak RAM na tmp - jako fallback wyczysc caly ring (utrata swierze ramek
+            // wlasnych licznikow do momentu ich najblizszej transmisji, ale sasiedzi
+            // znikaja tak jak trzeba).
+            ESP_LOGW(TAG, "clear_untracked: brak RAM na tmp - czyszcze caly s_raw[]");
+            cleared += s_raw_count;
+            memset(s_raw, 0, sizeof(raw_frame_t) * MAX_RAW_FRAMES);
+            s_raw_head = 0;
+            s_raw_count = 0;
+        }
+    }
+
     xSemaphoreGive(s_mutex);
 
     ESP_LOGI(TAG, "Wyczyszczono %d ID z listy widzianych (zachowano cfg=%d, tracked=%d)",

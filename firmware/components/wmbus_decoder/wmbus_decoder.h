@@ -63,3 +63,11 @@ meter_data_t *wmbus_decoder_find_by_id(const char *id_hex);
 // Surowe ramki — indeks 0 = najnowsza
 int                wmbus_decoder_raw_count(void);
 const raw_frame_t *wmbus_decoder_raw_get(int newest_index);
+
+// FAZA 7: wyczysc liste widzianych/aktywnych licznikow (s_seen[] i s_meters[]),
+// ZACHOWUJAC tylko te ktore sa dodane do konfiguracji (cfg->meters[]) lub
+// sledzone w historii (history_tracked_meter_ids). Zwraca liczbe skasowanych ID.
+// Uzyteczne przy zmianie lokalizacji modulu (np. inkasent) - kasuje sasiadow
+// z eteru, ale zachowuje wlasne liczniki. Nowa ramka z licznikiem po skasowaniu
+// automatycznie odbuduje jego wpis.
+int                wmbus_decoder_clear_untracked(void);

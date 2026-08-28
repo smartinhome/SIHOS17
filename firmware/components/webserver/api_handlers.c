@@ -413,6 +413,18 @@ static esp_err_t handle_status(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// FAZA 7: kasuje z listy widzianych licznikow (s_meters + s_seen w wmbus_decoder)
+// te ktore NIE sa dodane do konfiguracji ani sledzone w historii. Uzyteczne przy
+// zmianie lokalizacji modulu (inkasent) - zachowuje wlasne liczniki, kasuje
+// sasiadow z eteru. Nowa ramka od licznika odbuduje jego wpis automatycznie.
+static esp_err_t handle_meters_clear(httpd_req_t *req) {
+    int cleared = wmbus_decoder_clear_untracked();
+    char buf[80];
+    snprintf(buf, sizeof(buf), "{\"status\":\"ok\",\"cleared\":%d}", cleared);
+    resp_json(req, buf);
+    return ESP_OK;
+}
+
 static esp_err_t handle_meters(httpd_req_t *req) {
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
@@ -1349,6 +1361,7 @@ void api_register_handlers(httpd_handle_t server) {
         { .uri="/api/history/track",.method=HTTP_POST, .handler=handle_history_track,.user_ctx=NULL, .is_websocket=false },
         { .uri="/api/history/tracked",.method=HTTP_GET, .handler=handle_history_tracked,.user_ctx=NULL, .is_websocket=false },
         { .uri="/api/meters",      .method=HTTP_GET,  .handler=handle_meters,      .user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/meters/clear",.method=HTTP_POST, .handler=handle_meters_clear,.user_ctx=NULL, .is_websocket=false },
         { .uri="/api/frames",      .method=HTTP_GET,  .handler=handle_frames,      .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/config",      .method=HTTP_GET,  .handler=handle_config_get,  .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/config/meter",.method=HTTP_POST, .handler=handle_config_meter,.user_ctx=NULL, .is_websocket=false },

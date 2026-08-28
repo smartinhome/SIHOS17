@@ -402,6 +402,61 @@ int wmbus_decoder_get_seen_count(void) {
     return n;
 }
 
+// FAZA 7: kasuje z s_meters[] i s_seen[] liczniki ktore NIE sa dodane do
+// konfiguracji ani sledzone w historii. Uzyteczne przy zmianie lokalizacji
+// modulu (inkasent) - kasuje sasiadow z eteru, wlasne liczniki zostaja.
+int wmbus_decoder_clear_untracked(void) {
+    if (!s_mutex) return 0;
+
+    // Pobierz liste tracked ID PRZED lock s_mutex (history ma wlasny mutex,
+    // wywolanie pod naszym mutexem = ryzyko deadlocka).
+    char tracked_ids[24][12];
+    int n_tracked = history_tracked_meter_ids(tracked_ids, 24);
+    const sih_config_t *cfg = nvs_config_ptr();
+
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    int cleared = 0;
+
+    // Kompresja s_meters[] od tylu - jesli i-ty nie jest w cfg/tracked,
+    // przesun ostatni na jego miejsce i zmniejsz licznik.
+    for (int i = s_meter_count - 1; i >= 0; i--) {
+        bool keep = false;
+        for (int j = 0; j < cfg->meter_count && !keep; j++)
+            if (strcasecmp(cfg->meters[j].id_hex, s_meters[i].id_hex) == 0) keep = true;
+        for (int j = 0; j < n_tracked && !keep; j++)
+            if (strcasecmp(tracked_ids[j], s_meters[i].id_hex) == 0) keep = true;
+        if (!keep) {
+            if (i != s_meter_count - 1)
+                s_meters[i] = s_meters[s_meter_count - 1];
+            memset(&s_meters[s_meter_count - 1], 0, sizeof(meter_data_t));
+            s_meter_count--;
+            cleared++;
+        }
+    }
+
+    // Analogicznie dla s_seen[] (surowa lista widzianych ID)
+    for (int i = s_seen_used - 1; i >= 0; i--) {
+        bool keep = false;
+        for (int j = 0; j < cfg->meter_count && !keep; j++)
+            if (strcasecmp(cfg->meters[j].id_hex, s_seen[i].id) == 0) keep = true;
+        for (int j = 0; j < n_tracked && !keep; j++)
+            if (strcasecmp(tracked_ids[j], s_seen[i].id) == 0) keep = true;
+        if (!keep) {
+            if (i != s_seen_used - 1)
+                s_seen[i] = s_seen[s_seen_used - 1];
+            memset(&s_seen[s_seen_used - 1], 0, sizeof(seen_t));
+            s_seen_used--;
+            cleared++;
+        }
+    }
+
+    xSemaphoreGive(s_mutex);
+
+    ESP_LOGI(TAG, "Wyczyszczono %d ID z listy widzianych (zachowano cfg=%d, tracked=%d)",
+             cleared, cfg->meter_count, n_tracked);
+    return cleared;
+}
+
 meter_data_t *wmbus_decoder_get_meter(int index) {
     if (index < 0 || index >= s_meter_count) return NULL;
     return &s_meters[index];

@@ -525,6 +525,86 @@ function _installMLObserver(){
 }
 _installMLObserver();
 /* Odtworz wybor sortowania z localStorage po zaladowaniu strony. */
-setTimeout(function(){try{var s=localStorage.getItem("_mListSort");var sel=document.getElementById("sort-meters");if(sel&&s){/* jesli zapisany byl "kind:*" - poprzednia wersja - domyslnie last:desc */if(s.indexOf("kind:")===0)s="last:desc";sel.value=s;applySortToMetersList();}}catch(e){}},700);</script></body></html>
+setTimeout(function(){try{var s=localStorage.getItem("_mListSort");var sel=document.getElementById("sort-meters");if(sel&&s){/* jesli zapisany byl "kind:*" - poprzednia wersja - domyslnie last:desc */if(s.indexOf("kind:")===0)s="last:desc";sel.value=s;applySortToMetersList();}}catch(e){}},700);
+/* FAZA 7j: diff-render dla #meters-list - eliminuje miganie po fetchMeters.
+   fetchMeters robi ml.innerHTML=htmlm+ghosts co ~5s, co niszczy caly DOM i browser rerysowuje. Przechwytujemy setter innerHTML:
+   - Parsujemy nowy html w tmp elemencie
+   - Karty identyczne (outerHTML) zostaja w DOM (bez flickeru)
+   - Karty zmienione = replaceChild (tylko ta jedna karta re-renderuje sie)
+   - Nowe = appendChild
+   - Usuniete = remove
+   Karty identyfikujemy po data-pin (przycisk pin) lub data-edit (edycja nazwy). */
+(function installDiffRender(){
+  var ml=document.getElementById("meters-list");
+  if(!ml){setTimeout(installDiffRender,300);return;}
+  var proto=HTMLElement.prototype;
+  var descIH=Object.getOwnPropertyDescriptor(proto,"innerHTML");
+  if(!descIH||!descIH.set){return;}
+  var origSet=descIH.set,origGet=descIH.get;
+  function extractId(c){
+    if(!c||!c.querySelector)return null;
+    var pin=c.querySelector(".pin-btn[data-pin]");
+    if(pin&&pin.getAttribute("data-pin"))return pin.getAttribute("data-pin").toLowerCase();
+    var ne=c.querySelector(".name-edit[data-edit]");
+    if(ne&&ne.getAttribute("data-edit"))return ne.getAttribute("data-edit").toLowerCase();
+    return null;
+  }
+  Object.defineProperty(ml,"innerHTML",{
+    configurable:true,
+    get:function(){return origGet.call(this);},
+    set:function(html){
+      var self=this;
+      /* Skip identyczne - najczestszy przypadek gdy nic sie nie zmienilo. */
+      if(self._lastHTML===html)return;
+      self._lastHTML=html;
+      /* Empty lub prosty markup (empty state) - bez diff, po prostu set. */
+      if(!html||html.indexOf("class=\"empty\"")>=0||html.length<80){
+        origSet.call(self,html);return;
+      }
+      /* Sparsuj nowy html w tmp DIV - origSet zeby nie triggerowac naszego settera. */
+      var tmp=document.createElement("div");
+      try{origSet.call(tmp,html);}catch(e){origSet.call(self,html);return;}
+      var newCards=Array.prototype.slice.call(tmp.children);
+      if(!newCards.length){origSet.call(self,html);return;}
+      /* Zbierz stare i nowe karty po id. */
+      var oldChildren=Array.prototype.slice.call(self.children);
+      var oldMap={};
+      oldChildren.forEach(function(c){var id=extractId(c);if(id)oldMap[id]=c;});
+      var seenNew={};
+      /* Iteruj po nowej kolejnosci - dla kazdej karty:
+         - jesli jest w oldMap i outerHTML identyczne -> tylko repositioning (appendChild)
+         - jesli jest w oldMap ale zmienione -> replaceChild
+         - jesli nowe -> appendChild kart z tmp */
+      newCards.forEach(function(nc,idx){
+        var id=extractId(nc);
+        var key=id||("__anon_"+idx);
+        seenNew[key]=true;
+        var oc=id?oldMap[id]:null;
+        if(oc){
+          if(oc.outerHTML===nc.outerHTML){
+            /* Karta identyczna - tylko repositioning (bez flickeru). */
+            self.appendChild(oc);
+          }else{
+            /* Zmiana danych - podmien caly outerHTML tej jednej karty. */
+            self.appendChild(nc);
+            if(oc.parentNode===self)oc.remove();
+            oldMap[id]=nc;
+          }
+        }else{
+          /* Nowa karta. */
+          self.appendChild(nc);
+          if(id)oldMap[id]=nc;
+        }
+      });
+      /* Usun stare karty ktore nie maja odpowiednika w nowych. */
+      oldChildren.forEach(function(c){
+        var id=extractId(c);
+        if(id&&!seenNew[id]&&c.parentNode===self)c.remove();
+      });
+      /* Notify observers rangowaly wczesniej - ale MutationObserver z 327i i tak
+         wykryje appendChild/remove i uruchomi applySortToMetersList z debounce. */
+    }
+  });
+})();</script></body></html>
 
 

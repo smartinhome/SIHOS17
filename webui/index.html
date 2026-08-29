@@ -534,6 +534,32 @@ setTimeout(function(){try{var s=localStorage.getItem("_mListSort");var sel=docum
    - Nowe = appendChild
    - Usuniete = remove
    Karty identyfikujemy po data-pin (przycisk pin) lub data-edit (edycja nazwy). */
+/* FAZA 7k: deep-update pojedynczej karty in-place bez tworzenia nowego DOM.
+   Zachowuje istniejaca strukture (SVG, spark, pinBtn state), updatuje tylko
+   wartosci w tile-v (innerHTML). Zwraca true jesli struktura pasuje, false
+   jesli sa nowe/usuniete tile lub inne kategorie - wtedy fallback do pelnego swap. */
+function deepUpdateCard(oc,nc){
+  try{
+    var oTiles=oc.querySelectorAll(".tile");
+    var nTiles=nc.querySelectorAll(".tile");
+    if(oTiles.length!==nTiles.length)return false;
+    /* Sprawdz mapowanie 1:1 przez tile-k (nazwa pola). */
+    for(var i=0;i<oTiles.length;i++){
+      var okEl=oTiles[i].querySelector(".tile-k");
+      var nkEl=nTiles[i].querySelector(".tile-k");
+      if(!okEl||!nkEl||okEl.textContent!==nkEl.textContent)return false;
+    }
+    /* Struktura pasuje - update tylko tile-v tam gdzie sie rozni. */
+    for(var i=0;i<oTiles.length;i++){
+      var ovEl=oTiles[i].querySelector(".tile-v");
+      var nvEl=nTiles[i].querySelector(".tile-v");
+      if(ovEl&&nvEl&&ovEl.innerHTML!==nvEl.innerHTML){
+        ovEl.innerHTML=nvEl.innerHTML;
+      }
+    }
+    return true;
+  }catch(e){return false;}
+}
 (function installDiffRender(){
   var ml=document.getElementById("meters-list");
   if(!ml){setTimeout(installDiffRender,300);return;}
@@ -585,10 +611,18 @@ setTimeout(function(){try{var s=localStorage.getItem("_mListSort");var sel=docum
             /* Karta identyczna - tylko repositioning (bez flickeru). */
             self.appendChild(oc);
           }else{
-            /* Zmiana danych - podmien caly outerHTML tej jednej karty. */
-            self.appendChild(nc);
-            if(oc.parentNode===self)oc.remove();
-            oldMap[id]=nc;
+            /* FAZA 7k: DEEP DIFF zamiast replaceChild - update tylko wartosci
+               w tile (tile-v), reszta karty zostaje w DOM. Eliminuje flicker
+               calej karty przy zmianie samej wartosci pola albo RSSI. */
+            if(deepUpdateCard(oc,nc)){
+              /* Udalo sie zaktualizowac in-place - stara karta zostaje. */
+              self.appendChild(oc);
+            }else{
+              /* Struktura kart zmieniona (nowe fields/kategorie) - pelny swap. */
+              self.appendChild(nc);
+              if(oc.parentNode===self)oc.remove();
+              oldMap[id]=nc;
+            }
           }
         }else{
           /* Nowa karta. */

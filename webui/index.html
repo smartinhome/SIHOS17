@@ -468,104 +468,97 @@ function timeOnly(tsUnix){if(!tsUnix)return'--:--:--';var d=new Date(tsUnix*1000
 function renderWifiList(nets){var box=document.getElementById('wifi-scan-list');if(!box)return;if(!nets||!nets.length){box.innerHTML='<div style="color:var(--mut);font-size:.85rem;padding:6px">Nie znaleziono sieci</div>';return}nets.sort(function(a,b){return b.rssi-a.rssi});box.innerHTML=nets.map(function(n){var lvl=n.rssi>=-55?4:n.rssi>=-67?3:n.rssi>=-75?2:1;var ac="var(--acc,#3d8bff)",inac="var(--line,#c9ccd1)";var c1=lvl>=2?ac:inac,c2=lvl>=3?ac:inac,c3=lvl>=4?ac:inac,cd=ac;var bars='<svg width="20" height="16" viewBox="0 0 20 16" style="vertical-align:middle">'+'<path d="M2.5 5.5a11 11 0 0 1 15 0" fill="none" stroke="'+c3+'" stroke-width="1.6" stroke-linecap="round"/>'+'<path d="M5 8.2a7.5 7.5 0 0 1 10 0" fill="none" stroke="'+c2+'" stroke-width="1.6" stroke-linecap="round"/>'+'<path d="M7.3 10.8a4 4 0 0 1 5.4 0" fill="none" stroke="'+c1+'" stroke-width="1.6" stroke-linecap="round"/>'+'<circle cx="10" cy="13.2" r="1.3" fill="'+cd+'"/>'+'</svg>';var lock=n.auth>0?' <span style="color:var(--mut);font-size:.8rem" title="Zabezpieczona">&#128274;</span>':"";return '<div class="wifi-net" data-ssid="'+encodeURIComponent(n.ssid)+'" style="padding:9px 12px;border:1px solid var(--line);border-radius:8px;margin-bottom:4px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;font-size:.9rem"><span>'+n.ssid+lock+'</span><span style="color:var(--mut);font-family:monospace;font-size:.8rem">'+bars+'</span></div>'}).join('')}
 function pickWifi(ssid){var i=document.getElementById('ssid');if(i)i.value=ssid;var box=document.getElementById('wifi-scan-list');if(box)box.style.display='none';var p=document.getElementById('pass');if(p)p.focus()}
 async function saveWifi(){const s=document.getElementById('ssid').value.trim(),p=document.getElementById('pass').value,msg=document.getElementById('wifi-msg');if(!s){msg.className='msg err';msg.textContent='Podaj nazwę sieci!';return}msg.className='msg ok';msg.textContent='Zapisywanie...';try{await fetch('/api/config/wifi',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid:s,password:p})})}catch(e){}msg.textContent='Zapisano - moduł restartuje się i łączy z '+s}var _tOff=null;function tbClock(){var e=document.getElementById('tb-time');if(!e)return;if(_tOff===null){e.className='tb-i tb-time tb-off';e.innerHTML='<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M3 3l18 18" stroke-linecap="round"/></svg><span>brak czasu</span>';return}var d=new Date(Date.now()+_tOff);var p=function(n){return String(n).padStart(2,'0')};e.className='tb-i tb-time';e.innerHTML='<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2" stroke-linecap="round"/></svg><span>'+p(d.getDate())+'.'+p(d.getMonth()+1)+' '+p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds())+'</span>'}setInterval(tbClock,1000);function tbStatus(d){var net=document.getElementById('tb-net');var mq=document.getElementById('tb-mqtt');if(net){var ap=(d.wifi_state==='ap_mode');var ico=ap?'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M6.3 6.3a8 8 0 000 11.4M17.7 6.3a8 8 0 010 11.4" stroke-linecap="round"/></svg>':'<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12.5a10 10 0 0114 0M8.5 16a5 5 0 017 0" stroke-linecap="round"/><circle cx="12" cy="19.5" r="1" fill="currentColor"/></svg>';var lbl=ap?'Tryb AP':(d.ip&&d.ip!=='0.0.0.0'?d.ip:'brak sieci');net.className='tb-i '+(ap?'tb-warn':(d.wifi_state==='connected'?'tb-ok':'tb-off'));net.innerHTML=ico+'<span class="tb-lbl">'+lbl+'</span>'}if(mq){if(!d.mqtt_on){mq.style.display='none'}else{mq.style.display='';var ok=!!d.mqtt_conn;mq.className='tb-i '+(ok?'tb-ok':'tb-off');mq.innerHTML='<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6.5 18a4.5 4.5 0 010-9 6 6 0 0111.5 1.5A3.8 3.8 0 0117.5 18z" stroke-linejoin="round"/>'+(ok?'':'<path d="M3 3l18 18" stroke-linecap="round"/>')+'</svg><span class="tb-lbl">MQTT</span>'}}}async function loadMqtt(){try{var d=await(await fetch('/api/mqtt')).json();var g=function(i){return document.getElementById(i)};if(g('mq-en'))g('mq-en').checked=!!d.enabled;if(g('mq-host'))g('mq-host').value=d.host||'';if(g('mq-port'))g('mq-port').value=d.port||1883;if(g('mq-user'))g('mq-user').value=d.user||'';if(g('mq-prefix'))g('mq-prefix').value=d.prefix||'sihos17';if(g('mq-ha'))g('mq-ha').checked=!!d.ha;if(g('mq-pass'))g('mq-pass').placeholder=d.has_pass?'hasło zapisane (puste = bez zmian)':'hasło (opcjonalnie)';var st=g('mq-stat');if(st)st.textContent=d.enabled?((d.connected?'Połączono z brokerem':'Brak połączenia')+' · wysłano '+(d.sent||0)+', błędów '+(d.failed||0)):'Wyłączone'}catch(e){}}async function saveMqtt(){var g=function(i){return document.getElementById(i)};var m=g('mq-msg');var body={enabled:g('mq-en').checked,host:g('mq-host').value.trim(),port:parseInt(g('mq-port').value)||1883,user:g('mq-user').value.trim(),pass:g('mq-pass').value,prefix:g('mq-prefix').value.trim()||'sihos17',ha:g('mq-ha').checked};if(body.enabled&&!body.host){if(m){m.className='msg err';m.textContent='Podaj adres brokera'}return}try{var r=await fetch('/api/mqtt',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});var j={};try{j=await r.json()}catch(e2){}if(r.ok&&!j.error){if(m){m.className='msg ok';m.textContent='Zapisane'}g('mq-pass').value='';setTimeout(loadMqtt,1500)}else{if(m){m.className='msg err';m.textContent='Błąd: '+(j.error||'nie zapisano')}}}catch(e){if(m){m.className='msg err';m.textContent='Brak połączenia z modułem'}}}function pickFirmware(){var e=document.getElementById('fw-file');if(e){e.value='';e.click()}}async function doUpload(input){var f=input.files&&input.files[0];if(!f)return;var m=document.getElementById('fw-msg');if(!confirm('Wgrać plik '+f.name+' ('+(f.size/1024/1024).toFixed(2)+' MB)? Moduł zrestartuje się.')){input.value='';return}if(m){m.className='msg';m.textContent='Wysyłanie... to potrwa kilkadziesiąt sekund'}try{var buf=await f.arrayBuffer();var r=await fetch('/api/ota/upload',{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:buf});var j={};try{j=await r.json()}catch(e2){}if(r.ok&&!j.error){if(m){m.className='msg ok';m.textContent='Wgrane. Moduł restartuje się...'}setTimeout(function(){location.reload()},20000)}else{if(m){m.className='msg err';m.textContent='Błąd: '+(j.error||'nie udało się wgrać')}}}catch(e){if(m){m.className='msg err';m.textContent='Błąd wysyłania pliku'}}input.value=''}async function otaGithub(channel){const msg=document.getElementById('ota-msg'),pb=document.getElementById('ota-pbar');var nazwa=channel==='beta'?'beta':'oficjalnej';if(!confirm('Pobrać i wgrać najnowszy firmware ('+nazwa+')?'))return;msg.className='msg ok';msg.textContent='Moduł łączy się z GitHub ('+nazwa+')...';pb.style.display='block';try{await fetch('/api/ota/github?channel='+(channel==='beta'?'beta':'stable'),{method:'POST'});if(otaPoller)clearInterval(otaPoller);otaPoller=setInterval(pollOta,1500)}catch(e){msg.className='msg err';msg.textContent='Blad: '+e}}async function pollOta(){try{const d=await(await fetch('/api/ota/status')).json();document.getElementById('ota-bar').style.width=d.progress+'%';const L={idle:'',downloading:'Pobieranie...',writing:'Zapisywanie '+d.progress+'%',success:'OK - restart...',failed:'Blad: '+d.error,uptodate:d.error||'Zainstalowana wersja jest aktualna'};const msg=document.getElementById('ota-msg');if(d.state!=='idle')msg.textContent=L[d.state]||d.state;msg.className=d.state==='failed'?'msg err':(d.state==='uptodate'?'msg ok':'msg ok');if(d.state==='uptodate'){document.getElementById('ota-pbar').style.display='none'}if(d.state==='success'||d.state==='failed'||d.state==='uptodate'){clearInterval(otaPoller);otaPoller=null}}catch(e){}}function stripAnsi(s){return s.replace(/\x1b\[[0-9;]*m/g,'')}async function fetchLogs(){try{let t=await(await fetch('/api/logs')).text();t=stripAnsi(t);const el=document.getElementById('log-output');if(!el)return;const b=el.scrollHeight-el.scrollTop-el.clientHeight<40;el.textContent=t||'(brak logow)';if(b)el.scrollTop=el.scrollHeight}catch(e){}}function startLogs(){fetchLogs();if(logTimer)clearInterval(logTimer);if(logAuto)logTimer=setInterval(fetchLogs,2000)}function toggleAutoLogs(){logAuto=!logAuto;document.getElementById('log-auto').textContent='Auto: '+(logAuto?'ON':'OFF');if(logAuto)startLogs();else if(logTimer){clearInterval(logTimer);logTimer=null}}async function clearLogs(){try{await fetch('/api/logs/clear',{method:'POST'});document.getElementById('log-output').textContent='(wyczyszczono)'}catch(e){}}document.getElementById('nav').addEventListener('click',e=>{const b=e.target.closest('.nav-item');if(b)showPage(b.dataset.page)});window.addEventListener('hashchange',()=>showPage((location.hash||'#dashboard').slice(1)));initTheme();pushTime();loadLogsCfg();showPage((location.hash||'#dashboard').slice(1));fetchAll();setInterval(fetchAll,5000);document.addEventListener('click',function(e){var w=e.target.closest&&e.target.closest('.wifi-net');if(w){e.preventDefault();pickWifi(decodeURIComponent(w.getAttribute('data-ssid')))}});setInterval(function(){var ph=document.getElementById('page-history');if(ph&&ph.classList.contains('active')&&histState.id){loadHistory(true)}var ps=document.getElementById('page-system');if(ps&&ps.classList.contains('active')){fetchSystem()}},5000);async function saveAllLeds(){var m=document.getElementById("leds-all-msg");if(m){m.className="msg";m.textContent="Zapisywanie...";}var body1={enabled:document.getElementById("led-en").checked,brightness:parseInt(document.getElementById("led-br").value)||50,only_pinned:document.getElementById("led-op").checked,ms:parseInt(document.getElementById("led-ms").value)||140};var body2={enabled:document.getElementById("leds-en").checked,brightness:parseInt(document.getElementById("leds-br").value)||7};try{var r1=await fetch("/api/led",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body1)});var r2=await fetch("/api/led-status",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body2)});if(m){if(r1.ok&&r2.ok){m.className="msg ok";m.textContent="Zapisano ustawienia obu diod";}else{m.className="msg err";m.textContent="Blad zapisu jednej z diod";}}}catch(e){if(m){m.className="msg err";m.textContent="Blad sieci: "+e;}}}function _bindLedLive(){function ln(idr,idv,su){var r=document.getElementById(idr),v=document.getElementById(idv);if(r&&v){var u=function(){v.textContent=r.value+(su||"");};r.addEventListener("input",u);u();}}ln("led-br","led-bv","%");ln("leds-br","leds-bv","%");ln("led-ms","led-msv"," ms");}document.addEventListener("DOMContentLoaded",_bindLedLive);async function otaFromUrl(){var u=document.getElementById("ota-url");var url=u?u.value.trim():"";if(!url){alert("Podaj URL pliku .bin");return;}if(!confirm("Pobrać firmware z:\n"+url+"\n\nModuł pobierze i zrestartuje się.")){return;}try{var r=await fetch("/api/ota/url",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({url:url})});var j={};try{j=await r.json()}catch(e2){}if(r.ok&&!j.error){pollOta();alert("OTA uruchomione. Postęp widoczny w Status.");}else{alert("Błąd: "+(j.error||("HTTP "+r.status)));}}catch(e){alert("Błąd sieci: "+e);}}async function refreshMetersDetectedCount(){try{var r=await fetch("/api/status");var d=await r.json();var el=document.getElementById("meters-detected-cnt");if(el)el.textContent=(d.meter_count!=null?d.meter_count:"--");}catch(e){}}async function clearMetersList(){var msg=document.getElementById("meters-clear-msg");if(!confirm("Wymazac liste wykrytych licznikow? Zachowane zostana tylko liczniki dodane do dashboardu i sledzone w historii.")) return;if(msg){msg.className="msg";msg.textContent="Kasowanie...";}var _ml=document.getElementById("meters-list");if(_ml)_ml.innerHTML='<div class="empty" style="padding:14px;text-align:center;color:var(--mut)">Kasowanie listy...</div>';var _sl=document.getElementById("saved-list");if(_sl){}var _origFetch=window.fetch;window.fetch=function(u,o){if(typeof u==="string"&&(u.indexOf("/api/frames")===0||u.indexOf("/api/config")===0||u.indexOf("/api/dashboard")===0)){u+=(u.indexOf("?")>=0?"&":"?")+"_cb="+Date.now();}return _origFetch.call(this,u,o);};try{var r=await fetch("/api/meters/clear",{method:"POST"});var j={};try{j=await r.json()}catch(e2){}if(r.ok&&!j.error){if(msg){msg.className="msg ok";msg.textContent="Skasowano "+(j.cleared||0)+" ID. Nowe ramki dodadza liczniki ponownie.";}/* FAZA 7 fix f: wyczysc JS-owy cache DETECTED (let w scope) - inaczej fetchMeters tylko dokleja nowe wpisy, a stare siedza jako duchy do czasu odswiezenia strony. Firmware juz zachowuje tracked (dashboard+historia), wiec /api/frames zwroci tylko je - DETECTED odbuduje sie z zera z prawidlowa zawartoscia. */try{if(typeof DETECTED==="object"&&DETECTED){Object.keys(DETECTED).forEach(function(_did){delete DETECTED[_did]});}}catch(_e){}await refreshMetersDetectedCount();if(typeof fetchMeters==="function")await fetchMeters();if(typeof loadSavedMeters==="function")await loadSavedMeters();setTimeout(function(){if(typeof fetchMeters==="function")fetchMeters();refreshMetersDetectedCount();window.fetch=_origFetch;},600);}else{if(msg){msg.className="msg err";msg.textContent="Blad: "+(j.error||"HTTP "+r.status);}}}catch(e){if(msg){msg.className="msg err";msg.textContent="Blad sieci: "+e;}}}
-/* FAZA 7h/i: sortowanie listy licznikow przez dropdown + MutationObserver.
-   Fix: fetchMeters co 5s robi ml.innerHTML=... - reakcja przez observera
-   sortuje NATYCHMIAST po nadpisaniu (bez setInterval 5s ktore powodowalo
-   przeskakiwanie). Disconnect/observe wokol appendChild -> zero infinite loop.
-   Sortowanie po rodzaju USUNIETE (za malo praktyczne przy mieszance licznikow). */
-var _sortObserver=null;var _sortDT=null;
+/* FAZA 7L: kompletny fix migania listy licznikow.
+   Strategia:
+   1) Setter innerHTML na #meters-list -> diff-render:
+      - Skip jesli HTML identyczne (najczestszy przypadek gdy nic sie nie zmienilo)
+      - Deep-update dla istniejacych kart: update tylko tile-v.innerHTML (wartosci)
+        BEZ appendChild -> zero triggerowania MutationObserver -> zero resortu -> stabilnosc listy
+      - Nowe karty: appendChild (triggeruje observer -> resort tylko dla nowych)
+      - Usuniete karty: remove (jw)
+      - Fallback replaceChild TYLKO gdy struktura tile inna
+   2) MutationObserver na meters-list: reagujemy tylko na add/remove wezlow,
+      nie na modyfikacje potomkow (childList:true, bez subtree).
+      Dzieki temu deep-update tile-v.innerHTML NIE odpala resortu.
+   3) applySortToMetersList: STABLE CHECK - jesli aktualna kolejnosc DOM juz zgadza sie
+      z zamowiona, nie appendChild wcale (0 mutations). Disconnect/observe wokol
+      appendChild zeby nie triggerowac sam siebie.
+   4) Dropdown onchange -> resort natychmiast (jednorazowo, nie na kazdym fetchMeters).
+   Efekt: karta z nowa ramka NIE skacze na gore przy fetchMeters, sortowanie
+   uruchamia sie TYLKO gdy user klika dropdown lub gdy dodano/usunieto karte. */
+var _sortObserver=null,_sortDT=null;
+function _getIdSequence(ml){
+  var ids=[];
+  var ch=ml.children;
+  for(var i=0;i<ch.length;i++){
+    var c=ch[i],idA=null;
+    var pin=c.querySelector&&c.querySelector(".pin-btn[data-pin]");
+    if(pin)idA=pin.getAttribute("data-pin");
+    if(!idA){var ne=c.querySelector&&c.querySelector(".name-edit[data-edit]");if(ne)idA=ne.getAttribute("data-edit");}
+    ids.push((idA||("__i"+i)).toLowerCase());
+  }
+  return ids.join("|");
+}
 function applySortToMetersList(){
   var ml=document.getElementById("meters-list");if(!ml)return;
-  if(_sortObserver)_sortObserver.disconnect();
-  try{
-    var sel=document.getElementById("sort-meters");var key=sel?sel.value:"last:desc";
-    try{localStorage.setItem("_mListSort",key);}catch(e){}
-    var p=key.split(":"),sk=p[0],sd=p[1]||"desc";
-    var cards=Array.prototype.slice.call(ml.children);
-    if(!cards.length||(cards.length===1&&cards[0].className&&cards[0].className.indexOf("empty")>=0))return;
-    cards.forEach(function(c){
-      var idA=null;
-      var pin=c.querySelector&&c.querySelector(".pin-btn[data-pin]");
-      if(pin)idA=pin.getAttribute("data-pin");
-      if(!idA){var ne=c.querySelector&&c.querySelector(".name-edit[data-edit]");if(ne)idA=ne.getAttribute("data-edit");}
-      c._sId=(idA||"").toLowerCase();
-      var D=(typeof DETECTED==="object"&&DETECTED)?DETECTED:{};
-      c._sData=D[c._sId]||D[idA]||{};
-    });
-    cards.sort(function(a,b){
-      var da=a._sData||{},db=b._sData||{},av,bv;
-      switch(sk){
-        case "id":   av=a._sId||"";bv=b._sId||"";return sd==="asc"?av.localeCompare(bv):bv.localeCompare(av);
-        case "rssi": av=(typeof da.rssi==="number"?da.rssi:-999);bv=(typeof db.rssi==="number"?db.rssi:-999);return sd==="asc"?av-bv:bv-av;
-        case "last": av=da._tsUnix||0;bv=db._tsUnix||0;return sd==="asc"?av-bv:bv-av;
-      }
-      return 0;
-    });
-    cards.forEach(function(c){ml.appendChild(c);});
-  }finally{
-    if(_sortObserver){
-      var _ml=document.getElementById("meters-list");
-      if(_ml)_sortObserver.observe(_ml,{childList:true});
-    }
-  }
-}
-/* Instalacja observera - czeka az meters-list jest w DOM (fetchAll moze byc pozniej). */
-function _installMLObserver(){
-  var ml=document.getElementById("meters-list");
-  if(!ml){setTimeout(_installMLObserver,300);return;}
-  if(!window.MutationObserver){/* stara przegladarka */setInterval(function(){try{applySortToMetersList();}catch(e){}},2000);return;}
-  _sortObserver=new MutationObserver(function(){
-    /* Debounce - fetchMeters moze robic wiele operacji szybko po sobie */
-    clearTimeout(_sortDT);
-    _sortDT=setTimeout(function(){try{applySortToMetersList();}catch(e){}},40);
+  var sel=document.getElementById("sort-meters");var key=sel?sel.value:"last:desc";
+  try{localStorage.setItem("_mListSort",key);}catch(e){}
+  var p=key.split(":"),sk=p[0],sd=p[1]||"desc";
+  var cards=Array.prototype.slice.call(ml.children);
+  if(!cards.length||(cards.length===1&&cards[0].className&&cards[0].className.indexOf("empty")>=0))return;
+  cards.forEach(function(c){
+    var idA=null;
+    var pin=c.querySelector&&c.querySelector(".pin-btn[data-pin]");
+    if(pin)idA=pin.getAttribute("data-pin");
+    if(!idA){var ne=c.querySelector&&c.querySelector(".name-edit[data-edit]");if(ne)idA=ne.getAttribute("data-edit");}
+    c._sId=(idA||"").toLowerCase();
+    var D=(typeof DETECTED==="object"&&DETECTED)?DETECTED:{};
+    c._sData=D[c._sId]||D[idA]||{};
   });
-  _sortObserver.observe(ml,{childList:true});
-  /* Startowe wywolanie na wypadek gdyby pierwsza zawartosc byla przed observerem. */
-  setTimeout(function(){try{applySortToMetersList();}catch(e){}},600);
+  cards.sort(function(a,b){
+    var da=a._sData||{},db=b._sData||{},av,bv;
+    switch(sk){
+      case "id":   av=a._sId||"";bv=b._sId||"";return sd==="asc"?av.localeCompare(bv):bv.localeCompare(av);
+      case "rssi": av=(typeof da.rssi==="number"?da.rssi:-999);bv=(typeof db.rssi==="number"?db.rssi:-999);return sd==="asc"?av-bv:bv-av;
+      case "last": av=da._tsUnix||0;bv=db._tsUnix||0;return sd==="asc"?av-bv:bv-av;
+    }
+    return 0;
+  });
+  /* STABLE CHECK: jesli obecna kolejnosc DOM juz zgadza sie z zamowiona -
+     nie appendChild wcale (0 mutations, 0 triggerowania observer, 0 flickeru). */
+  var sortedIds=cards.map(function(c){return c._sId||"";}).join("|");
+  var currentIds=_getIdSequence(ml);
+  if(sortedIds===currentIds)return;
+  if(_sortObserver)_sortObserver.disconnect();
+  try{cards.forEach(function(c){ml.appendChild(c);});}
+  finally{if(_sortObserver){var _m=document.getElementById("meters-list");if(_m)_sortObserver.observe(_m,{childList:true});}}
 }
-_installMLObserver();
-/* Odtworz wybor sortowania z localStorage po zaladowaniu strony. */
-setTimeout(function(){try{var s=localStorage.getItem("_mListSort");var sel=document.getElementById("sort-meters");if(sel&&s){/* jesli zapisany byl "kind:*" - poprzednia wersja - domyslnie last:desc */if(s.indexOf("kind:")===0)s="last:desc";sel.value=s;applySortToMetersList();}}catch(e){}},700);
-/* FAZA 7j: diff-render dla #meters-list - eliminuje miganie po fetchMeters.
-   fetchMeters robi ml.innerHTML=htmlm+ghosts co ~5s, co niszczy caly DOM i browser rerysowuje. Przechwytujemy setter innerHTML:
-   - Parsujemy nowy html w tmp elemencie
-   - Karty identyczne (outerHTML) zostaja w DOM (bez flickeru)
-   - Karty zmienione = replaceChild (tylko ta jedna karta re-renderuje sie)
-   - Nowe = appendChild
-   - Usuniete = remove
-   Karty identyfikujemy po data-pin (przycisk pin) lub data-edit (edycja nazwy). */
-/* FAZA 7k: deep-update pojedynczej karty in-place bez tworzenia nowego DOM.
-   Zachowuje istniejaca strukture (SVG, spark, pinBtn state), updatuje tylko
-   wartosci w tile-v (innerHTML). Zwraca true jesli struktura pasuje, false
-   jesli sa nowe/usuniete tile lub inne kategorie - wtedy fallback do pelnego swap. */
+/* deep-update: tile-k -> tile-v mapping (bez zaleznosci od kolejnosci DOM tile). */
 function deepUpdateCard(oc,nc){
   try{
     var oTiles=oc.querySelectorAll(".tile");
     var nTiles=nc.querySelectorAll(".tile");
     if(oTiles.length!==nTiles.length)return false;
-    /* Sprawdz mapowanie 1:1 przez tile-k (nazwa pola). */
-    for(var i=0;i<oTiles.length;i++){
-      var okEl=oTiles[i].querySelector(".tile-k");
-      var nkEl=nTiles[i].querySelector(".tile-k");
-      if(!okEl||!nkEl||okEl.textContent!==nkEl.textContent)return false;
-    }
-    /* Struktura pasuje - update tylko tile-v tam gdzie sie rozni. */
-    for(var i=0;i<oTiles.length;i++){
-      var ovEl=oTiles[i].querySelector(".tile-v");
-      var nvEl=nTiles[i].querySelector(".tile-v");
-      if(ovEl&&nvEl&&ovEl.innerHTML!==nvEl.innerHTML){
-        ovEl.innerHTML=nvEl.innerHTML;
-      }
+    var oMap={},nMap={};
+    for(var i=0;i<oTiles.length;i++){var ok=oTiles[i].querySelector(".tile-k");if(ok)oMap[ok.textContent]=oTiles[i];}
+    for(var i=0;i<nTiles.length;i++){var nk=nTiles[i].querySelector(".tile-k");if(nk)nMap[nk.textContent]=nTiles[i];}
+    var oKeys=Object.keys(oMap).sort(),nKeys=Object.keys(nMap).sort();
+    if(oKeys.length!==nKeys.length)return false;
+    for(var i=0;i<oKeys.length;i++)if(oKeys[i]!==nKeys[i])return false;
+    for(var k in oMap){
+      var ov=oMap[k].querySelector(".tile-v"),nv=nMap[k].querySelector(".tile-v");
+      if(ov&&nv&&ov.innerHTML!==nv.innerHTML)ov.innerHTML=nv.innerHTML;
     }
     return true;
   }catch(e){return false;}
 }
+/* Diff-render setter innerHTML dla #meters-list. */
 (function installDiffRender(){
   var ml=document.getElementById("meters-list");
   if(!ml){setTimeout(installDiffRender,300);return;}
   var proto=HTMLElement.prototype;
   var descIH=Object.getOwnPropertyDescriptor(proto,"innerHTML");
-  if(!descIH||!descIH.set){return;}
+  if(!descIH||!descIH.set)return;
   var origSet=descIH.set,origGet=descIH.get;
   function extractId(c){
     if(!c||!c.querySelector)return null;
@@ -580,65 +573,79 @@ function deepUpdateCard(oc,nc){
     get:function(){return origGet.call(this);},
     set:function(html){
       var self=this;
-      /* Skip identyczne - najczestszy przypadek gdy nic sie nie zmienilo. */
       if(self._lastHTML===html)return;
       self._lastHTML=html;
-      /* Empty lub prosty markup (empty state) - bez diff, po prostu set. */
-      if(!html||html.indexOf("class=\"empty\"")>=0||html.length<80){
-        origSet.call(self,html);return;
-      }
-      /* Sparsuj nowy html w tmp DIV - origSet zeby nie triggerowac naszego settera. */
+      if(!html||html.indexOf('class="empty"')>=0||html.length<80){origSet.call(self,html);return;}
       var tmp=document.createElement("div");
       try{origSet.call(tmp,html);}catch(e){origSet.call(self,html);return;}
       var newCards=Array.prototype.slice.call(tmp.children);
       if(!newCards.length){origSet.call(self,html);return;}
-      /* Zbierz stare i nowe karty po id. */
       var oldChildren=Array.prototype.slice.call(self.children);
       var oldMap={};
       oldChildren.forEach(function(c){var id=extractId(c);if(id)oldMap[id]=c;});
       var seenNew={};
-      /* Iteruj po nowej kolejnosci - dla kazdej karty:
-         - jesli jest w oldMap i outerHTML identyczne -> tylko repositioning (appendChild)
-         - jesli jest w oldMap ale zmienione -> replaceChild
-         - jesli nowe -> appendChild kart z tmp */
-      newCards.forEach(function(nc,idx){
-        var id=extractId(nc);
-        var key=id||("__anon_"+idx);
-        seenNew[key]=true;
-        var oc=id?oldMap[id]:null;
-        if(oc){
-          if(oc.outerHTML===nc.outerHTML){
-            /* Karta identyczna - tylko repositioning (bez flickeru). */
-            self.appendChild(oc);
-          }else{
-            /* FAZA 7k: DEEP DIFF zamiast replaceChild - update tylko wartosci
-               w tile (tile-v), reszta karty zostaje w DOM. Eliminuje flicker
-               calej karty przy zmianie samej wartosci pola albo RSSI. */
-            if(deepUpdateCard(oc,nc)){
-              /* Udalo sie zaktualizowac in-place - stara karta zostaje. */
-              self.appendChild(oc);
+      if(_sortObserver)_sortObserver.disconnect();
+      try{
+        newCards.forEach(function(nc,idx){
+          var id=extractId(nc);
+          var key=id||("__anon_"+idx);
+          seenNew[key]=true;
+          var oc=id?oldMap[id]:null;
+          if(oc){
+            if(oc.outerHTML===nc.outerHTML){
+              /* Nic - karta identyczna, zostaje w tej samej pozycji (BEZ appendChild). */
+            }else if(deepUpdateCard(oc,nc)){
+              /* Wartosci zaktualizowane in-place, karta zostaje w miejscu. */
             }else{
-              /* Struktura kart zmieniona (nowe fields/kategorie) - pelny swap. */
-              self.appendChild(nc);
-              if(oc.parentNode===self)oc.remove();
+              /* Strukturalna zmiana - full swap (rzadkie). */
+              oc.parentNode.replaceChild(nc,oc);
               oldMap[id]=nc;
             }
+          }else{
+            self.appendChild(nc);
+            if(id)oldMap[id]=nc;
           }
-        }else{
-          /* Nowa karta. */
-          self.appendChild(nc);
-          if(id)oldMap[id]=nc;
+        });
+        oldChildren.forEach(function(c){
+          var id=extractId(c);
+          if(id&&!seenNew[id]&&c.parentNode===self)c.remove();
+        });
+      }finally{
+        if(_sortObserver){
+          var _m=document.getElementById("meters-list");
+          if(_m)_sortObserver.observe(_m,{childList:true});
         }
-      });
-      /* Usun stare karty ktore nie maja odpowiednika w nowych. */
-      oldChildren.forEach(function(c){
-        var id=extractId(c);
-        if(id&&!seenNew[id]&&c.parentNode===self)c.remove();
-      });
-      /* Notify observers rangowaly wczesniej - ale MutationObserver z 327i i tak
-         wykryje appendChild/remove i uruchomi applySortToMetersList z debounce. */
+      }
+      /* Sortowanie synchronicznie - stable check w applySortToMetersList
+         zapewnia ze nic sie nie dzieje jesli kolejnosc DOM juz zgadza sie
+         z zamowiona (karta z nowa ramka NIE skacze bo pozostaje na swoim miejscu). */
+      try{applySortToMetersList();}catch(e){}
     }
   });
-})();</script></body></html>
+})();
+/* Instalacja observera - dla rzadkich zewnetrznych zmian DOM. */
+function _installMLObserver(){
+  var ml=document.getElementById("meters-list");
+  if(!ml){setTimeout(_installMLObserver,300);return;}
+  if(!window.MutationObserver)return;
+  _sortObserver=new MutationObserver(function(mutations){
+    var changed=false;
+    for(var i=0;i<mutations.length;i++){
+      if(mutations[i].addedNodes.length>0||mutations[i].removedNodes.length>0){changed=true;break;}
+    }
+    if(!changed)return;
+    clearTimeout(_sortDT);
+    _sortDT=setTimeout(function(){try{applySortToMetersList();}catch(e){}},20);
+  });
+  _sortObserver.observe(ml,{childList:true});
+}
+_installMLObserver();
+setTimeout(function(){try{
+  var s=localStorage.getItem("_mListSort");
+  var sel=document.getElementById("sort-meters");
+  if(sel&&s){if(s.indexOf("kind:")===0)s="last:desc";sel.value=s;applySortToMetersList();}
+}catch(e){}},700);
+function sortDetTable(){}
+</script></body></html>
 
 

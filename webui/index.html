@@ -488,6 +488,9 @@ async function saveWifi(){const s=document.getElementById('ssid').value.trim(),p
    uruchamia sie TYLKO gdy user klika dropdown lub gdy dodano/usunieto karte. */
 var _sortObserver=null,_sortDT=null;
 function _getIdSequence(ml){
+  /* FAZA 7M: tylko karty Z identyfikatorem - spojny format z sortedIds
+     w applySortToMetersList (wczesniej karty bez id dawaly "__iN" tu, a ""
+     tam, wiec stable check nigdy nie przechodzil). */
   var ids=[];
   var ch=ml.children;
   for(var i=0;i<ch.length;i++){
@@ -495,7 +498,7 @@ function _getIdSequence(ml){
     var pin=c.querySelector&&c.querySelector(".pin-btn[data-pin]");
     if(pin)idA=pin.getAttribute("data-pin");
     if(!idA){var ne=c.querySelector&&c.querySelector(".name-edit[data-edit]");if(ne)idA=ne.getAttribute("data-edit");}
-    ids.push((idA||("__i"+i)).toLowerCase());
+    if(idA)ids.push(idA.toLowerCase());
   }
   return ids.join("|");
 }
@@ -526,7 +529,7 @@ function applySortToMetersList(){
   });
   /* STABLE CHECK: jesli obecna kolejnosc DOM juz zgadza sie z zamowiona -
      nie appendChild wcale (0 mutations, 0 triggerowania observer, 0 flickeru). */
-  var sortedIds=cards.map(function(c){return c._sId||"";}).join("|");
+  var sortedIds=cards.filter(function(c){return c._sId;}).map(function(c){return c._sId;}).join("|");
   var currentIds=_getIdSequence(ml);
   if(sortedIds===currentIds)return;
   if(_sortObserver)_sortObserver.disconnect();
@@ -616,10 +619,12 @@ function deepUpdateCard(oc,nc){
           if(_m)_sortObserver.observe(_m,{childList:true});
         }
       }
-      /* Sortowanie synchronicznie - stable check w applySortToMetersList
-         zapewnia ze nic sie nie dzieje jesli kolejnosc DOM juz zgadza sie
-         z zamowiona (karta z nowa ramka NIE skacze bo pozostaje na swoim miejscu). */
-      try{applySortToMetersList();}catch(e){}
+      /* FAZA 7M: NIE sortujemy tutaj. Powod: przy last:desc kazda nowa ramka
+         podnosi _tsUnix licznika, wiec sortowanie chcialo przenosic go na gore
+         co 5 s -> widoczne "miganie"/tasowanie listy. Sortowanie odpala sie
+         teraz WYLACZNIE: (a) gdy user zmieni dropdown, (b) gdy dodano/usunieto
+         karte (MutationObserver). Kolejnosc raz ustalona pozostaje stabilna,
+         a wartosci w kartach i tak aktualizuja sie in-place przez deepUpdateCard. */
     }
   });
 })();
@@ -635,7 +640,7 @@ function _installMLObserver(){
     }
     if(!changed)return;
     clearTimeout(_sortDT);
-    _sortDT=setTimeout(function(){try{applySortToMetersList();}catch(e){}},20);
+    _sortDT=setTimeout(function(){try{applySortToMetersList();}catch(e){}},120);
   });
   _sortObserver.observe(ml,{childList:true});
 }

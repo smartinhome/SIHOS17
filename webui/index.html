@@ -486,47 +486,6 @@ async function saveWifi(){const s=document.getElementById('ssid').value.trim(),p
    4) Dropdown onchange -> resort natychmiast (jednorazowo, nie na kazdym fetchMeters).
    Efekt: karta z nowa ramka NIE skacze na gore przy fetchMeters, sortowanie
    uruchamia sie TYLKO gdy user klika dropdown lub gdy dodano/usunieto karte. */
-/* ===== DIAGNOSTYKA 327DIAG (tymczasowa - do usuniecia po namierzeniu) ===== */
-window.__SIHDIAG=[];window.__SIHDIAG_ON=true;
-function _dlog(){
-  if(!window.__SIHDIAG_ON)return;
-  var d=new Date();
-  var t=String(d.getMinutes()).padStart(2,"0")+":"+String(d.getSeconds()).padStart(2,"0")+"."+String(d.getMilliseconds()).padStart(3,"0");
-  var m=t+" | "+Array.prototype.slice.call(arguments).join(" ");
-  window.__SIHDIAG.push(m);
-  if(window.__SIHDIAG.length>400)window.__SIHDIAG.shift();
-  console.log("%c[SIH]","color:#3d8bff;font-weight:bold",m);
-}
-window.sihDiagDump=function(){
-  var t=window.__SIHDIAG.join(String.fromCharCode(10));
-  console.log("%c===== KOPIUJ PONIZEJ =====","color:#22c55e;font-weight:bold");
-  console.log(t);
-  try{navigator.clipboard.writeText(t);console.log("%c(skopiowane do schowka)","color:#22c55e");}catch(e){}
-  return t;
-};
-window.sihDiagStop=function(){window.__SIHDIAG_ON=false;console.log("[SIH] diagnostyka zatrzymana");};
-/* Globalny observer - lapie KAZDA zmiane w liscie, takze te ktorych nie robi nasz kod. */
-(function installDiagObserver(){
-  var ml=document.getElementById("meters-list");
-  if(!ml){setTimeout(installDiagObserver,300);return;}
-  if(!window.MutationObserver)return;
-  var pending={childList:0,attributes:0,characterData:0,added:0,removed:0};
-  var flushT=null;
-  new MutationObserver(function(muts){
-    muts.forEach(function(m){
-      pending[m.type]=(pending[m.type]||0)+1;
-      pending.added+=m.addedNodes.length;
-      pending.removed+=m.removedNodes.length;
-    });
-    clearTimeout(flushT);
-    flushT=setTimeout(function(){
-      _dlog("DOM-ZMIANA: childList="+pending.childList+" attr="+pending.attributes+" text="+pending.characterData+" dodano="+pending.added+" usunieto="+pending.removed+" | dzieci listy="+ml.children.length);
-      pending={childList:0,attributes:0,characterData:0,added:0,removed:0};
-    },150);
-  }).observe(ml,{childList:true,subtree:true,attributes:true,characterData:true});
-  _dlog("DIAG START - obserwuje #meters-list, dzieci="+ml.children.length);
-})();
-/* ===== KONIEC DIAGNOSTYKI ===== */
 var _sortObserver=null,_sortDT=null;
 function _getIdSequence(ml){
   /* FAZA 7M: tylko karty Z identyfikatorem - spojny format z sortedIds
@@ -572,40 +531,53 @@ function applySortToMetersList(){
      nie appendChild wcale (0 mutations, 0 triggerowania observer, 0 flickeru). */
   var sortedIds=cards.filter(function(c){return c._sId;}).map(function(c){return c._sId;}).join("|");
   var currentIds=_getIdSequence(ml);
-  if(sortedIds===currentIds){_dlog("SORT: stable - BEZ reorderu ("+key+")");return;}
-  _dlog("SORT: REORDER! ("+key+")");
-  _dlog("   teraz : "+currentIds);
-  _dlog("   docel.: "+sortedIds);
+  if(sortedIds===currentIds)return;
   if(_sortObserver)_sortObserver.disconnect();
   try{cards.forEach(function(c){ml.appendChild(c);});}
   finally{if(_sortObserver){var _m=document.getElementById("meters-list");if(_m)_sortObserver.observe(_m,{childList:true});}}
 }
-/* deep-update: tile-k -> tile-v mapping (bez zaleznosci od kolejnosci DOM tile). */
+/* FAZA 7N: rekurencyjny sync DOM - aktualizuje WSZYSTKO co sie rozni
+   (teksty, atrybuty, RSSI w naglowku, timestamp) zachowujac istniejace wezly.
+   Zwraca false gdy struktura sie rozni (inna liczba dzieci / inny tag) -
+   wtedy wolajacy robi pelny replaceChild. Dzieki temu przy zwyklej zmianie
+   wartosci ZERO wezlow jest dodawanych/usuwanych -> observer nie widzi
+   add/remove -> nie ma resortu -> lista stoi w miejscu. */
+function _syncNode(o,n){
+  if(o.nodeType!==n.nodeType)return false;
+  /* Wezel tekstowy - update tresci */
+  if(o.nodeType===3){if(o.nodeValue!==n.nodeValue)o.nodeValue=n.nodeValue;return true;}
+  if(o.nodeType!==1)return true;
+  if(o.tagName!==n.tagName)return false;
+  /* Atrybuty: dodaj/zmien te z nowego, usun te ktorych juz nie ma */
+  var na=n.attributes,oa=o.attributes,i;
+  for(i=0;i<na.length;i++){
+    var an=na[i].name,av=na[i].value;
+    if(o.getAttribute(an)!==av)o.setAttribute(an,av);
+  }
+  for(i=oa.length-1;i>=0;i--){
+    var on=oa[i].name;
+    if(!n.hasAttribute(on))o.removeAttribute(on);
+  }
+  /* Dzieci: ta sama liczba wezlow = sync rekurencyjny, inaczej false */
+  var oc2=o.childNodes,nc2=n.childNodes;
+  if(oc2.length!==nc2.length)return false;
+  for(i=0;i<oc2.length;i++){if(!_syncNode(oc2[i],nc2[i]))return false;}
+  return true;
+}
 function deepUpdateCard(oc,nc){
-  try{
-    var oTiles=oc.querySelectorAll(".tile");
-    var nTiles=nc.querySelectorAll(".tile");
-    if(oTiles.length!==nTiles.length)return false;
-    var oMap={},nMap={};
-    for(var i=0;i<oTiles.length;i++){var ok=oTiles[i].querySelector(".tile-k");if(ok)oMap[ok.textContent]=oTiles[i];}
-    for(var i=0;i<nTiles.length;i++){var nk=nTiles[i].querySelector(".tile-k");if(nk)nMap[nk.textContent]=nTiles[i];}
-    var oKeys=Object.keys(oMap).sort(),nKeys=Object.keys(nMap).sort();
-    if(oKeys.length!==nKeys.length)return false;
-    for(var i=0;i<oKeys.length;i++)if(oKeys[i]!==nKeys[i])return false;
-    for(var k in oMap){
-      var ov=oMap[k].querySelector(".tile-v"),nv=nMap[k].querySelector(".tile-v");
-      if(ov&&nv&&ov.innerHTML!==nv.innerHTML)ov.innerHTML=nv.innerHTML;
-    }
-    return true;
-  }catch(e){return false;}
+  try{return _syncNode(oc,nc);}catch(e){return false;}
 }
 /* Diff-render setter innerHTML dla #meters-list. */
 (function installDiffRender(){
   var ml=document.getElementById("meters-list");
   if(!ml){setTimeout(installDiffRender,300);return;}
-  var proto=HTMLElement.prototype;
-  var descIH=Object.getOwnPropertyDescriptor(proto,"innerHTML");
-  if(!descIH||!descIH.set)return;
+  /* FAZA 7N FIX KRYTYCZNY: innerHTML zyje na Element.prototype, NIE na
+     HTMLElement.prototype. Wczesniej getOwnPropertyDescriptor zwracal undefined
+     -> return -> setter NIGDY nie byl instalowany (bug obecny w 327j/k/L/M). */
+  var descIH=Object.getOwnPropertyDescriptor(Element.prototype,"innerHTML")
+           ||Object.getOwnPropertyDescriptor(HTMLElement.prototype,"innerHTML")
+           ||Object.getOwnPropertyDescriptor(Node.prototype,"innerHTML");
+  if(!descIH||!descIH.set){console.warn("[SIH] brak settera innerHTML - diff-render nieaktywny");return;}
   var origSet=descIH.set,origGet=descIH.get;
   function extractId(c){
     if(!c||!c.querySelector)return null;
@@ -615,13 +587,13 @@ function deepUpdateCard(oc,nc){
     if(ne&&ne.getAttribute("data-edit"))return ne.getAttribute("data-edit").toLowerCase();
     return null;
   }
+  console.log("%c[SIH] diff-render aktywny","color:#22c55e;font-weight:bold");
   Object.defineProperty(ml,"innerHTML",{
     configurable:true,
     get:function(){return origGet.call(this);},
     set:function(html){
       var self=this;
-      if(self._lastHTML===html){_dlog("SETTER: SKIP (html identyczny, "+html.length+" B)");return;}
-      _dlog("SETTER: START html="+html.length+"B dzieci_przed="+self.children.length);
+      if(self._lastHTML===html)return;
       self._lastHTML=html;
       if(!html||html.indexOf('class="empty"')>=0||html.length<80){origSet.call(self,html);return;}
       var tmp=document.createElement("div");
@@ -641,25 +613,23 @@ function deepUpdateCard(oc,nc){
           var oc=id?oldMap[id]:null;
           if(oc){
             if(oc.outerHTML===nc.outerHTML){
-              _dlog("  ["+id+"] identyczna - bez zmian");
+              /* Nic - karta identyczna, zostaje w tej samej pozycji (BEZ appendChild). */
             }else if(deepUpdateCard(oc,nc)){
-              _dlog("  ["+id+"] deep-update (tylko wartosci)");
+              /* Wartosci zaktualizowane in-place, karta zostaje w miejscu. */
             }else{
-              _dlog("  ["+id+"] REPLACE-CHILD (struktura inna!) tiles_old="+oc.querySelectorAll(".tile").length+" tiles_new="+nc.querySelectorAll(".tile").length);
+              /* Strukturalna zmiana - full swap (rzadkie). */
               oc.parentNode.replaceChild(nc,oc);
               oldMap[id]=nc;
             }
           }else{
-            _dlog("  ["+(id||"BEZ-ID")+"] NOWA KARTA - append");
             self.appendChild(nc);
             if(id)oldMap[id]=nc;
           }
         });
         oldChildren.forEach(function(c){
           var id=extractId(c);
-          if(id&&!seenNew[id]&&c.parentNode===self){_dlog("  ["+id+"] USUNIETA");c.remove();}
+          if(id&&!seenNew[id]&&c.parentNode===self)c.remove();
         });
-        _dlog("SETTER: KONIEC dzieci_po="+self.children.length);
       }finally{
         if(_sortObserver){
           var _m=document.getElementById("meters-list");
@@ -686,7 +656,6 @@ function _installMLObserver(){
       if(mutations[i].addedNodes.length>0||mutations[i].removedNodes.length>0){changed=true;break;}
     }
     if(!changed)return;
-    _dlog("OBSERVER-SORT: wykryto add/remove -> planuje resort");
     clearTimeout(_sortDT);
     _sortDT=setTimeout(function(){try{applySortToMetersList();}catch(e){}},120);
   });

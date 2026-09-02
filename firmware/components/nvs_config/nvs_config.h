@@ -83,3 +83,22 @@ void         nvs_config_reset(void);
 bool nvs_config_is_pinned(const char *id_hex);
 // Lekki getter trybu diody RX (bez kopiowania calej konfiguracji).
 bool nvs_config_led_only_pinned(void);
+
+// --- Pola przypiete do dashboardu (klucz "id:pole", np. "56989134:moc_kw") ---
+// Trzymane w OSOBNYM blobie NVS ("dashflds"), a NIE w sih_config_t. Powod:
+// uklad glownej struktury zostaje nietkniety, wiec aktualizacja OTA nie ma
+// szansy przesunac zadnego istniejacego pola i zgubic ustawien.
+// Pusta lista dla danego licznika = zachowanie sprzed beta334, czyli na
+// dashboardzie pokazuja sie pola sledzone w historii (patrz meterCard w
+// webui/index.html). Pierwsze recznie zaznaczone pole przejmuje kontrole.
+#define MAX_DASH_FIELDS 32
+#define DASH_FIELD_LEN  40
+
+// Czy dane pole jest przypiete do dashboardu (case-insensitive).
+bool nvs_config_dash_field_is_set(const char *key);
+// Dodaje/usuwa pole. Zwraca false gdy brak wolnego miejsca przy dodawaniu.
+bool nvs_config_dash_fields_set(const char *key, bool on);
+// Lista przypietych pol jako tablica JSON. Zwraca dlugosc zapisana do buf.
+int  nvs_config_dash_fields_json(char *buf, int cap);
+// Kasuje cala liste (reset fabryczny).
+void nvs_config_dash_fields_clear(void);

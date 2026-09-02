@@ -8,6 +8,12 @@
 static const char *TAG = "NVS_CFG";
 static sih_config_t g_cfg = {0};
 
+// Lista pol przypietych do dashboardu - osobny blob NVS "dashflds"
+// (implementacja na koncu pliku). Tablica stoi tutaj, bo czysci ja takze
+// nvs_config_reset(), zdefiniowany wyzej niz reszta obslugi.
+static char g_dash_fields[MAX_DASH_FIELDS][DASH_FIELD_LEN];
+static void dash_fields_load(void);
+
 // Domyślna konfiguracja
 static void set_defaults(sih_config_t *c) {
     memset(c, 0, sizeof(*c));
@@ -31,6 +37,7 @@ static void set_defaults(sih_config_t *c) {
 }
 
 void nvs_config_init(void) {
+    dash_fields_load();   // osobny blob, niezalezny od powodzenia odczytu "config"
     nvs_handle_t h;
     esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &h);
     if (err != ESP_OK) {
@@ -125,6 +132,8 @@ void nvs_config_reset(void) {
     nvs_commit(h);
     nvs_close(h);
     set_defaults(&g_cfg);
+    // nvs_erase_all wyczyscil takze blob "dashflds" - zeruj kopie w RAM.
+    memset(g_dash_fields, 0, sizeof(g_dash_fields));
     ESP_LOGW(TAG, "Konfiguracja zresetowana do domyślnej");
 }
 
@@ -180,4 +189,91 @@ bool nvs_config_is_pinned(const char *id_hex) {
 
 bool nvs_config_led_only_pinned(void) {
     return g_cfg.led_only_pinned;
+}
+
+// ---------------------------------------------------------------------------
+// Pola przypiete do dashboardu ("id:pole"). Osobny blob NVS "dashflds" w tym
+// samym namespace - nie dotyka blobu "config", wiec zmiana tej listy nigdy nie
+// moze uszkodzic zapisanych licznikow, kluczy AES ani przypiec.
+// ---------------------------------------------------------------------------
+#define DASH_FIELDS_KEY "dashflds"
+
+static void dash_fields_load(void) {
+    memset(g_dash_fields, 0, sizeof(g_dash_fields));
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) return;
+    size_t sz = sizeof(g_dash_fields);
+    esp_err_t err = nvs_get_blob(h, DASH_FIELDS_KEY, g_dash_fields, &sz);
+    if (err == ESP_ERR_NVS_INVALID_LENGTH) {
+        // Lista zmienila rozmiar miedzy wersjami - wczytaj tyle, ile sie zmiesci.
+        memset(g_dash_fields, 0, sizeof(g_dash_fields));
+        size_t stored = 0;
+        if (nvs_get_blob(h, DASH_FIELDS_KEY, NULL, &stored) == ESP_OK &&
+            stored > 0 && stored <= sizeof(g_dash_fields)) {
+            nvs_get_blob(h, DASH_FIELDS_KEY, g_dash_fields, &stored);
+        }
+    }
+    nvs_close(h);
+    // Zabezpieczenie przed blobem bez terminatora (uszkodzony wpis).
+    for (int i = 0; i < MAX_DASH_FIELDS; i++)
+        g_dash_fields[i][DASH_FIELD_LEN - 1] = 0;
+}
+
+static void dash_fields_store(void) {
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) {
+        ESP_LOGW(TAG, "Nie moge otworzyc NVS na zapis pol dashboardu");
+        return;
+    }
+    if (nvs_set_blob(h, DASH_FIELDS_KEY, g_dash_fields, sizeof(g_dash_fields)) == ESP_OK)
+        nvs_commit(h);
+    nvs_close(h);
+}
+
+bool nvs_config_dash_field_is_set(const char *key) {
+    if (!key || !key[0]) return false;
+    for (int i = 0; i < MAX_DASH_FIELDS; i++) {
+        if (g_dash_fields[i][0] && strcasecmp(g_dash_fields[i], key) == 0) return true;
+    }
+    return false;
+}
+
+bool nvs_config_dash_fields_set(const char *key, bool on) {
+    if (!key || !key[0]) return false;
+    int idx = -1, free_idx = -1;
+    for (int i = 0; i < MAX_DASH_FIELDS; i++) {
+        if (!g_dash_fields[i][0]) { if (free_idx < 0) free_idx = i; }
+        else if (strcasecmp(g_dash_fields[i], key) == 0) { idx = i; }
+    }
+    if (on) {
+        if (idx >= 0) return true;              // juz jest, nic do roboty
+        if (free_idx < 0) return false;         // brak miejsca
+        strlcpy(g_dash_fields[free_idx], key, DASH_FIELD_LEN);
+    } else {
+        if (idx < 0) return true;               // i tak go nie ma
+        memset(g_dash_fields[idx], 0, DASH_FIELD_LEN);
+    }
+    dash_fields_store();
+    return true;
+}
+
+int nvs_config_dash_fields_json(char *buf, int cap) {
+    if (!buf || cap < 3) return 0;
+    int n = 0;
+    n += snprintf(buf + n, cap - n, "[");
+    bool first = true;
+    for (int i = 0; i < MAX_DASH_FIELDS && n < cap - 2; i++) {
+        if (!g_dash_fields[i][0]) continue;
+        int w = snprintf(buf + n, cap - n, "%s\"%s\"", first ? "" : ",", g_dash_fields[i]);
+        if (w < 0 || w >= cap - n) break;       // nie miesci sie - urwij czysto
+        n += w;
+        first = false;
+    }
+    n += snprintf(buf + n, cap - n, "]");
+    return n;
+}
+
+void nvs_config_dash_fields_clear(void) {
+    memset(g_dash_fields, 0, sizeof(g_dash_fields));
+    dash_fields_store();
 }

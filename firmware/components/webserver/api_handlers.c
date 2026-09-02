@@ -587,18 +587,64 @@ static esp_err_t handle_dashboard(httpd_req_t *req) {
         resp_ok(req);
         return ESP_OK;
     }
-    char buf[256];
-    int pos = snprintf(buf, sizeof(buf), "{\"pinned\":[");
+    // Statyczny bufor: 32 przypiecia + 32 pola nie zmieszcza sie w 256 B, a
+    // handlery httpd i tak trzymaja juz na stosie kopie konfiguracji (3 kB).
+    // snprintf zwraca dlugosc, ktora BY sie zapisala - bez clampowania pos
+    // moglby przekroczyc rozmiar bufora i sizeof(buf)-pos podwinelo by sie
+    // do ogromnego size_t (zapis poza buforem przy wielu przypieciach).
+    static char buf[1600];
+    int cap = (int)sizeof(buf);
+    int pos = snprintf(buf, cap, "{\"pinned\":[");
     bool first = true;
-    for (int i = 0; i < MAX_PINS; i++) {
+    for (int i = 0; i < MAX_PINS && pos < cap - 2; i++) {
         if (valid_meter_id(cfg.pins[i])) {
-            pos += snprintf(buf + pos, sizeof(buf) - pos, "%s\"%s\"",
-                            first ? "" : ",", cfg.pins[i]);
+            int w = snprintf(buf + pos, cap - pos, "%s\"%s\"",
+                             first ? "" : ",", cfg.pins[i]);
+            if (w < 0 || w >= cap - pos) break;
+            pos += w;
             first = false;
         }
     }
-    snprintf(buf + pos, sizeof(buf) - pos, "]}");
+    if (pos < cap - 2) pos += snprintf(buf + pos, cap - pos, "],\"fields\":");
+    if (pos < cap - 2) pos += nvs_config_dash_fields_json(buf + pos, cap - pos);
+    if (pos < cap - 1) snprintf(buf + pos, cap - pos, "}");
+    buf[cap - 1] = 0;
     resp_json(req, buf);
+    return ESP_OK;
+}
+
+// POST /api/dashboard/field  body: {"field":"56989134:moc_kw","pinned":true}
+// Wybor, KTORE pola licznika pokazuja sie jako kafelki na dashboardzie.
+// Wczesniej dashboard pokazywal dokladnie te pola, ktore byly sledzone w
+// historii - nie dalo sie miec kafelka bez zapisu na flash ani zapisu bez
+// kafelka. Lista pol siedzi w osobnym blobie NVS (patrz nvs_config.c), wiec
+// ten endpoint nie dotyka blobu "config".
+static esp_err_t handle_dashboard_field(httpd_req_t *req) {
+    char body[128];
+    read_body(req, body, sizeof(body));
+    char key[DASH_FIELD_LEN] = {0};
+    char *p = strstr(body, "\"field\":\"");
+    if (p) {
+        p += 9;
+        int n = 0;
+        while (*p && *p != '"' && n < DASH_FIELD_LEN - 1) key[n++] = *p++;
+        key[n] = 0;
+    }
+    // Klucz musi miec postac ID:pole - samo ID obsluguje /api/dashboard.
+    char *colon = strchr(key, ':');
+    if (!colon || colon == key || !colon[1]) { resp_err(req, "zle pole"); return ESP_OK; }
+    *colon = 0;
+    bool id_ok = valid_meter_id(key);
+    *colon = ':';
+    if (!id_ok) { resp_err(req, "zle id"); return ESP_OK; }
+
+    bool want = (strstr(body, "\"pinned\":true") != NULL);
+    ESP_LOGI(TAG, "DASH FIELD: '%s' want=%d", key, want);
+    if (!nvs_config_dash_fields_set(key, want)) {
+        resp_err(req, "lista pol dashboardu jest pelna");
+        return ESP_OK;
+    }
+    resp_ok(req);
     return ESP_OK;
 }
 
@@ -1350,6 +1396,7 @@ void api_register_handlers(httpd_handle_t server) {
         { .uri="/api/led-status",  .method=HTTP_POST, .handler=handle_led_status,  .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/dashboard",   .method=HTTP_GET,  .handler=handle_dashboard,   .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/dashboard",   .method=HTTP_POST, .handler=handle_dashboard,   .user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/dashboard/field", .method=HTTP_POST, .handler=handle_dashboard_field, .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/meter/names", .method=HTTP_GET,  .handler=handle_meter_name,  .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/meter/name",  .method=HTTP_POST, .handler=handle_meter_name,  .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/system",      .method=HTTP_GET,  .handler=handle_system,      .user_ctx=NULL, .is_websocket=false },

@@ -172,6 +172,9 @@ static void free_curve(meter_hist_t *m) {
 // ktore sa zdefiniowane pozniej w tym pliku).
 static uint32_t floor_day(uint32_t t);
 static void series_update(hist_bucket_t *arr, int *n, int cap, uint32_t bts, float total);
+// FAZA 9b: dopisanie ZAMKNIETEGO kubelka 5-min do archiwum hc_*.bin na flashu
+// (definicja przy pozostalych funkcjach archiwum - potrzebuje safe_key()).
+static void curve_archive_append(const char *id, uint32_t bucket_ts, float value);
 
 // FAZA 5a: dodaje probke do krzywej dnia z running average.
 // - Detekcja przejscia bucketu 5-min: zamyka poprzedni sredniej (sum/count),
@@ -191,9 +194,12 @@ static void curve_add_sample_avg(meter_hist_t *m, float value, uint32_t ts_unix)
         if (old_day != new_day) {
             // Zamknij ostatni bucket poprzedniej doby (jesli byla otwarta srednia).
             if (m->curve_count > 0) {
+                float avg = m->curve_sum / (float)m->curve_count;
                 series_update(m->curve, &m->n_curve, HIST_CURVE,
-                              m->curve_bucket_ts,
-                              m->curve_sum / (float)m->curve_count);
+                              m->curve_bucket_ts, avg);
+                // FAZA 9b: ostatni kubelek doby trafia na flash zanim curve[]
+                // zostanie wyczyszczona pod nowa dobe.
+                curve_archive_append(m->id, m->curve_bucket_ts, avg);
             }
             // Alokuj curve_yesterday jesli jeszcze nie ma (pierwszy dzien po flashu = NULL).
             if (!m->curve_yesterday) {
@@ -221,9 +227,13 @@ static void curve_add_sample_avg(meter_hist_t *m, float value, uint32_t ts_unix)
     // 2. Detekcja przejscia bucketu 5-min - zamknij poprzedni (final srednia).
     if (m->curve_bucket_ts != bucket_ts) {
         if (m->curve_count > 0 && m->curve_bucket_ts != 0) {
+            float avg = m->curve_sum / (float)m->curve_count;
             series_update(m->curve, &m->n_curve, HIST_CURVE,
-                          m->curve_bucket_ts,
-                          m->curve_sum / (float)m->curve_count);
+                          m->curve_bucket_ts, avg);
+            // FAZA 9b: kubelek jest domkniety - zapisz go do archiwum 5-min.
+            // Jeden zapis na 5 min na pole (60x rzadziej niz archiwum godzinowe,
+            // ktore pisze co ramke) - zuzycie flasha praktycznie bez zmian.
+            curve_archive_append(m->id, m->curve_bucket_ts, avg);
         }
         m->curve_bucket_ts = bucket_ts;
         m->curve_sum = 0.0f;
@@ -572,6 +582,226 @@ static void archive_append_hour(const char *id, uint32_t hour_ts, float total,
     flush_to_flash(f);
     fclose(f);
 }
+
+// ================= FAZA 9b: archiwum krzywej 5-min (hc_*.bin) =================
+// Rownolegle do archiwum godzinowego ha_*.bin trzymamy ring 5-minutowy dla pol
+// CHWILOWYCH (moc kW, napiecie). Dzieki temu wykres doby ma rozdzielczosc 5 min
+// dla KAZDEGO dnia z okna retencji, a nie tylko dla dzis/wczoraj (dwa bufory
+// w RAM). Format jest celowo prostszy niz ha_ (jedna wersja, brak last_ts):
+//   naglowek: [u32 magic "SIHC"][int count][int head]
+//   dane:     HIST_CURVE_ARC rekordow hist_bucket_t (ring, ts rosnie logicznie)
+// Rekord logiczny i (0 = najstarszy) lezy fizycznie na (head+i)%HIST_CURVE_ARC.
+// Zapis nastepuje tylko przy ZAMKNIECIU kubelka (raz na 5 min na pole).
+#define CARC_MAGIC   0x53494843u                                   // "SIHC"
+#define CARC_HDR     (int)(sizeof(uint32_t) + sizeof(int) * 2)     // 12 B
+// Nie zakladaj NOWEGO archiwum krzywej, gdy na partycji zostalo mniej niz tyle.
+// Kazdy plik urosnie docelowo do HIST_CURVE_ARC * 8 B (~207 KB przy 90 dniach),
+// wiec ten prog powstrzymuje zapychanie flasha przy duzej liczbie pol chwilowych.
+#define CARC_MIN_FREE (512 * 1024)
+
+static void curve_archive_path(const char *id, char *out, int cap) {
+    char safe[SAFE_KEY_MAX + 1];
+    safe_key(id, safe);
+    snprintf(out, cap, "/spiffs/hc_%s.bin", safe);
+}
+
+typedef struct { int count, head; } carc_hdr_t;
+
+static long carc_rec_off(int phys) {
+    return (long)CARC_HDR + (long)phys * (long)sizeof(hist_bucket_t);
+}
+
+static bool carc_read_header(FILE *f, carc_hdr_t *h) {
+    uint32_t magic = 0;
+    h->count = 0; h->head = 0;
+    if (fseek(f, 0, SEEK_SET) != 0) return false;
+    if (fread(&magic, sizeof(magic), 1, f) != 1) return false;
+    if (magic != CARC_MAGIC) return false;
+    if (fread(&h->count, sizeof(int), 1, f) != 1) return false;
+    if (fread(&h->head,  sizeof(int), 1, f) != 1) return false;
+    if (h->count < 0 || h->count > HIST_CURVE_ARC)  { h->count = 0; h->head = 0; return false; }
+    if (h->head  < 0 || h->head  >= HIST_CURVE_ARC) { h->count = 0; h->head = 0; return false; }
+    return true;
+}
+
+// Naglowek skladany w RAM i pisany JEDNYM fwrite - jak arc_write_header_v2.
+// Reset zasilania w srodku kilku malych fwrite zostawialby magic + smieciowy
+// count, czyli archiwum "poprawne, ale puste".
+static void carc_write_header(FILE *f, const carc_hdr_t *h) {
+    uint8_t buf[CARC_HDR];
+    uint32_t magic = CARC_MAGIC;
+    size_t off = 0;
+    memcpy(buf + off, &magic,    sizeof(uint32_t)); off += sizeof(uint32_t);
+    memcpy(buf + off, &h->count, sizeof(int));      off += sizeof(int);
+    memcpy(buf + off, &h->head,  sizeof(int));      off += sizeof(int);
+    fseek(f, 0, SEEK_SET);
+    fwrite(buf, off, 1, f);
+}
+
+// Czy na partycji jest jeszcze zapas na zalozenie nowego archiwum krzywej.
+static bool carc_space_for_new_file(const char *id) {
+    size_t total = 0, used = 0;
+    if (esp_spiffs_info("littlefs", &total, &used) != ESP_OK) return true;
+    if (total > used && (total - used) >= CARC_MIN_FREE) return true;
+    ESP_LOGW(TAG, "%s: brak zapasu flasha na archiwum 5-min (wolne %u B, prog %u B)"
+                  " - starsze dni tego pola zostana godzinowe",
+             id ? id : "?", (unsigned)(total > used ? total - used : 0),
+             (unsigned)CARC_MIN_FREE);
+    return false;
+}
+
+static void curve_archive_append(const char *id, uint32_t bucket_ts, float value) {
+    if (!s_fs_ok || !id) return;
+    if (bucket_ts < ARC_TS_MIN || bucket_ts > ARC_TS_MAX) return;   // czas niezsynchronizowany
+    char path[64]; curve_archive_path(id, path, sizeof(path));
+
+    carc_hdr_t h = { 0, 0 };
+    errno = 0;
+    FILE *f = fopen(path, "r+b");
+    if (!f) {
+        if (errno != ENOENT) return;
+        if (!carc_space_for_new_file(id)) return;
+        f = fopen(path, "w+b");
+        if (!f) { ESP_LOGW(TAG, "nie moge utworzyc %s", path); return; }
+        carc_write_header(f, &h);
+    } else if (!carc_read_header(f, &h)) {
+        // Nieczytelny naglowek: zaloz ring od nowa. W odroznieniu od ha_ nie
+        // odkladamy kopii - to dane pochodne, archiwum godzinowe zostaje cale.
+        fclose(f);
+        remove(path);
+        ESP_LOGW(TAG, "%s: archiwum 5-min nieczytelne - zakladam od nowa", id);
+        f = fopen(path, "w+b");
+        if (!f) return;
+        h.count = 0; h.head = 0;
+        carc_write_header(f, &h);
+    }
+
+    if (h.count > 0) {
+        int last_phys = (h.head + h.count - 1) % HIST_CURVE_ARC;
+        hist_bucket_t last;
+        if (fseek(f, carc_rec_off(last_phys), SEEK_SET) == 0 &&
+            fread(&last, sizeof(last), 1, f) == 1) {
+            if (last.ts == bucket_ts) {
+                // Ten sam kubelek (domkniecie po wczesniejszym zapisie) - nadpisz.
+                last.total = value;
+                fseek(f, carc_rec_off(last_phys), SEEK_SET);
+                fwrite(&last, sizeof(last), 1, f);
+                flush_to_flash(f);
+                fclose(f);
+                return;
+            }
+            if (last.ts > bucket_ts) {
+                // Czas cofnal sie (korekta NTP) - nie psuj monotonicznosci ringu,
+                // bo na niej opiera sie wyszukiwanie binarne przy odczycie doby.
+                fclose(f);
+                return;
+            }
+        }
+    }
+
+    int write_phys;
+    if (h.count >= HIST_CURVE_ARC) {
+        write_phys = h.head;                          // nadpisz najstarszy
+        h.head = (h.head + 1) % HIST_CURVE_ARC;
+    } else {
+        write_phys = (h.head + h.count) % HIST_CURVE_ARC;
+        h.count++;
+    }
+    hist_bucket_t rec = { bucket_ts, value };
+    fseek(f, carc_rec_off(write_phys), SEEK_SET);
+    fwrite(&rec, sizeof(rec), 1, f);
+    carc_write_header(f, &h);
+    flush_to_flash(f);
+    fclose(f);
+}
+
+// Punkty 5-min dla doby [d0, d1) z archiwum na flashu. Zwraca liczbe punktow.
+// Wyszukiwanie binarne po indeksie LOGICZNYM - nie wczytuje calego ringu do RAM.
+static int curve_archive_read_day(const char *id, uint32_t d0, uint32_t d1,
+                                  hist_bucket_t *out, int cap) {
+    if (!s_fs_ok || !id || !out || cap <= 0) return 0;
+    char path[64]; curve_archive_path(id, path, sizeof(path));
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    carc_hdr_t h;
+    if (!carc_read_header(f, &h) || h.count <= 0) { fclose(f); return 0; }
+
+    int lo = 0, hi = h.count;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        hist_bucket_t r;
+        int phys = (h.head + mid) % HIST_CURVE_ARC;
+        if (fseek(f, carc_rec_off(phys), SEEK_SET) != 0 ||
+            fread(&r, sizeof(r), 1, f) != 1) { hi = mid; break; }
+        if (r.ts < d0) lo = mid + 1; else hi = mid;
+    }
+    int n = 0;
+    for (int i = lo; i < h.count && n < cap; i++) {
+        hist_bucket_t r;
+        int phys = (h.head + i) % HIST_CURVE_ARC;
+        if (fseek(f, carc_rec_off(phys), SEEK_SET) != 0 ||
+            fread(&r, sizeof(r), 1, f) != 1) break;
+        if (r.ts >= d1) break;
+        if (r.ts >= d0) out[n++] = r;
+    }
+    fclose(f);
+    return n;
+}
+
+// Zasianie archiwum przy PIERWSZYM starcie po aktualizacji: przepisuje krzywe
+// dzis + wczoraj (juz obecne w h_*.bin v2) do nowego hc_*.bin, zeby te dwa dni
+// nie stracily rozdzielczosci 5 min w chwili, gdy przestana byc dzis/wczoraj.
+// Robi to JEDNYM otwarciem pliku - petla po curve_archive_append oznaczalaby
+// do 576 cykli fopen/fsync/fclose i sekundy zwloki przy starcie.
+static void curve_archive_seed(meter_hist_t *m) {
+    if (!s_fs_ok || !m || m->cumulative) return;
+    if (m->n_curve <= 0 && m->n_curve_yesterday <= 0) return;
+    char path[64]; curve_archive_path(m->id, path, sizeof(path));
+    FILE *chk = fopen(path, "rb");
+    if (chk) { fclose(chk); return; }          // archiwum juz istnieje - nie ruszamy
+    if (!carc_space_for_new_file(m->id)) return;
+    FILE *f = fopen(path, "w+b");
+    if (!f) return;
+    carc_hdr_t h = { 0, 0 };
+    carc_write_header(f, &h);
+    uint32_t prev = 0;
+    for (int src = 0; src < 2; src++) {        // najpierw wczoraj, potem dzis
+        hist_bucket_t *a  = src ? m->curve   : m->curve_yesterday;
+        int            na = src ? m->n_curve : m->n_curve_yesterday;
+        if (!a || na <= 0) continue;
+        for (int i = 0; i < na; i++) {
+            if (a[i].ts < ARC_TS_MIN || a[i].ts > ARC_TS_MAX) continue;
+            if (a[i].ts <= prev) continue;     // ring musi rosnac scisle
+            fseek(f, carc_rec_off(h.count), SEEK_SET);
+            fwrite(&a[i], sizeof(hist_bucket_t), 1, f);
+            h.count++;
+            prev = a[i].ts;
+        }
+    }
+    carc_write_header(f, &h);
+    flush_to_flash(f);
+    fclose(f);
+    ESP_LOGI(TAG, "%s: zasiano archiwum 5-min z RAM (%d pkt)", m->id, h.count);
+}
+
+// Diagnostyka przy starcie - zasieg archiwum krzywej (analogicznie do ha_).
+static void curve_archive_log_range(const char *id) {
+    char path[64]; curve_archive_path(id, path, sizeof(path));
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+    carc_hdr_t h;
+    if (carc_read_header(f, &h) && h.count > 0) {
+        hist_bucket_t r0, r1;
+        int p0 = h.head, p1 = (h.head + h.count - 1) % HIST_CURVE_ARC;
+        if (fseek(f, carc_rec_off(p0), SEEK_SET) == 0 && fread(&r0, sizeof(r0), 1, f) == 1 &&
+            fseek(f, carc_rec_off(p1), SEEK_SET) == 0 && fread(&r1, sizeof(r1), 1, f) == 1) {
+            ESP_LOGI(TAG, "Archiwum 5-min %s: %d pkt (max %d), od ts=%u do ts=%u",
+                     id, h.count, HIST_CURVE_ARC, (unsigned)r0.ts, (unsigned)r1.ts);
+        }
+    }
+    fclose(f);
+}
+// ==================== koniec: archiwum krzywej 5-min ====================
 
 // Odbuduj archiwum godzinowe (ha_) z bufora hours[] w RAM (7 dni godzin wczytanych
 // z h_). Wolane przy starcie gdy archiwum jest puste/stare/niezgodne - dzieki temu
@@ -1072,20 +1302,29 @@ void history_erase_all(void) {
     // 2. skasuj pliki historii i liste sledzonych
     int removed = 0;
     if (s_fs_ok) {
-        DIR *dir = opendir("/spiffs");
-        if (dir) {
+        // FAZA 9b: doszedl trzeci plik na pole (hc_ obok h_ i ha_), wiec przy
+        // 24 sledzonych polach lista ofiar nie miesci sie w jednym przebiegu.
+        // Bufor zostaje maly (1.6 KB stosu) - zamiast tego skanujemy katalog
+        // kilka razy, az przestana pojawiac sie pasujace pliki.
+        for (int pass = 0; pass < 6; pass++) {
+            DIR *dir = opendir("/spiffs");
+            if (!dir) break;
             struct dirent *de;
             char victims[40][40];
             int nv = 0;
             while ((de = readdir(dir)) != NULL && nv < 40) {
                 const char *nm = de->d_name;
+                // "hc_" (archiwum krzywej 5-min) NIE lapie sie na "h_" -
+                // drugi znak rozni sie od '_'; trzeba je wymienic osobno.
                 if (strncmp(nm, "h_", 2) == 0 || strncmp(nm, "ha_", 3) == 0 ||
+                    strncmp(nm, "hc_", 3) == 0 ||
                     strcmp(nm, "tracked.txt") == 0 || strncmp(nm, "arc_", 4) == 0) {
                     snprintf(victims[nv], sizeof(victims[0]), "%.39s", nm);
                     nv++;
                 }
             }
             closedir(dir);
+            if (nv == 0) break;
             // kasujemy PO zamknieciu katalogu - usuwanie w trakcie readdir
             // potrafi pominac wpisy
             for (int i = 0; i < nv; i++) {
@@ -1364,6 +1603,10 @@ void history_init(void) {
         if (m) {
             loaded++;
             archive_rebuild_from_hours(m);  // uzupelnij archiwum ha_ z godzin w RAM
+            // FAZA 9b: pierwszy start po aktualizacji - przenies krzywe dzis/wczoraj
+            // z RAM do nowego archiwum 5-min (potem juz rosnie samo, co 5 min).
+            curve_archive_seed(m);
+            curve_archive_log_range(m->id);
             // Diagnostyka retencji: zasieg archiwum w logu przy kazdym starcie -
             // jesli poczatek kiedykolwiek "przeskoczy" do przodu, od razu widac.
             {
@@ -1859,6 +2102,14 @@ int history_get_day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf
             }
         }
     }
+    // FAZA 9b: brak krzywej w RAM, ale pole jest chwilowe - sprobuj archiwum
+    // 5-min na flashu, zanim spadniemy do slupkow godzinowych.
+    static hist_bucket_t s_curve_day_buf[HIST_CURVE];
+    if (!use_curve && m && !cumulative) {
+        int na = curve_archive_read_day(id_hex, d0, d1, s_curve_day_buf, HIST_CURVE);
+        if (na > 0) { curve_src = s_curve_day_buf; curve_src_n = na; use_curve = true; }
+    }
+
     if (use_curve && curve_src) {
         int n2 = snprintf(buf, buf_cap,
                           "{\"id\":\"%s\",\"kind\":%d,\"cumulative\":0,\"curve\":1,\"points\":[",
@@ -2346,6 +2597,12 @@ int history_curve_day(const char *key, uint32_t day_ts, hist_bucket_t *out, int 
                 out[n-1].total = m->last_total;
             }
         }
+
+        // FAZA 9b: dni STARSZE niz wczoraj - z archiwum 5-min na flashu
+        // (hc_*.bin). Wczesniej w tym miejscu zwracalismy 0 punktow i API
+        // schodzilo do slupkow godzinowych; dlatego 5-min widac bylo tylko
+        // przez dwie doby trzymane w RAM.
+        if (n == 0) n = curve_archive_read_day(m->id, d0, d1, out, cap);
     }
     if (s_mutex) xSemaphoreGive(s_mutex);
     return n;

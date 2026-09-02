@@ -19,6 +19,18 @@
 #define HIST_CURVE 288
 #define HIST_CURVE_INTERVAL_SEC 300   // dlugosc jednego kubelka (5 min)
 
+// FAZA 9b: ARCHIWUM krzywej 5-min na flashu (pliki hc_*.bin, ring buffer).
+// Wczesniej 5-min mialy tylko DZIS i WCZORAJ (dwa bufory w RAM), a starsze dni
+// spadaly na slupki godzinowe z ha_*.bin. Teraz kazdy zamkniety kubelek 5-min
+// trafia dodatkowo w hc_*.bin, wiec wykres dnia jest 5-minutowy dla calego
+// okna retencji ponizej.
+// Koszt flasha: HIST_CURVE_ARC_DAYS * 288 * 8 B na KAZDE sledzone pole
+// CHWILOWE (moc, napiecie) - przy 90 dniach to ~207 KB na pole.
+// Partycja littlefs ma 4.5 MB, archiwum godzinowe zjada ~140 KB na pole.
+// Zmniejsz te liczbe (np. 30 lub 60), jesli sledzisz duzo pol chwilowych.
+#define HIST_CURVE_ARC_DAYS 90
+#define HIST_CURVE_ARC      (HIST_CURVE_ARC_DAYS * HIST_CURVE)
+
 // Pojedynczy kubelek: czas poczatku okresu + total licznika na koniec okresu
 typedef struct {
     uint32_t ts;      // unix timestamp poczatku okresu (godzina/doba/mc/rok)

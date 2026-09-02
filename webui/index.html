@@ -319,6 +319,52 @@
   border-radius:12px !important; padding:16px !important;
 }
 
+/* 16. UKLAD DWUKOLUMNOWY - jak w makiecie ----------------------------------
+   Siatka siedzi na "#page-system.active", nie na samym "#page-system":
+   regula na golym ID (1,0,0) wygralaby z ".page{display:none}" (0,1,0)
+   i zakladka bylaby widoczna takze wtedy, gdy jest nieaktywna.
+   Kolejnosc ukladamy przez "order" - to zmienia tylko kolejnosc WIZUALNA,
+   kolejnosc w DOM (a wiec i nawigacja klawiatura) zostaje nietknieta.
+   #page-system nie ma wewnetrznego .content - istniejaca regula
+   "#page-system .content" nie pasuje do niczego, padding daje zewnetrzny
+   .content z glownego arkusza. */
+#page-system.active{
+  display:grid;
+  grid-template-columns:repeat(2, minmax(0, 1fr));
+  gap:24px 20px;
+  align-items:stretch;
+  max-width:1180px;
+}
+/* sekcja = kolumna flex, zeby karta dociagnela sie do wysokosci sasiada */
+#page-system .sec{ margin-bottom:0; display:flex; flex-direction:column; min-width:0 }
+#page-system .sec > .card{ margin-bottom:0 }
+#page-system .sec > .card + .card,
+#page-system .sec > .card + .grid-2{ margin-top:14px }
+#page-system .sec > .card:last-child,
+#page-system .sec > .grid-2:last-child{ flex:1 }
+/* min-content w minmax chroni przed przycieciem, gdyby rzad byl nizszy
+   niz naturalna wysokosc tresci */
+#page-system .sec > .grid-2{ grid-auto-rows:minmax(min-content, 1fr) }
+#page-system .sec > .grid-2 > .card{ margin-bottom:0 }
+
+/* Sekcje pelnej szerokosci i kolejnosc rzedow:
+   Stan modulu | Sieć WiFi + MQTT | Diody LED | Zegar + Logi | Kopia | OTA | Operacje */
+#page-system .sec:nth-of-type(1){ grid-column:1 / -1; order:1 }   /* Stan modulu   */
+#page-system .sec:nth-of-type(2){ order:2 }                       /* Sieć WiFi     */
+#page-system .sec:nth-of-type(3){ order:3 }                       /* MQTT          */
+#page-system .sec:nth-of-type(4){ grid-column:1 / -1; order:4 }   /* Diody LED     */
+#page-system .sec:nth-of-type(5){ order:5 }                       /* Data i czas   */
+#page-system .sec:nth-of-type(7){ order:6 }                       /* Logi          */
+#page-system .sec:nth-of-type(8){ grid-column:1 / -1; order:7 }   /* Kopia zapas.  */
+#page-system .sec:nth-of-type(6){ grid-column:1 / -1; order:8 }   /* OTA           */
+#page-system .sec:nth-of-type(9){ grid-column:1 / -1; order:9 }   /* Operacje      */
+
+/* Na waskim ekranie wracamy do jednej kolumny - tak jak reszta panelu */
+@media(max-width:820px){
+  #page-system.active{ grid-template-columns:1fr; gap:20px }
+  #page-system .sec{ grid-column:1 / -1 }
+}
+
 /* 15. Karta reset fabryczny */
 #page-system .danger-card{
   border:none; background:var(--c1);

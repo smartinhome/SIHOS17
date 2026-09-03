@@ -21,6 +21,7 @@
 #include "esp_mac.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
+#include "esp_app_format.h"
 #include "driver/temperature_sensor.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -32,6 +33,30 @@
 #include <dirent.h>
 
 static const char *TAG = "API";
+
+// Rzeczywisty rozmiar obrazu aplikacji w uruchomionej partycji.
+// ESP-IDF nie udostepnia tego wprost, wiec idziemy po naglowku obrazu i po
+// kolejnych segmentach, tak jak robi to bootloader. Zwraca 0, gdy naglowek
+// jest nieczytelny - panel pokazuje wtedy "--" zamiast zmyslonej liczby.
+static uint32_t app_image_size(const esp_partition_t *part)
+{
+    if (!part) return 0;
+    esp_image_header_t hdr;
+    if (esp_partition_read(part, 0, &hdr, sizeof(hdr)) != ESP_OK) return 0;
+    if (hdr.magic != ESP_IMAGE_HEADER_MAGIC) return 0;
+
+    uint32_t off = sizeof(esp_image_header_t);
+    for (uint32_t i = 0; i < hdr.segment_count; i++) {
+        esp_image_segment_header_t seg;
+        if (esp_partition_read(part, off, &seg, sizeof(seg)) != ESP_OK) return 0;
+        off += sizeof(esp_image_segment_header_t) + seg.data_len;
+        if (off > part->size) return 0;          // naglowek niespojny
+    }
+    off += 1;                                    // bajt sumy kontrolnej
+    off = (off + 15) & ~((uint32_t)15);          // wyrownanie do 16 B
+    if (hdr.hash_appended) off += 32;            // SHA-256 doklejone na koncu
+    return off;
+}
 
 static void resp_json(httpd_req_t *req, const char *json) {
     httpd_resp_set_type(req, "application/json");
@@ -310,9 +335,11 @@ static esp_err_t handle_system(httpd_req_t *req) {
     bool hist_ok = history_fs_usage(&hist_used, &hist_total);
     int hist_pct = (hist_ok && hist_total) ? (int)(hist_used * 100 / hist_total) : 0;
 
-    // Aplikacja - rozmiar partycji
+    // Aplikacja - rozmiar partycji ORAZ realne zajecie obrazem
     const esp_partition_t *run = esp_ota_get_running_partition();
     uint32_t app_part_size = run ? run->size : 0;
+    uint32_t app_used = app_image_size(run);
+    int app_pct = app_part_size ? (int)(((uint64_t)app_used * 100) / app_part_size) : 0;
 
     // CPU - czestotliwosc z konfiguracji kompilacji (pewne, bez zaleznosci od wersji API)
     uint32_t cpu_freq_mhz = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ;
@@ -338,7 +365,7 @@ static esp_err_t handle_system(httpd_req_t *req) {
     // App description
     const esp_app_desc_t *app = esp_app_get_description();
 
-    char buf[900];
+    char buf[1200];
     snprintf(buf, sizeof(buf),
         "{"
         "\"chip_model\":\"%s\",\"chip_rev\":%d,\"cpu_cores\":%d,"
@@ -348,6 +375,7 @@ static esp_err_t handle_system(httpd_req_t *req) {
         "\"heap_largest\":%u,\"heap_used_pct\":%d,"
         "\"hist_used\":%u,\"hist_total\":%u,\"hist_pct\":%d,"
         "\"flash_size\":%u,\"app_part_size\":%u,"
+        "\"app_used\":%u,\"app_pct\":%d,"
         "\"temp_c\":%.1f,\"temp_ok\":%s,"
         "\"mac\":\"%s\",\"task_count\":%u,\"uptime_s\":%lld,"
         "\"wifi_rssi\":%d,\"ip\":\"%s\",\"meter_count\":%d,"
@@ -363,6 +391,7 @@ static esp_err_t handle_system(httpd_req_t *req) {
         (unsigned)heap_largest, heap_used_pct,
         (unsigned)hist_used, (unsigned)hist_total, hist_pct,
         (unsigned)flash_size, (unsigned)app_part_size,
+        (unsigned)app_used, app_pct,
         temp_ok ? temp_c : 0.0f, temp_ok ? "true" : "false",
         mac_str, (unsigned)task_count, (long long)uptime_s,
         wifi_manager_get_rssi(), sys_ip, wmbus_decoder_get_seen_count(),

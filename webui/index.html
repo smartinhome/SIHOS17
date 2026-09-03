@@ -469,7 +469,6 @@
 
 .mptitle{display:flex;align-items:baseline;justify-content:space-between;gap:14px;padding:14px 0 10px;flex-wrap:wrap}
 .mptitle h4{font-size:.7rem;letter-spacing:.09em;text-transform:uppercase;color:var(--mut);font-weight:600}
-.mhint{font-size:.74rem;color:var(--mut);max-width:60ch}
 .mfgrid{border:1px solid var(--line);border-radius:11px;overflow:hidden;background:var(--panel)}
 .mfhead,.mfrow{display:grid;grid-template-columns:minmax(140px,1.4fr) minmax(110px,.9fr) 96px 96px;
   gap:12px;align-items:center;padding:0 14px}
@@ -994,8 +993,6 @@ var MT = (function () {
   var st = { q: '', f: 'all', sort: 'last:desc' };
   var open = {};        /* id -> panel rozwiniety */
   var ui = {};          /* id -> stan pola klucza (draft/show/msg) */
-  var order = null;     /* zapamietana kolejnosc ID */
-  var orderSig = '';    /* sygnatura zbioru ID + ustawien, do przeliczenia */
   var last = [];        /* ostatnia lista licznikow z fetchMeters */
   var busy = {};        /* klucze przelacznikow w trakcie zapisu */
 
@@ -1185,9 +1182,7 @@ var MT = (function () {
           : 'Brak rozkodowanych pól — poczekaj na kolejną ramkę.');
       body = '<div class="empty" style="padding:22px 0">' + why + '</div>';
     } else {
-      body = '<div class="mptitle"><h4>Pola licznika — wybierz, co przypiąć</h4>' +
-        '<span class="mhint">Dashboard = kafelek na stronie głównej. Historia = zapis na flashu i wykres, ' +
-        '24 miejsca na cały moduł. Pola opisowe (data odczytu, alarm) nie mają historii.</span></div>' +
+      body = '<div class="mptitle"><h4>Pola licznika — wybierz, co przypiąć</h4></div>' +
         '<div class="mfgrid"><div class="mfhead"><span>Pole</span><span>Wartość</span>' +
         '<span class="mfc">Dashboard</span><span class="mfc">Historia</span></div>' + fieldsHtml(m) + '</div>';
     }
@@ -1247,20 +1242,16 @@ var MT = (function () {
   }
 
   /* ---- render ---- */
+  /* beta343: kolejnosc liczona jest PRZY KAZDYM odswiezeniu, a nie raz na
+     zmiane sortowania. Dzieki temu przy "Ostatnia ramka" licznik, ktory wlasnie
+     nadal, wchodzi na gore sam z siebie. Wczesniej kolejnosc byla zamrazana w
+     cache (order/orderSig), bo stara lista kart przebudowywala sie przez
+     innerHTML i przeskakiwanie widac bylo jako miganie. Tutaj wiersze sa
+     PRZENOSZONE (insertBefore na istniejacych wezlach), wiec przestawienie nic
+     nie przerysowuje - miganie nie wraca. */
   function visible() {
-    var q = st.q, arr = last.filter(function (m) { return passFilter(m, st.f) && passQuery(m, q); });
-    var ids = arr.map(function (m) { return lc(m.id); }).sort().join('|');
-    var sig = ids + '#' + st.sort + '#' + st.f + '#' + q;
-    if (sig !== orderSig || !order) {
-      orderSig = sig;
-      order = sortList(arr.slice()).map(function (m) { return m.id; });
-    }
-    var by = {};
-    arr.forEach(function (m) { by[m.id] = m; });
-    var out = [];
-    order.forEach(function (id) { if (by[id]) { out.push(by[id]); delete by[id]; } });
-    for (var k in by) out.push(by[k]);   /* nowe, jeszcze nieposortowane - na koniec */
-    return out;
+    var q = st.q;
+    return sortList(last.filter(function (m) { return passFilter(m, st.f) && passQuery(m, q); }));
   }
 
   function paint(force) {
@@ -1309,11 +1300,16 @@ var MT = (function () {
       }
     });
     for (var k in have) if (have[k] && have[k].parentNode === box) have[k].remove();
-    /* Kolejnosc DOM zgodna z vis (bez ruszania wezlow, gdy juz sie zgadza). */
-    var want = vis.map(function (m) { return m.id; });
-    for (i = 0; i < want.length; i++) {
-      var el = box.querySelector('.mrow[data-id="' + want[i] + '"]');
-      if (el && box.children[i] !== el) box.insertBefore(el, box.children[i] || null);
+    /* Kolejnosc DOM zgodna z vis (bez ruszania wezlow, gdy juz sie zgadza).
+       W cyklu w tle nie przestawiamy nic, gdy w liscie stoi kursor: przeniesienie
+       wezla zabiera focus, a to skasowaloby wpisywany klucz AES. Kolejnosc
+       wyrownuje sie przy nastepnym odswiezeniu, juz po wyjsciu z pola. */
+    if (force || !box.contains(document.activeElement)) {
+      var want = vis.map(function (m) { return m.id; });
+      for (i = 0; i < want.length; i++) {
+        var el = box.querySelector('.mrow[data-id="' + want[i] + '"]');
+        if (el && box.children[i] !== el) box.insertBefore(el, box.children[i] || null);
+      }
     }
     stats(vis);
   }

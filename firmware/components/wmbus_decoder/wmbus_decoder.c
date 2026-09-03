@@ -408,23 +408,21 @@ int wmbus_decoder_get_seen_count(void) {
 int wmbus_decoder_clear_untracked(void) {
     if (!s_mutex) return 0;
 
-    // Pobierz liste tracked ID PRZED lock s_mutex (history ma wlasny mutex,
-    // wywolanie pod naszym mutexem = ryzyko deadlocka).
-    char tracked_ids[24][12];
-    int n_tracked = history_tracked_meter_ids(tracked_ids, 24);
-    const sih_config_t *cfg = nvs_config_ptr();
-
+    // beta344: zachowujemy WYLACZNIE liczniki przypiete do dashboardu.
+    // Wczesniej wpis chronil takze zapisany klucz AES i sledzenie w historii -
+    // przez to po "Wymaz liste" lista odbudowywala sie w sekunde z zachowanych
+    // ramek i wygladalo to jak brak reakcji na przycisk. Teraz lista zostaje
+    // pusta (poza przypietymi) az do nastepnej ramki. Nic sie nie gubi: klucze
+    // siedza w NVS, historia na flashu, a licznik wraca na liste sam, gdy nada.
+    // nvs_config_is_pinned czyta kopie konfiguracji w RAM i nie bierze zadnego
+    // mutexa, wiec bezpiecznie wolac je pod s_mutex.
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     int cleared = 0;
 
-    // Kompresja s_meters[] od tylu - jesli i-ty nie jest w cfg/tracked,
+    // Kompresja s_meters[] od tylu - jesli i-ty nie jest przypiety,
     // przesun ostatni na jego miejsce i zmniejsz licznik.
     for (int i = s_meter_count - 1; i >= 0; i--) {
-        bool keep = false;
-        for (int j = 0; j < cfg->meter_count && !keep; j++)
-            if (strcasecmp(cfg->meters[j].id_hex, s_meters[i].id_hex) == 0) keep = true;
-        for (int j = 0; j < n_tracked && !keep; j++)
-            if (strcasecmp(tracked_ids[j], s_meters[i].id_hex) == 0) keep = true;
+        bool keep = nvs_config_is_pinned(s_meters[i].id_hex);
         if (!keep) {
             if (i != s_meter_count - 1)
                 s_meters[i] = s_meters[s_meter_count - 1];
@@ -436,11 +434,7 @@ int wmbus_decoder_clear_untracked(void) {
 
     // Analogicznie dla s_seen[] (surowa lista widzianych ID)
     for (int i = s_seen_used - 1; i >= 0; i--) {
-        bool keep = false;
-        for (int j = 0; j < cfg->meter_count && !keep; j++)
-            if (strcasecmp(cfg->meters[j].id_hex, s_seen[i].id) == 0) keep = true;
-        for (int j = 0; j < n_tracked && !keep; j++)
-            if (strcasecmp(tracked_ids[j], s_seen[i].id) == 0) keep = true;
+        bool keep = nvs_config_is_pinned(s_seen[i].id);
         if (!keep) {
             if (i != s_seen_used - 1)
                 s_seen[i] = s_seen[s_seen_used - 1];
@@ -462,13 +456,7 @@ int wmbus_decoder_clear_untracked(void) {
                 int phys = (s_raw_head - s_raw_count + i + 2 * MAX_RAW_FRAMES) % MAX_RAW_FRAMES;
                 char id[12] = "";
                 parse_meter_id(s_raw[phys].data, id, sizeof(id));
-                bool keep = false;
-                if (id[0]) {
-                    for (int j = 0; j < cfg->meter_count && !keep; j++)
-                        if (strcasecmp(cfg->meters[j].id_hex, id) == 0) keep = true;
-                    for (int j = 0; j < n_tracked && !keep; j++)
-                        if (strcasecmp(tracked_ids[j], id) == 0) keep = true;
-                }
+                bool keep = (id[0] && nvs_config_is_pinned(id));
                 if (keep) tmp[kept++] = s_raw[phys];
                 else cleared++;
             }
@@ -492,8 +480,8 @@ int wmbus_decoder_clear_untracked(void) {
 
     xSemaphoreGive(s_mutex);
 
-    ESP_LOGI(TAG, "Wyczyszczono %d ID z listy widzianych (zachowano cfg=%d, tracked=%d)",
-             cleared, cfg->meter_count, n_tracked);
+    ESP_LOGI(TAG, "Wyczyszczono %d wpisow (zachowano tylko liczniki przypiete do dashboardu)",
+             cleared);
     return cleared;
 }
 

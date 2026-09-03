@@ -215,58 +215,7 @@ static void ota_url_task(void *arg) {
 }
 
 // OTA z bufora (upload przez przeglądarkę)
-static void ota_buffer_task(void *arg) {
-    typedef struct { uint8_t *data; size_t len; } buf_arg_t;
-    buf_arg_t *ba = (buf_arg_t *)arg;
 
-    s_status.state = OTA_STATE_WRITING;
-
-    esp_ota_handle_t ota_handle;
-    const esp_partition_t *update_part = esp_ota_get_next_update_partition(NULL);
-    if (!update_part) {
-        strlcpy(s_status.error, "Brak partycji OTA", sizeof(s_status.error));
-        s_status.state = OTA_STATE_FAILED;
-        goto cleanup;
-    }
-
-    ESP_ERROR_CHECK(esp_ota_begin(update_part, OTA_WITH_SEQUENTIAL_WRITES,
-                                  &ota_handle));
-
-    size_t chunk = 4096;
-    size_t written = 0;
-    while (written < ba->len) {
-        size_t to_write = (ba->len - written < chunk) ?
-                          ba->len - written : chunk;
-        esp_err_t err = esp_ota_write(ota_handle, ba->data + written, to_write);
-        if (err != ESP_OK) {
-            snprintf(s_status.error, sizeof(s_status.error),
-                     "esp_ota_write: %s", esp_err_to_name(err));
-            s_status.state = OTA_STATE_FAILED;
-            esp_ota_abort(ota_handle);
-            goto cleanup;
-        }
-        written += to_write;
-        s_status.progress_pct = (written * 100) / ba->len;
-    }
-
-    if (esp_ota_end(ota_handle) == ESP_OK &&
-        esp_ota_set_boot_partition(update_part) == ESP_OK) {
-        s_status.state        = OTA_STATE_SUCCESS;
-        s_status.progress_pct = 100;
-        ESP_LOGI(TAG, "OTA buffer OK — restart za 3s");
-        vTaskDelay(pdMS_TO_TICKS(3000));
-        esp_restart();
-    } else {
-        strlcpy(s_status.error, "OTA end/set_boot failed",
-                sizeof(s_status.error));
-        s_status.state = OTA_STATE_FAILED;
-    }
-
-cleanup:
-    free(ba->data);
-    free(ba);
-    vTaskDelete(NULL);
-}
 
 
 // ── Pobierz URL najnowszego firmware z GitHub API (na module) ──
@@ -491,25 +440,7 @@ void ota_start_from_url(const char *url) {
     xTaskCreate(ota_url_task, "ota_url", 16384, url_copy, 5, NULL);
 }
 
-void ota_start_from_buffer(const uint8_t *data, size_t len) {
-    typedef struct { uint8_t *data; size_t len; } buf_arg_t;
-    buf_arg_t *ba = malloc(sizeof(buf_arg_t));
-    if (!ba) {
-        ESP_LOGE(TAG, "OTA: brak pamieci na argumenty");
-        return;
-    }
-    ba->data = malloc(len);
-    if (!ba->data) {
-        ESP_LOGE(TAG, "OTA: brak pamieci na bufor %d B", (int)len);
-        free(ba);
-        return;
-    }
-    ba->len  = len;
-    memcpy(ba->data, data, len);
-    s_status.state    = OTA_STATE_IDLE;
-    s_status.error[0] = 0;
-    xTaskCreate(ota_buffer_task, "ota_buf", 8192, ba, 5, NULL);
-}
+
 
 ota_status_t ota_get_status(void) { return s_status; }
 

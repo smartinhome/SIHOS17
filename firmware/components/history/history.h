@@ -78,7 +78,6 @@ int history_list_json(char *buf, int buf_cap);
 
 // Ostatni znany stan licznika (do trwalosci - pokaz po restarcie zanim wplynie ramka).
 // Zwraca true gdy znaleziono. out_total, out_kind, out_ts wypelniane.
-bool history_last_known(const char *id_hex, double *out_total, int *out_kind, uint32_t *out_ts);
 
 // Sledzenie: ktore liczniki pokazywac w Historii (reszta np. sasiedzi - ukryte).
 void history_set_tracked(const char *id_hex, bool tracked);

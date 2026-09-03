@@ -101,4 +101,3 @@ bool nvs_config_dash_fields_set(const char *key, bool on);
 // Lista przypietych pol jako tablica JSON. Zwraca dlugosc zapisana do buf.
 int  nvs_config_dash_fields_json(char *buf, int cap);
 // Kasuje cala liste (reset fabryczny).
-void nvs_config_dash_fields_clear(void);

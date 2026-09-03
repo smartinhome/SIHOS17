@@ -273,7 +273,4 @@ int nvs_config_dash_fields_json(char *buf, int cap) {
     return n;
 }
 
-void nvs_config_dash_fields_clear(void) {
-    memset(g_dash_fields, 0, sizeof(g_dash_fields));
-    dash_fields_store();
-}
+

@@ -2297,17 +2297,7 @@ int history_list_json(char *buf, int buf_cap) {
     return n;
 }
 
-bool history_last_known(const char *id_hex, double *out_total, int *out_kind, uint32_t *out_ts) {
-    bool found = false;
-    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
-    meter_hist_t *m = get_or_load(id_hex, false);
-    if (m) {
-        *out_total = m->last_total; *out_kind = m->kind; *out_ts = m->last_ts;
-        found = true;
-    }
-    if (s_mutex) xSemaphoreGive(s_mutex);
-    return found;
-}
+
 
 // ----- API dla wyswietlacza e-ink -----
 

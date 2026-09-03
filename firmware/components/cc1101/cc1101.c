@@ -183,9 +183,7 @@ static uint8_t spi_read_retry(uint8_t addr, uint8_t val) {
 
 static void write_reg(uint8_t addr, uint8_t val) { spi_rw(addr, val); }
 
-static uint8_t read_reg(uint8_t addr) {
-    return spi_read_retry(addr | READ_SINGLE, 0x00);
-}
+
 
 static uint8_t read_status(uint8_t addr) {
     return spi_read_retry(addr | READ_BURST, 0x00);
@@ -596,6 +594,4 @@ void cc1101_stop(void) {
     strobe(S_SIDLE);
 }
 
-int8_t cc1101_get_rssi(void) {
-    return convert_rssi(read_status(ST_RSSI));
-}
+

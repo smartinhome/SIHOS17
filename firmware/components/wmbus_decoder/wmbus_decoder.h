@@ -58,7 +58,6 @@ int           wmbus_decoder_get_count(void);
 // Ile ROZNYCH licznikow uslyszano w eterze (nie tylko 8 aktywnych slotow).
 int           wmbus_decoder_get_seen_count(void);
 meter_data_t *wmbus_decoder_get_meter(int index);
-meter_data_t *wmbus_decoder_find_by_id(const char *id_hex);
 
 // Surowe ramki — indeks 0 = najnowsza
 int                wmbus_decoder_raw_count(void);

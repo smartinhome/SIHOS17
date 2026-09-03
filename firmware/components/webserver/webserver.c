@@ -69,7 +69,4 @@ void webserver_init(void) {
              (unsigned)(index_html_gz_end - index_html_gz_start));
 }
 
-void webserver_stop(void) {
-    if (s_server) httpd_stop(s_server);
-    s_server = NULL;
-}
+

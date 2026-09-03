@@ -26,4 +26,3 @@ typedef void (*wmbus_frame_cb_t)(const wmbus_frame_t *frame);
 void cc1101_init(const cc1101_config_t *cfg);
 void cc1101_start_receive(wmbus_frame_cb_t callback);
 void cc1101_stop(void);
-int8_t cc1101_get_rssi(void);

@@ -502,12 +502,7 @@ meter_data_t *wmbus_decoder_get_meter(int index) {
     return &s_meters[index];
 }
 
-meter_data_t *wmbus_decoder_find_by_id(const char *id_hex) {
-    for (int i = 0; i < s_meter_count; i++)
-        if (strcmp(s_meters[i].id_hex, id_hex) == 0)
-            return &s_meters[i];
-    return NULL;
-}
+
 
 int wmbus_decoder_raw_count(void) { return s_raw_count; }
 

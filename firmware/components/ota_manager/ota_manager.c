@@ -18,6 +18,11 @@
 #include "freertos/task.h"
 #include <string.h>
 
+// Szerokosc pojedynczego zakresu Range przy pobieraniu firmware z sieci.
+// Im wiekszy, tym mniej handshake'ow TLS - patrz komentarz przy
+// max_http_request_size ponizej.
+#define OTA_RANGE_CHUNK (256 * 1024)
+
 static const char *TAG = "OTA";
 static ota_status_t s_status = { .state = OTA_STATE_IDLE };
 
@@ -100,7 +105,14 @@ static void ota_url_task(void *arg) {
         // handshake i wieksze prawdopodobienstwo powodzenia auto-OTA z GitHub
         // (wczesniej user musial recznie wgrywac bin przez /api/ota/upload).
         .partial_http_download = true,
-        .max_http_request_size = 8192,   // rozmiar jednego HTTP GET zakresu
+        // beta338: bylo 8192. esp_https_ota dla KAZDEGO zakresu robi
+        // esp_http_client_close() + open(), czyli pelny handshake TLS i
+        // ponowna walidacje lancucha certyfikatow. Przy 8 KB i obrazie
+        // ~1,19 MB dawalo to 153 handshake'i (~0,9-1,2 s kazdy) = ok. 3 minut.
+        // 256 KB daje 5 zadan zamiast 153. RAM bez zmian - dane i tak plyna
+        // przez bufor esp_http_client (buffer_size wyzej), a ta wartosc
+        // steruje wylacznie szerokoscia naglowka Range.
+        .max_http_request_size = OTA_RANGE_CHUNK,
     };
 
     // Zwolnij bufory krzywych minutowych - TLS do GitHuba potrzebuje duzego,
@@ -155,6 +167,11 @@ static void ota_url_task(void *arg) {
     s_status.state = OTA_STATE_WRITING;
     int image_size = esp_https_ota_get_image_size(handle);
     ESP_LOGI(TAG, "OTA: rozmiar obrazu = %d B (%.1f KB)", image_size, image_size/1024.0);
+    if (image_size > 0) {
+        int ranges = (image_size + OTA_RANGE_CHUNK - 1) / OTA_RANGE_CHUNK;
+        ESP_LOGI(TAG, "OTA: zakres Range = %d KB -> %d zadan HTTPS",
+                 OTA_RANGE_CHUNK / 1024, ranges);
+    }
 
     int last_logged = -1;
     while (1) {

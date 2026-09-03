@@ -6,6 +6,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include <time.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -51,6 +52,26 @@ static TaskHandle_t  s_task  = NULL;
 static volatile bool s_connected = false;
 static volatile bool s_running   = false;
 static uint32_t      s_sent = 0, s_failed = 0;
+// Liczniki za biezaca dobe. Klucz doby = rok*400 + dzien roku, zeby zmiana
+// roku tez byla wykryta (samo tm_yday zawija sie 31 grudnia).
+static uint32_t      s_sent_day = 0, s_failed_day = 0;
+static int           s_day_key = -1;
+
+// Zeruje liczniki dobowe po przekroczeniu lokalnej polnocy. Wolane przy
+// kazdym zliczeniu i przy odczycie, wiec reset nastepuje bez osobnego timera.
+static void mqtt_roll_day(void) {
+    time_t now = time(NULL);
+    if (now < 1700000000) return;        // czas jeszcze niezsynchronizowany
+    struct tm tmv;
+    localtime_r(&now, &tmv);
+    int key = tmv.tm_year * 400 + tmv.tm_yday;
+    if (s_day_key < 0) { s_day_key = key; return; }
+    if (key != s_day_key) {
+        s_day_key    = key;
+        s_sent_day   = 0;
+        s_failed_day = 0;
+    }
+}
 
 // ---------- pomocnicze ----------
 
@@ -183,7 +204,8 @@ static void on_mqtt_event(void *arg, esp_event_base_t base,
             ESP_LOGW(TAG, "Rozlaczono z brokerem");
             break;
         case MQTT_EVENT_ERROR:
-            s_failed++;
+            mqtt_roll_day();
+            s_failed++; s_failed_day++;
             break;
         default: break;
     }
@@ -196,10 +218,12 @@ static void mqtt_task(void *arg) {
     mq_item_t it;
     while (s_running) {
         if (xQueueReceive(s_queue, &it, pdMS_TO_TICKS(500)) != pdTRUE) continue;
-        if (!s_connected || !s_client) { s_failed++; continue; }
+        mqtt_roll_day();
+        if (!s_connected || !s_client) { s_failed++; s_failed_day++; continue; }
         int r = esp_mqtt_client_publish(s_client, it.topic, it.payload,
                                         0, 0, it.retain ? 1 : 0);
-        if (r < 0) s_failed++; else s_sent++;
+        if (r < 0) { s_failed++; s_failed_day++; }
+        else       { s_sent++;   s_sent_day++;   }
     }
     vTaskDelete(NULL);
 }
@@ -302,4 +326,10 @@ void mqtt_pub_day(const char *id_hex, const char *field,
 void mqtt_pub_stats(uint32_t *sent, uint32_t *failed) {
     if (sent)   *sent   = s_sent;
     if (failed) *failed = s_failed;
+}
+
+void mqtt_pub_stats_day(uint32_t *sent, uint32_t *failed) {
+    mqtt_roll_day();
+    if (sent)   *sent   = s_sent_day;
+    if (failed) *failed = s_failed_day;
 }

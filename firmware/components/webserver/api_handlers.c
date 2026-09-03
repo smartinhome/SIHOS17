@@ -1094,17 +1094,21 @@ static esp_err_t handle_mqtt_cfg(httpd_req_t *req) {
     if (req->method == HTTP_GET) {
         uint32_t sent = 0, failed = 0;
         mqtt_pub_stats(&sent, &failed);
-        char buf[400];
+        uint32_t sent_d = 0, failed_d = 0;
+        mqtt_pub_stats_day(&sent_d, &failed_d);
+        char buf[600];
         // Hasla NIE zwracamy - panel pokazuje tylko, czy jest ustawione.
         snprintf(buf, sizeof(buf),
             "{\"enabled\":%s,\"host\":\"%s\",\"port\":%u,\"user\":\"%s\","
             "\"has_pass\":%s,\"prefix\":\"%s\",\"ha\":%s,"
-            "\"connected\":%s,\"sent\":%" PRIu32 ",\"failed\":%" PRIu32 "}",
+            "\"connected\":%s,\"sent\":%" PRIu32 ",\"failed\":%" PRIu32 ","
+            "\"sent_today\":%" PRIu32 ",\"failed_today\":%" PRIu32 "}",
             cfg.mqtt_enabled ? "true" : "false", cfg.mqtt_host,
             (unsigned)cfg.mqtt_port, cfg.mqtt_user,
             cfg.mqtt_pass[0] ? "true" : "false", cfg.mqtt_prefix,
             cfg.mqtt_ha_discovery ? "true" : "false",
-            mqtt_pub_connected() ? "true" : "false", sent, failed);
+            mqtt_pub_connected() ? "true" : "false", sent, failed,
+            sent_d, failed_d);
         resp_json(req, buf);
         return ESP_OK;
     }

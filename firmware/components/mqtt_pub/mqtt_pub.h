@@ -36,5 +36,9 @@ void mqtt_pub_rssi(const char *id_hex, int8_t rssi);
 void mqtt_pub_day(const char *id_hex, const char *field,
                   const char *date_str, double value, const char *unit);
 
-// Liczba wyslanych wiadomosci i bledow - do zakladki System.
+// Liczba wyslanych wiadomosci i bledow OD STARTU MODULU - do zakladki System.
 void mqtt_pub_stats(uint32_t *sent, uint32_t *failed);
+
+// To samo, ale za BIEZACA DOBE. Liczniki zeruja sie samoczynnie po lokalnej
+// polnocy (strefa z konfiguracji), przy pierwszym odwolaniu juz po zmianie daty.
+void mqtt_pub_stats_day(uint32_t *sent, uint32_t *failed);

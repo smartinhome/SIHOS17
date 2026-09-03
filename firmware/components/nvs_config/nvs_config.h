@@ -100,4 +100,8 @@ bool nvs_config_dash_field_is_set(const char *key);
 bool nvs_config_dash_fields_set(const char *key, bool on);
 // Lista przypietych pol jako tablica JSON. Zwraca dlugosc zapisana do buf.
 int  nvs_config_dash_fields_json(char *buf, int cap);
-// Kasuje cala liste (reset fabryczny).
+
+// --- Zegar na wyswietlaczu e-ink ---
+// Osobny klucz NVS (u8), nie rusza blobu "config".
+bool nvs_config_eink_clock(void);
+void nvs_config_set_eink_clock(bool on);

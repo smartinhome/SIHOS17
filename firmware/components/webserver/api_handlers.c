@@ -1,4 +1,5 @@
 #include "api_handlers.h"
+#include "display_eink.h"
 #include <time.h>
 #include <sys/time.h>
 #include "wmbus_decoder.h"
@@ -674,6 +675,28 @@ static esp_err_t handle_dashboard_field(httpd_req_t *req) {
         return ESP_OK;
     }
     resp_ok(req);
+    return ESP_OK;
+}
+
+// GET  /api/eink  -> {"clock":true}
+// POST /api/eink  body {"clock":true|false}
+// Wlacza/wylacza strone z zegarem na wyswietlaczu e-ink.
+static esp_err_t handle_eink(httpd_req_t *req) {
+    if (req->method == HTTP_POST) {
+        char body[64];
+        read_body(req, body, sizeof(body));
+        bool on = (strstr(body, "\"clock\":true") != NULL);
+        nvs_config_set_eink_clock(on);
+        // Nie rysujemy tutaj: e-ink to SPI wspoldzielone z CC1101, a handler
+        // HTTP nie jest miejscem na taka operacje. Budzimy task odswiezania,
+        // ktory zrobi to u siebie w ciagu chwili.
+        display_eink_wake();
+        resp_ok(req);
+        return ESP_OK;
+    }
+    char buf[32];
+    snprintf(buf, sizeof(buf), "{\"clock\":%s}", nvs_config_eink_clock() ? "true" : "false");
+    resp_json(req, buf);
     return ESP_OK;
 }
 
@@ -1430,6 +1453,8 @@ void api_register_handlers(httpd_handle_t server) {
         { .uri="/api/dashboard",   .method=HTTP_GET,  .handler=handle_dashboard,   .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/dashboard",   .method=HTTP_POST, .handler=handle_dashboard,   .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/dashboard/field", .method=HTTP_POST, .handler=handle_dashboard_field, .user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/eink",        .method=HTTP_GET,  .handler=handle_eink,        .user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/eink",        .method=HTTP_POST, .handler=handle_eink,        .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/meter/names", .method=HTTP_GET,  .handler=handle_meter_name,  .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/meter/name",  .method=HTTP_POST, .handler=handle_meter_name,  .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/system",      .method=HTTP_GET,  .handler=handle_system,      .user_ctx=NULL, .is_websocket=false },

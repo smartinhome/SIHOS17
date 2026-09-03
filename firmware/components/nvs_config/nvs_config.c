@@ -13,6 +13,9 @@ static sih_config_t g_cfg = {0};
 // nvs_config_reset(), zdefiniowany wyzej niz reszta obslugi.
 static char g_dash_fields[MAX_DASH_FIELDS][DASH_FIELD_LEN];
 static void dash_fields_load(void);
+// Zegar na e-ink - pojedyncza flaga, wlasny klucz NVS (patrz koniec pliku).
+static bool g_eink_clock = false;
+static void eink_clock_load(void);
 
 // Domyślna konfiguracja
 static void set_defaults(sih_config_t *c) {
@@ -38,6 +41,7 @@ static void set_defaults(sih_config_t *c) {
 
 void nvs_config_init(void) {
     dash_fields_load();   // osobny blob, niezalezny od powodzenia odczytu "config"
+    eink_clock_load();
     nvs_handle_t h;
     esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &h);
     if (err != ESP_OK) {
@@ -132,8 +136,9 @@ void nvs_config_reset(void) {
     nvs_commit(h);
     nvs_close(h);
     set_defaults(&g_cfg);
-    // nvs_erase_all wyczyscil takze blob "dashflds" - zeruj kopie w RAM.
+    // nvs_erase_all wyczyscil takze blob "dashflds" i flage zegara - zeruj kopie w RAM.
     memset(g_dash_fields, 0, sizeof(g_dash_fields));
+    g_eink_clock = false;
     ESP_LOGW(TAG, "Konfiguracja zresetowana do domyślnej");
 }
 
@@ -273,4 +278,34 @@ int nvs_config_dash_fields_json(char *buf, int cap) {
     return n;
 }
 
+// ---------------------------------------------------------------------------
+// Zegar na wyswietlaczu e-ink: jedna flaga, wlasny klucz NVS "einkclk".
+// Tak jak lista pol dashboardu - poza blobem "config", zeby aktualizacja OTA
+// nie miala jak przesunac zadnego istniejacego pola konfiguracji.
+// ---------------------------------------------------------------------------
+#define EINK_CLOCK_KEY "einkclk"
 
+static void eink_clock_load(void) {
+    g_eink_clock = false;
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) return;
+    uint8_t v = 0;
+    if (nvs_get_u8(h, EINK_CLOCK_KEY, &v) == ESP_OK) g_eink_clock = (v != 0);
+    nvs_close(h);
+}
+
+bool nvs_config_eink_clock(void) {
+    return g_eink_clock;
+}
+
+void nvs_config_set_eink_clock(bool on) {
+    g_eink_clock = on;
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) {
+        ESP_LOGW(TAG, "Nie moge zapisac flagi zegara e-ink");
+        return;
+    }
+    if (nvs_set_u8(h, EINK_CLOCK_KEY, on ? 1 : 0) == ESP_OK) nvs_commit(h);
+    nvs_close(h);
+    ESP_LOGI(TAG, "Zegar na e-ink: %s", on ? "wlaczony" : "wylaczony");
+}

@@ -388,6 +388,35 @@ static void fb_draw_text_center(const font_t *f, int cx, int y, const char *txt)
     fb_draw_text(f, cx - w / 2, y, txt);
 }
 
+// Ten sam rysunek, ale kazdy piksel fontu powielony scale x scale razy.
+// Uzywane przez strone zegara: F32 w skali 2 daje cyfre o 40 px tuszu.
+static void fb_draw_text_scaled(const font_t *f, int x, int y, const char *txt, int scale) {
+    if (scale < 1) scale = 1;
+    uint32_t cp; int i = 0; int penx = x;
+    while (txt[i]) {
+        int n = utf8_next(txt + i, &cp); i += n;
+        const glyph_t *g = font_find(f, cp);
+        if (!g) { penx += f->cell_w * scale; continue; }
+        int bpr = (g->w + 7) / 8;
+        for (int ry = 0; ry < g->h; ry++) {
+            for (int rx = 0; rx < g->w; rx++) {
+                uint8_t byte = f->bitmap[g->off + ry * bpr + (rx >> 3)];
+                if (!((byte >> (7 - (rx & 7))) & 1)) continue;
+                int gx = penx + (g->xoff + rx) * scale;
+                int gy = y + (f->ascent - (g->h + g->yoff) + ry) * scale;
+                for (int sy = 0; sy < scale; sy++)
+                    for (int sx = 0; sx < scale; sx++)
+                        fb_set_pixel(gx + sx, gy + sy, 1);
+            }
+        }
+        penx += g->adv * scale;
+    }
+}
+
+static void fb_draw_text_center_scaled(const font_t *f, int cx, int y, const char *txt, int scale) {
+    fb_draw_text_scaled(f, cx - (fb_text_width(f, txt) * scale) / 2, y, txt, scale);
+}
+
 // Kontur prostokata (1px).
 static void fb_rect(int x, int y, int w, int h) {
     for (int i = 0; i < w; i++) { fb_set_pixel(x + i, y, 1); fb_set_pixel(x + i, y + h - 1, 1); }
@@ -757,42 +786,97 @@ static void draw_diag(void) {
     eink_refresh();
 }
 
+// ---------- strona zegara (ostatnia, za wszystkimi licznikami) ----------
+
+// Miesiace w dopelniaczu ("1 wrzesnia 2026"). Wszystkie polskie znaki, ktorych
+// tu uzywamy, sa w F16 (sprawdzone: s z kreska w "wrzesnia", z z kreska w
+// "pazdziernika"). Dzien tygodnia celowo pomijamy - "poniedzialek, 15
+// pazdziernika 2026" to 34 znaki x 8 px = 272 px, czyli wiecej niz 250 px
+// szerokosci panelu. Sama data miesci sie zawsze (max 20 znakow = 160 px).
+static const char *PL_MONTHS[12] = {
+    "stycznia", "lutego", "marca", "kwietnia", "maja", "czerwca",
+    "lipca", "sierpnia", "września", "października", "listopada", "grudnia"
+};
+
+// Czas przed synchronizacja SNTP stoi w 1970. Ponizej tego progu (2020-09-13)
+// pokazujemy komunikat zamiast falszywej daty.
+#define TIME_SYNCED_MIN 1600000000
+
+static void draw_clock_page(int page_no, int total_pages) {
+    fb_clear_white();
+    fb_fill_rect(0, 0, LCD_W, 16, 1);
+    fb_draw_text_inv(&F14, 3, 0, "Czas");
+    char pg[12];
+    snprintf(pg, sizeof(pg), "%d/%d", page_no, total_pages);
+    int pgw = fb_text_width(&F14, pg);
+    fb_draw_text_inv(&F14, LCD_W - pgw - 4, 0, pg);
+
+    time_t now = time(NULL);
+    if (now < TIME_SYNCED_MIN) {
+        fb_draw_text_center_scaled(&F32, LCD_W / 2, 19, "--:--", 2);
+        fb_draw_text_center(&F16, LCD_W / 2, 91, "Czekam na synchronizację");
+        return;
+    }
+
+    struct tm tm;
+    localtime_r(&now, &tm);
+    char hhmm[8];
+    snprintf(hhmm, sizeof(hhmm), "%02d:%02d", tm.tm_hour, tm.tm_min);
+    fb_draw_text_center_scaled(&F32, LCD_W / 2, 19, hhmm, 2);
+
+    char date[48];
+    int mon = (tm.tm_mon >= 0 && tm.tm_mon < 12) ? tm.tm_mon : 0;
+    snprintf(date, sizeof(date), "%d %s %d", tm.tm_mday, PL_MONTHS[mon], tm.tm_year + 1900);
+    fb_draw_text_center(&F16, LCD_W / 2, 91, date);
+}
+
 static void rebuild_pages(void) {
     s_page_count = history_tracked_meter_ids(s_page_ids, MAX_PAGES);
-    if (s_cur_page >= s_page_count) s_cur_page = 0;
+    if (s_cur_page >= s_page_count + (nvs_config_eink_clock() ? 1 : 0)) s_cur_page = 0;
+}
+
+// Zegar jest doklejany jako strona o indeksie s_page_count, czyli zawsze
+// ostatnia. Gdy nie ma zadnego sledzonego pola, zostaje jedyna - i wtedy
+// zastepuje ekran diagnostyczny.
+static bool is_clock_page(int idx) {
+    return nvs_config_eink_clock() && idx == s_page_count;
+}
+static int total_pages_count(void) {
+    return s_page_count + (nvs_config_eink_clock() ? 1 : 0);
+}
+
+// Wspolny rysunek biezacej strony. Wolac pod eink_lock().
+// draw_diag() odswieza panel samodzielnie, reszta przez eink_refresh() nizej.
+static void draw_current_locked(void) {
+    rebuild_pages();
+    int total = total_pages_count();
+    if (total == 0) { draw_diag(); return; }
+    if (s_cur_page < 0 || s_cur_page >= total) s_cur_page = 0;
+    if (is_clock_page(s_cur_page)) draw_clock_page(s_cur_page + 1, total);
+    else                           draw_meter_page(s_page_ids[s_cur_page], s_cur_page + 1, total);
+    eink_refresh();
 }
 
 void display_eink_refresh_pages(void) {
     eink_lock();
-    rebuild_pages();
-    if (s_page_count == 0) {
-        draw_diag();   // zamiast splash - pokaz co jest nie tak
-        eink_unlock();
-        return;
-    }
-    if (s_cur_page < 0 || s_cur_page >= s_page_count) s_cur_page = 0;
-    draw_meter_page(s_page_ids[s_cur_page], s_cur_page + 1, s_page_count);
-    eink_refresh();
+    draw_current_locked();
     eink_unlock();
 }
 
 void display_eink_next_page(void) {
     eink_lock();
     rebuild_pages();
-    if (s_page_count == 0) { draw_diag(); eink_unlock(); return; }
-    s_cur_page = (s_cur_page + 1) % s_page_count;
-    draw_meter_page(s_page_ids[s_cur_page], s_cur_page + 1, s_page_count);
-    eink_refresh();
+    int total = total_pages_count();
+    if (total == 0) { draw_diag(); eink_unlock(); return; }
+    s_cur_page = (s_cur_page + 1) % total;
+    draw_current_locked();
     eink_unlock();
 }
 
 void display_eink_first_page(void) {
     eink_lock();
-    rebuild_pages();
-    if (s_page_count == 0) { draw_diag(); eink_unlock(); return; }
     s_cur_page = 0;
-    draw_meter_page(s_page_ids[s_cur_page], s_cur_page + 1, s_page_count);
-    eink_refresh();
+    draw_current_locked();
     eink_unlock();
 }
 
@@ -831,13 +915,36 @@ static void button_task(void *arg) {
 }
 
 // Task auto-odswiezania: co 60 s odswiez biezaca strone (nowe dane z historii).
+// Budzik taska odswiezania: pozwala odswiezyc ekran od razu po zmianie
+// ustawien, bez dotykania SPI z taska HTTP.
+static SemaphoreHandle_t s_wake = NULL;
+
+void display_eink_wake(void) {
+    if (s_wake) xSemaphoreGive(s_wake);
+}
+
 static void refresh_task(void *arg) {
     (void)arg;
     // Pierwsze odswiezenie po 15 s (daj czas na pierwsze ramki i SNTP).
     vTaskDelay(pdMS_TO_TICKS(15000));
     while (1) {
         if (!s_eink_paused) display_eink_refresh_pages();
-        vTaskDelay(pdMS_TO_TICKS(60000));
+
+        // Domyslnie cykl 60 s. Gdy na ekranie jest zegar, spimy do najblizszej
+        // pelnej minuty - inaczej cyfra minut zmienialaby sie w losowym momencie
+        // cyklu i potrafila spoznic sie o niemal cala minute.
+        int wait_ms = 60000;
+        if (is_clock_page(s_cur_page)) {
+            time_t now = time(NULL);
+            if (now >= TIME_SYNCED_MIN) {
+                wait_ms = (int)(60 - (now % 60)) * 1000;
+                // Tuz po pelnej minucie (rysowanie tez trwa) - czekaj na nastepna,
+                // zeby nie odswiezac panelu dwa razy pod rzad.
+                if (wait_ms < 2000) wait_ms += 60000;
+            }
+        }
+        if (s_wake) xSemaphoreTake(s_wake, pdMS_TO_TICKS(wait_ms));
+        else        vTaskDelay(pdMS_TO_TICKS(wait_ms));
     }
 }
 
@@ -849,6 +956,7 @@ void display_eink_start_tasks(int pin_button) {
         .pin_bit_mask = (1ULL << pin_button),
     };
     gpio_config(&btn);
+    if (!s_wake) s_wake = xSemaphoreCreateBinary();
     xTaskCreate(button_task, "eink_btn", 3072, NULL, 3, &s_btn_task_h);
     xTaskCreate(refresh_task, "eink_refresh", 4096, NULL, 2, &s_refresh_task_h);
     ESP_LOGI(TAG, "Tasks e-ink uruchomione (przycisk GPIO%d)", pin_button);

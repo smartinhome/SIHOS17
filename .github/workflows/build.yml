@@ -9,6 +9,11 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Znacznik kompilacji (__DATE__/__TIME__) bierze sie z zegara tej maszyny.
+    # Przypinamy UTC jawnie - panel przelicza go na czas lokalny przegladarki
+    # wlasnie przy tym zalozeniu (patrz fmtBuild w webui/index.html).
+    env:
+      TZ: UTC
     steps:
       - name: Checkout
         uses: actions/checkout@v6

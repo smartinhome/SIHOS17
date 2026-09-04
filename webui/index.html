@@ -1031,20 +1031,46 @@ var MT = (function () {
   var TRACK_UNITS = ['kWh', 'kW', 'V', 'm3', 'VAR', 'kVARh', 'A'];
   var MAX_TRACKED = 24;   /* history.c: MAX_TRACKED */
 
-  /* Kod producenta z naglowka wMbus (3 litery, decodeFrame -> o.manufacturer). */
+  /* Kod producenta z naglowka wMbus (3 litery, decodeFrame -> o.manufacturer).
+     Nazwy przepisane z oficjalnej tablicy FLAG (manufacturers.h w wmbusmeters)
+     zamiast z pamieci. Wczesniej UNISMART pokazywal goly kod AMX, bo go tu nie
+     bylo, a INE i EFN mialy wrecz bledne nazwy. Kodu, ktorego tu nie ma, NIE
+     zgadujemy - wyswietlamy surowe trzy litery, bo zla nazwa producenta jest
+     gorsza niz jej brak. */
   var MANUF = {
-    SAP: 'Diehl / IZAR RC', DME: 'Diehl Metering', HYD: 'Diehl Hydrometer',
-    APA: 'Apator', APT: 'Apator', KAM: 'Kamstrup', SEN: 'Sensus',
-    TCH: 'Techem', ZRI: 'Zenner', LUG: 'Landis+Gyr', LSE: 'Landis+Gyr',
-    ITW: 'Itron', EFE: 'Engelmann', QDS: 'Qundis', SON: 'Sontex',
-    WEP: 'Weptech', AXI: 'Axis', BMT: 'BMETERS', GAV: 'Carlo Gavazzi',
-    NZR: 'NZR', EMH: 'EMH', ELS: 'Elster', GWF: 'GWF', MAD: 'Maddalena',
-    AMT: 'Aquametro', DZG: 'DZG', INE: 'INESA', EFN: 'Engelmann'
+    /* Apator i spolki */
+    APA: 'Apator', APT: 'Apator', AMX: 'Apator Metrix', MII: 'Apator Miitors',
+    /* Diehl Metering (dawne Sappel i Hydrometer) */
+    DME: 'Diehl Metering', MDE: 'Diehl Metering', DGM: 'Diehl Gas Metering',
+    SAP: 'Diehl / IZAR RC', SPL: 'Diehl / IZAR RC',
+    HYD: 'Diehl Hydrometer', HYG: 'Diehl Hydrometer',
+    /* Kamstrup */
+    KAM: 'Kamstrup', KAA: 'Kamstrup', KAS: 'Kamstrup', KAW: 'Kamstrup', KMB: 'Kamstrup',
+    /* Sensus */
+    SEN: 'Sensus', INV: 'Sensus', MEI: 'Sensus', PMG: 'Sensus', SPX: 'Sensus',
+    /* Itron */
+    ITR: 'Itron', ITK: 'Itron', ITW: 'Itron', ITG: 'Itron', ITE: 'Itron',
+    /* Landis+Gyr */
+    LUG: 'Landis+Gyr', LGA: 'Landis+Gyr', LGB: 'Landis+Gyr', LGD: 'Landis+Gyr',
+    LGZ: 'Landis+Gyr', LSP: 'Landis+Gyr', LSE: 'Landis+Gyr',
+    /* Zenner */
+    ZRI: 'Zenner', ZRM: 'Zenner', ALC: 'Zenner Gas',
+    /* Elster / Honeywell */
+    ELS: 'Elster', ELR: 'Elster', EMT: 'Elster', HON: 'Honeywell', HEW: 'Honeywell',
+    /* pozostali */
+    TCH: 'Techem', QDS: 'Qundis', SON: 'Sontex', EFE: 'Engelmann',
+    WEP: 'Weptech', AXI: 'Axis Industries', BMT: 'BMETERS', BMP: 'BMETERS Polska',
+    GAV: 'Carlo Gavazzi', GWF: 'GWF', MAD: 'Maddalena', MDL: 'Maddalena',
+    AMT: 'Integra Metering', AQM: 'Integra Metering', IMT: 'Integra Metering',
+    DZG: 'DZG Metering', INE: 'Innotas', INP: 'Innotas', IST: 'ista',
+    MWU: 'Metrona', PAD: 'PadMess', REL: 'Relay', WEH: 'E. Wehrle',
+    SAG: 'Sagemcom', MIT: 'Sagemcom', SET: 'Sagemcom', DFS: 'Danfoss',
+    SIE: 'Siemens', SML: 'Siemens', SFI: 'Siemens', VES: 'Viterra'
   };
   /* Awaryjny producent, gdy ramka przyszla z /api/meters (firmware nie
      podaje kodu M-Bus) - wyprowadzamy go z rozpoznanego sterownika. */
   var MANUF_BY_TYPE = {
-    amiplus: 'Apator', unismart: 'Apator', apator: 'Apator', apator162: 'Apator',
+    amiplus: 'Apator', unismart: 'Apator Metrix', apator: 'Apator', apator162: 'Apator',
     izar: 'Diehl / IZAR RC', mkradio4: 'Techem', techem: 'Techem'
   };
   /* Krotka nazwa sterownika do drugiej linii kolumny Producent. */
@@ -1286,10 +1312,14 @@ var MT = (function () {
     } else {
       body = '<div class="mptitle"><h4>Pola licznika — wybierz, co przypiąć</h4></div>' +
         '<div class="mfgrid"><div class="mfhead"><span>Pole</span><span>Wartość</span>' +
-        '<span class="mfc">Dashboard</span><span class="mfc">Historia</span></div>' + fieldsHtml(m) + '</div>';
+        '<span class="mfc" title="Które wartości pokazać jako kafelki na dashboardzie. '
+        + 'Wyłączenie wszystkich zdejmuje licznik z dashboardu.">Dashboard</span>'
+        + '<span class="mfc" title="Zapis wartości na flashu i wykres w zakładce Historia.">Historia</span></div>' + fieldsHtml(m) + '</div>';
     }
+    var uf = ui[m.id] || {};
     return '<div class="mpanel">' + keyBarHtml(m) + body +
-      '<div class="mpfoot"><span class="mpmsg"></span>' +
+      '<div class="mpfoot"><span class="mpmsg' + (uf.pmsgOk ? ' ok' : '') + '">'
+      + esc(uf.pmsg || '') + '</span>' +
       '<button class="mbtn" type="button" data-mact="rename">Zmień nazwę</button>' +
       (m.fields.length ? '<button class="mbtn" type="button" data-mact="hist">Pokaż w Historii</button>' : '') +
       '</div></div>';
@@ -1453,11 +1483,25 @@ var MT = (function () {
       ? 'Zwiń wszystkie' : 'Rozwiń wszystkie';
   }
 
+  /* beta356: komunikat trzymany w stanie modulu, nie tylko w DOM. Wczesniej
+     msg() pisalo prosto do wezla, a nastepny render - wlasny albo ten z cyklu
+     odswiezania co 5 s - odbudowywal panel i kasowal napis, zanim ktokolwiek
+     zdazyl go przeczytac. Teraz komunikat jest czescia renderowanego HTML. */
+  var msgTimer = {};
   function msg(id, text, ok) {
+    if (!ui[id]) ui[id] = {};
+    ui[id].pmsg = text || '';
+    ui[id].pmsgOk = !!ok;
     var el = document.querySelector('.mrow[data-id="' + id + '"] .mpmsg');
-    if (!el) return;
-    el.textContent = text || '';
-    el.className = 'mpmsg' + (ok ? ' ok' : '');
+    if (el) {
+      el.textContent = ui[id].pmsg;
+      el.className = 'mpmsg' + (ok ? ' ok' : '');
+    }
+    clearTimeout(msgTimer[id]);
+    if (text) msgTimer[id] = setTimeout(function () {
+      if (ui[id]) ui[id].pmsg = '';
+      paint(true);
+    }, 6000);
   }
 
   /* ---- akcje ---- */
@@ -1550,28 +1594,28 @@ var MT = (function () {
     /* --- przypiecie calego licznika do dashboardu --- */
     if (a === 'pin') {
       var on = !(window.PINNED || {})[lc(id)];
-      if (!window.PINNED) window.PINNED = {};
-      window.PINNED[lc(id)] = on;
       busy['p' + id] = 1; paint(true);
-      try {
-        await fetch('/api/dashboard', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id: id, pinned: on })
-        });
-        if (on && !hasDashSet(id)) {
-          /* Swiezo przypiety licznik bez wybranych pol pokazalby pusty kafelek.
-             Zaznacz sledzone pola, a jak zadnego nie ma - pierwsze mierzalne. */
-          var cand = m.fields.filter(function (x) { return isTracked(id + ':' + x.field); });
-          if (!cand.length) cand = m.fields.filter(trackable).slice(0, 1);
-          for (var i = 0; i < cand.length; i++) await setDashField(id + ':' + cand[i].field, true);
-          open[id] = true;
+      var okp = await setPinned(id, on), noteP = '';
+      if (!okp) {
+        noteP = 'Brak połączenia z modułem — nie zapisano.';
+      } else if (on && !hasDashSet(id)) {
+        /* Swiezo przypiety licznik bez wybranych pol pokazalby pusty kafelek.
+           Zaznacz sledzone pola, a jak zadnego nie ma - pierwsze mierzalne. */
+        var cand = m.fields.filter(function (x) { return isTracked(id + ':' + x.field); });
+        if (!cand.length) cand = m.fields.filter(trackable).slice(0, 1);
+        for (var i = 0; i < cand.length; i++) await setDashField(id + ':' + cand[i].field, true);
+        open[id] = true;
+      } else if (!on) {
+        /* beta356: odpiecie czysci tez wybor pol. Inaczej zostawal martwy stan,
+           ktory przy ponownym przypieciu wracal w nieoczekiwanej postaci. */
+        for (var j = 0; j < m.fields.length; j++) {
+          var pk = id + ':' + m.fields[j].field;
+          if (isDash(pk)) await setDashField(pk, false);
         }
-      } catch (e) {
-        window.PINNED[lc(id)] = !on;
-        msg(id, 'Brak połączenia z modułem — nie zapisano.');
       }
       delete busy['p' + id];
       paint(true);
+      if (noteP) msg(id, noteP, false);
       var dm = document.getElementById('dash-meters');
       if (dm) fetchMeters();
       return;
@@ -1588,12 +1632,26 @@ var MT = (function () {
       busy['d' + fk] = 1; paint(true);
       var okd = await setDashField(fk, want);
       delete busy['d' + fk];
-      if (!okd) msg(id, 'Nie udało się zapisać — lista pól dashboardu może być pełna.');
-      else if (want && !(window.PINNED || {})[lc(id)]) {
-        /* Kafelek pokaze sie dopiero, gdy licznik jest na dashboardzie. */
-        msg(id, 'Pole wybrane. Włącz jeszcze przełącznik Dashboard przy liczniku.', true);
-      } else msg(id, '', true);
+      /* beta356: przelacznik pola steruje teraz przypieciem licznika w obie
+         strony. Wczesniej licznik "przypiety, ale bez wybranych pol" wpadal
+         w awaryjne zachowanie meterCard (pokaz pola sledzone w historii),
+         wiec zdjecie ostatniego pola nie zmienialo nic widocznego - przelacznik
+         wygladal na zepsuty. Teraz: pierwsze wybrane pole wstawia licznik na
+         dashboard, zdjecie ostatniego go stamtad zabiera. */
+      var note = '', noteOk = true;
+      if (!okd) {
+        note = 'Nie udało się zapisać — lista pól dashboardu może być pełna.'; noteOk = false;
+      } else if (want && !(window.PINNED || {})[lc(id)]) {
+        await setPinned(id, true);
+        note = 'Licznik trafił na dashboard z tym polem.';
+      } else if (!want && !hasDashSet(id) && (window.PINNED || {})[lc(id)]) {
+        await setPinned(id, false);
+        note = 'To było ostatnie pole — licznik zniknął z dashboardu.';
+      }
+      /* paint() odbudowuje panel, wiec komunikat MUSI isc po nim - inaczej
+         swiezy render kasuje napis, zanim ktokolwiek go zobaczy. */
       paint(true);
+      msg(id, note, noteOk);
       var dm2 = document.getElementById('dash-meters');
       if (dm2) fetchMeters();
       return;
@@ -1605,6 +1663,7 @@ var MT = (function () {
         msg(id, 'Wszystkie ' + MAX_TRACKED + ' miejsc historii są zajęte. Wyłącz inne pole, żeby zwolnić miejsce.');
         return;
       }
+      var noteH = '', noteHok = true;
       if (!window.TRACKED) window.TRACKED = {};
       window.TRACKED[fk] = wantH;
       if (!wantH) delete window.TRACKED[fk];
@@ -1618,16 +1677,35 @@ var MT = (function () {
         var jh = {};
         try { jh = await rh.json(); } catch (e2) { }
         if (!rh.ok || jh.error) throw new Error(jh.error || 'błąd modułu');
-        msg(id, wantH
+        noteH = wantH
           ? fx.field.replace(/_/g, ' ') + ' — zapis do historii włączony (' + trackedTotal() + '/' + MAX_TRACKED + ')'
-          : '', true);
+          : '';
       } catch (e) {
         if (wantH) delete window.TRACKED[fk]; else window.TRACKED[fk] = true;
-        msg(id, 'Nie udało się zapisać: ' + (e.message || 'brak połączenia'));
+        noteH = 'Nie udało się zapisać: ' + (e.message || 'brak połączenia');
+        noteHok = false;
       }
       delete busy['h' + fk];
       paint(true);
+      msg(id, noteH, noteHok);
       return;
+    }
+  }
+
+  async function setPinned(id, on) {
+    if (!window.PINNED) window.PINNED = {};
+    var prev = !!window.PINNED[lc(id)];
+    window.PINNED[lc(id)] = on;
+    try {
+      var r = await fetch('/api/dashboard', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: id, pinned: on })
+      });
+      if (!r.ok) throw 0;
+      return true;
+    } catch (e) {
+      window.PINNED[lc(id)] = prev;
+      return false;
     }
   }
 

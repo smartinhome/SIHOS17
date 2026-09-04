@@ -1817,6 +1817,18 @@ static bool earliest_total_in(meter_hist_t *m, uint32_t period_start,
                 if (series[s][i].total < gmin) gmin = series[s][i].total;
         best = gmin; found = true;
     }
+    // beta348: bufory hours/days/months trzymaja OSTATNIA wartosc swojego okresu,
+    // wiec tuz po wlaczeniu sledzenia wszystkie maja ten sam, biezacy total i
+    // powyzsze minimum wychodzi rowne stanowi biezacemu - zuzycie liczylo sie
+    // jako 0 az do restartu, ktory wczytywal z flasha starsze punkty.
+    // m->day_base_total to pierwszy odczyt doby (ten sam, ktorego uzywa wykres
+    // dobowy i e-ink) - jedyna wartosc, ktora naprawde jest wczesniejsza.
+    // Bierzemy ja, gdy nalezy do liczonego okresu i jest nizsza od dotychczasowej.
+    if (m->day_base_ts != 0 && m->day_base_ts >= period_start &&
+        (!found || m->day_base_total < best)) {
+        best = m->day_base_total;
+        found = true;
+    }
     *out = best;
     return found;
 }

@@ -1824,7 +1824,14 @@ static bool earliest_total_in(meter_hist_t *m, uint32_t period_start,
     // m->day_base_total to pierwszy odczyt doby (ten sam, ktorego uzywa wykres
     // dobowy i e-ink) - jedyna wartosc, ktora naprawde jest wczesniejsza.
     // Bierzemy ja, gdy nalezy do liczonego okresu i jest nizsza od dotychczasowej.
-    if (m->day_base_ts != 0 && m->day_base_ts >= period_start &&
+    // beta349: kierunek porownania byl odwrocony. day_base_ts to poczatek DOBY
+    // (polnoc), a period_start dla widoku godzinowego to poczatek godziny -
+    // polnoc jest wczesniejsza, wiec warunek "day_base_ts >= period_start" byl
+    // falszywy i baza nigdy nie wchodzila. Dziala tylko dla widoku doby, gdzie
+    // period_start == d0 == day_base_ts.
+    // Poprawnie: pierwszy odczyt doby jest wiarygodnym WCZESNIEJSZYM punktem
+    // dla kazdego okresu zaczynajacego sie w tej samej dobie lub pozniej.
+    if (m->day_base_ts != 0 && period_start >= m->day_base_ts &&
         (!found || m->day_base_total < best)) {
         best = m->day_base_total;
         found = true;

@@ -420,6 +420,9 @@
   font-weight:700;letter-spacing:.06em;font-family:monospace;vertical-align:1px}
 .mpill.ok{color:var(--accent2);background:rgba(0,211,167,.15)}
 .mpill.warn{color:var(--warn);background:rgba(240,180,41,.16)}
+.mpill.err{color:var(--err);background:rgba(255,92,92,.16)}
+.mraw{display:block;margin:10px auto 0;font-family:monospace;font-size:.72rem;color:var(--mut);
+  word-break:break-all;max-width:70ch}
 .mstate{font-size:.86rem;font-weight:600;font-family:monospace;font-variant-numeric:tabular-nums;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .mstate small{font-weight:400;color:var(--mut);font-size:.72rem;margin-left:3px;
@@ -1124,8 +1127,14 @@ var MT = (function () {
      siedzi na window - odwolujemy sie po nazwie. */
   function keyOf(m) { try { return METER_KEYS[lc(m.id)] || ''; } catch (e) { return ''; } }
   function keyState(m) {
+    /* beta354: _keyError ma pierwszenstwo przed samym faktem zapisania klucza.
+       "badkey" powstaje WLASNIE wtedy, gdy klucz jest zapisany, ale ramek nie
+       da sie nim odszyfrowac - sprawdzanie keyOf() najpierw sprawialo, ze taki
+       licznik swiecil zielonym "AES" z opisem "ramki sa odszyfrowywane", czyli
+       panel twierdzil cos odwrotnego niz stan faktyczny. */
+    if (m._keyError === 'badkey') return 'badkey';
     if (keyOf(m)) return 'ok';
-    if (m._keyError === 'nokey' || m._keyError === 'badkey') return m._keyError;
+    if (m._keyError === 'nokey') return 'nokey';
     return 'none';
   }
 
@@ -1205,7 +1214,7 @@ var MT = (function () {
     var s = keyState(m);
     if (s === 'ok') return '<span class="mpill ok" title="Klucz AES zapisany">AES</span>';
     if (s === 'nokey') return '<span class="mpill warn" title="Ramki szyfrowane, brak klucza AES">AES ?</span>';
-    if (s === 'badkey') return '<span class="mpill warn" title="Klucz AES nie pasuje do ramek">AES !</span>';
+    if (s === 'badkey') return '<span class="mpill err" title="Zapisany klucz AES nie pasuje do ramek tego licznika">AES !</span>';
     return '';
   }
   function chevIcon() {
@@ -1257,12 +1266,23 @@ var MT = (function () {
   function panelHtml(m) {
     var body;
     if (!m.fields.length) {
-      var why = (m._keyError === 'nokey')
-        ? 'Ramki przychodzą zaszyfrowane, a moduł nie ma klucza AES dla tego ID. Dodaj klucz powyżej, żeby zobaczyć pola.'
-        : (m._ghost
-          ? 'Licznik nie nadaje w tej chwili — nie ma ani ramki, ani zapisanej historii. Wpis zostaje, bo jest przypięty albo ma zapisany klucz.'
-          : 'Brak rozkodowanych pól — poczekaj na kolejną ramkę.');
-      body = '<div class="empty" style="padding:22px 0">' + why + '</div>';
+      var why, raw = '';
+      if (m._keyError === 'badkey') {
+        why = 'Zapisany klucz AES nie pasuje do ramek tego licznika — nie da się ich odszyfrować. '
+            + 'Sprawdź klucz u dostawcy licznika i popraw go powyżej.';
+      } else if (m._keyError === 'nokey') {
+        why = 'Ramki przychodzą zaszyfrowane, a moduł nie ma klucza AES dla tego ID. '
+            + 'Dodaj klucz powyżej, żeby zobaczyć pola.';
+      } else if (m._ghost) {
+        why = 'Licznik nie nadaje w tej chwili — nie ma ani ramki, ani zapisanej historii. '
+            + 'Wpis zostaje, bo jest przypięty albo ma zapisany klucz.';
+      } else {
+        why = 'Ramka dotarła, ale moduł nie rozpoznaje jej formatu.';
+        /* Surowa ramka jak w panelu sprzed przebudowy - jedyny sposob, zeby
+           zglosic nieobslugiwany licznik z konkretem zamiast "nie dziala". */
+        if (m._hex) raw = '<span class="mraw">RAW: ' + esc(m._hex) + '</span>';
+      }
+      body = '<div class="empty" style="padding:22px 0">' + why + raw + '</div>';
     } else {
       body = '<div class="mptitle"><h4>Pola licznika — wybierz, co przypiąć</h4></div>' +
         '<div class="mfgrid"><div class="mfhead"><span>Pole</span><span>Wartość</span>' +

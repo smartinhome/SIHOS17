@@ -544,36 +544,76 @@ static bool valid_meter_id(const char *id) {
 // skumulowany.  Wcześniej użytkownik musiał później ręcznie kliknąć "+" przy
 // odpowiednim polu, przez co pierwsze dni zużycia łatwo przepadały.
 // Dodatkowe pola (moc, napięcia, taryfy) nadal są włączane świadomie z UI.
-static void track_default_meter_field(const meter_config_t *meter) {
-    if (!meter || !history_fs_ok()) return;
-
-    const char *field = NULL;
-    const char *type = meter->type;
+// Pole, ktore ma sens wlaczyc do historii bez pytania - jedno na licznik.
+// Reszta (moc, napiecia, taryfy) zostaje swiadomym wyborem z UI.
+static const char *default_field_for_type(const char *type) {
+    if (!type || !type[0]) return NULL;
     if (strcasecmp(type, "amiplus") == 0 ||
         strcasecmp(type, "electricity") == 0 ||
         strcasecmp(type, "sontex") == 0) {
-        field = "energia_kwh";
-    } else if (strcasecmp(type, "izar") == 0 ||
-               strcasecmp(type, "apator") == 0 ||
-               strcasecmp(type, "apator162") == 0 ||
-               strcasecmp(type, "op041a") == 0 ||
-               strcasecmp(type, "mkradio4") == 0 ||
-               strcasecmp(type, "water") == 0 ||
-               strcasecmp(type, "unismart") == 0 ||
-               strcasecmp(type, "gas") == 0) {
-        field = "total_m3";
+        return "energia_kwh";
     }
-    if (!field) return;  // nie zgadujemy dla nieznanych sterowników
+    if (strcasecmp(type, "izar") == 0 ||
+        strcasecmp(type, "apator") == 0 ||
+        strcasecmp(type, "apator162") == 0 ||
+        strcasecmp(type, "op041a") == 0 ||
+        strcasecmp(type, "mkradio4") == 0 ||
+        strcasecmp(type, "water") == 0 ||
+        strcasecmp(type, "unismart") == 0 ||
+        strcasecmp(type, "gas") == 0) {
+        return "total_m3";
+    }
+    return NULL;   // nie zgadujemy dla nieznanych sterownikow
+}
 
-    char key[40];
-    snprintf(key, sizeof(key), "%s:%s", meter->id_hex, field);
-    if (!history_is_tracked(key)) {
-        history_set_tracked(key, true);
-        if (history_is_tracked(key))
-            ESP_LOGI(TAG, "Historia wlaczona automatycznie: %s", key);
-        else
-            ESP_LOGW(TAG, "Brak wolnego slotu historii dla %s", key);
+static void enable_default_history(const char *id_hex, const char *type) {
+    if (!id_hex || !history_fs_ok()) return;
+    const char *field = default_field_for_type(type);
+    if (!field) {
+        ESP_LOGW(TAG, "Historia: nieznany typ '%s' dla %s - pole domyslne pominiete",
+                 type ? type : "?", id_hex);
+        return;
     }
+    char key[40];
+    snprintf(key, sizeof(key), "%s:%s", id_hex, field);
+    if (history_is_tracked(key)) return;
+    history_set_tracked(key, true);
+    if (history_is_tracked(key))
+        ESP_LOGI(TAG, "Historia wlaczona automatycznie: %s", key);
+    else
+        ESP_LOGW(TAG, "Brak wolnego slotu historii dla %s", key);
+}
+
+static void track_default_meter_field(const meter_config_t *meter) {
+    if (!meter) return;
+    enable_default_history(meter->id_hex, meter->type);
+}
+
+// beta346: to samo, ale dla licznika, ktorego NIE MA w cfg.meters[] - a wiec dla
+// kazdego nieszyfrowanego, bo tam trafiaja tylko liczniki z zapisanym kluczem AES.
+// Typ bierzemy wtedy wprost z dekodera (zna go, bo wypisuje w logu ramki).
+static void track_default_for_id(const char *id, const sih_config_t *cfg) {
+    if (!id || !history_fs_ok()) return;
+    const char *type = NULL;
+    if (cfg) {
+        for (int i = 0; i < cfg->meter_count; i++) {
+            if (strcasecmp(cfg->meters[i].id_hex, id) == 0) {
+                type = cfg->meters[i].type;
+                break;
+            }
+        }
+    }
+    if (!type || !type[0]) {
+        int n = wmbus_decoder_get_count();
+        for (int i = 0; i < n; i++) {
+            meter_data_t *m = wmbus_decoder_get_meter(i);
+            if (m && m->valid && strcasecmp(m->id_hex, id) == 0) {
+                type = m->type;
+                break;
+            }
+        }
+    }
+    enable_default_history(id, type);
 }
 
 static esp_err_t handle_dashboard(httpd_req_t *req) {
@@ -607,6 +647,9 @@ static esp_err_t handle_dashboard(httpd_req_t *req) {
             strlcpy(cfg.pins[freeIdx], id, sizeof(cfg.pins[freeIdx]));
             nvs_config_save(&cfg);
             ESP_LOGI(TAG, "DASH POST: ZAPISANO '%s' na pozycji %d", id, freeIdx);
+            // beta346: bez tego historia nie ruszala dla licznikow nieszyfrowanych -
+            // automat siedzial wylacznie na sciezce zapisu klucza AES.
+            track_default_for_id(id, &cfg);
         } else if (!want && idx >= 0) {
             cfg.pins[idx][0] = 0;
             nvs_config_save(&cfg);

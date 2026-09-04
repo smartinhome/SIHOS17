@@ -1423,12 +1423,16 @@ void history_set_tracked(const char *id_hex, bool tracked) {
         s_tracked[s_tracked_count][sizeof(s_tracked[0]) - 1] = 0;
         s_tracked_count++;
         tracked_save();
+        // beta346: dotad ta funkcja byla calkowicie niema, wiec z logow nie dalo sie
+        // stwierdzic, czy sledzenie w ogole zostalo wlaczone.
+        ESP_LOGI(TAG, "Sledzenie WLACZONE: %s (%d/%d)", id_hex, s_tracked_count, MAX_TRACKED);
     } else if (!tracked && exists) {
         // usun przesuwajac reszte
         for (int i = idx; i < s_tracked_count - 1; i++)
             memcpy(s_tracked[i], s_tracked[i+1], sizeof(s_tracked[0]));
         s_tracked_count--;
         tracked_save();
+        ESP_LOGI(TAG, "Sledzenie WYLACZONE: %s (%d/%d)", id_hex, s_tracked_count, MAX_TRACKED);
         // Zwolnij slot RAM (2.9KB + ew. krzywa 11.5KB) - inaczej wisialby do
         // restartu. Pliki na flashu zostaja, wiec ponowne wlaczenie sledzenia
         // odzyskuje historie.

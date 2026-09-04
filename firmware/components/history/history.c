@@ -2158,6 +2158,7 @@ int history_get_day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf
     // res=hour. Pokrywa Dzis/Wczoraj/caly tydzien.
     // ZRODLO 2 (fallback): archiwum ha_ na flash - dla dni starszych niz 7 dni.
     int nb = 0;
+    int dup = 0;                 // beta350: ile godzin odsiano jako powtorzone
     hist_bucket_t prev; bool has_prev = false;
 
     // Z RAM czytamy TYLKO dzien w pelni pokryty oknem 168 godzin (RAM zaczyna
@@ -2200,12 +2201,25 @@ int history_get_day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf
                     }
                 }
                 // Sekwencyjnie od lo; rekordy rosnace, wiec koniec przy ts >= d1.
+                // beta350: ta sama godzina moze trafic do bufora tylko RAZ.
+                // Archiwum potrafi zawierac kilka rekordow o identycznym ts;
+                // wczesniej trafialy do JSON-a jako osobne punkty, a poniewaz
+                // roznica wzgledem poprzednika przy rownych ts wynosi zero,
+                // slupek z prawdziwym zuzyciem byl nadpisywany zerami.
                 for (int i = lo; i < h.count && nb < ARC_DAY_BUF; i++) {
                     int phys = (h.head + i) % HIST_ARCHIVE_HOURS;
                     if (fseek(f, arc_rec_off2(h.hdr, phys), SEEK_SET) != 0) break;
                     if (fread(&rec, sizeof(rec), 1, f) != 1) break;
                     if (rec.ts >= d1) break;
-                    if (rec.ts >= d0) s_day_buf[nb++] = rec;
+                    if (rec.ts < d0) continue;
+                    if (nb > 0 && rec.ts == s_day_buf[nb - 1].ts) {
+                        s_day_buf[nb - 1] = rec;   // aktualizacja tej samej godziny
+                        dup++;
+                    } else if (nb > 0 && rec.ts < s_day_buf[nb - 1].ts) {
+                        dup++;                     // ts nierosnacy - pomijamy
+                    } else {
+                        s_day_buf[nb++] = rec;
+                    }
                 }
             }
             fclose(f);
@@ -2232,9 +2246,23 @@ int history_get_day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf
                 continue;
             }
             if (t >= d1) break;
-            if (t > newest || nb == 0) s_day_buf[nb++] = m->hours[i];
+            // beta350: ta sama ochrona co w galezi archiwum. Dotychczasowy
+            // straznik "t > newest" byl martwy: nb jest tu zawsze 0, wiec
+            // newest wychodzilo 0 i warunek byl zawsze prawdziwy.
+            if (nb > 0 && t == s_day_buf[nb - 1].ts) {
+                s_day_buf[nb - 1] = m->hours[i];
+                dup++;
+            } else if (nb > 0 && t < s_day_buf[nb - 1].ts) {
+                dup++;
+            } else {
+                s_day_buf[nb++] = m->hours[i];
+            }
         }
     }
+
+    if (dup > 0)
+        ESP_LOGW(TAG, "%s: doba %u - odsiano %d powtorzonych godzin (zostalo %d)",
+                 id_hex ? id_hex : "?", (unsigned)d0, dup, nb);
 
     // Wypisz punkty (zuzycie = roznica wzgledem poprzedniej godziny dla kumulacyjnych).
     // Luki NIE sa rozkladane na godziny: godziny bez ramek zostaja puste, a caly

@@ -356,6 +356,8 @@ typedef struct {
     float last_total;      // tylko v2
 } arc_hdr_t;
 
+static long arc_rec_off2(int hdr, int phys);   // beta351: uzywa jej arc_seek_rec
+
 // Odczyt naglowka archiwum (v1 lub v2). Zwraca true gdy plik poprawny.
 static bool arc_read_header2(FILE *f, arc_hdr_t *h) {
     memset(h, 0, sizeof(*h));
@@ -378,7 +380,32 @@ static bool arc_read_header2(FILE *f, arc_hdr_t *h) {
     // Wykryj niezgodny format: count/head poza zakresem -> traktuj jako pusty.
     if (h->count < 0 || h->count > HIST_ARCHIVE_HOURS) { h->count = 0; h->head = 0; return false; }
     if (h->head < 0 || h->head >= HIST_ARCHIVE_HOURS)  { h->count = 0; h->head = 0; return false; }
+    // beta351: count musi sie miescic w tym, co plik NAPRAWDE zawiera. Naglowek
+    // potrafil obiecywac o jeden rekord wiecej niz zapisano (patrz komentarz przy
+    // archive_append_hour) - a wtedy sonda "ostatniego rekordu" celowala w EOF,
+    // fread padal i kazdy zapis dokladal nowy rekord zamiast nadpisac biezaca
+    // godzine. Ten sam falszywy odczyt kazal arc_validate_repair() uznac plik za
+    // uszkodzony, przez co archiwum ladowalo w arc_bad.bin przy kazdym starcie.
+    // Ring zawiniety ma plik pelnego rozmiaru, wiec go to nie dotyczy.
+    if (fseek(f, 0, SEEK_END) == 0) {
+        long sz = ftell(f);
+        long recs = (sz - (long)h->hdr) / (long)sizeof(hist_bucket_t);
+        if (recs < 0) recs = 0;
+        if (recs > HIST_ARCHIVE_HOURS) recs = HIST_ARCHIVE_HOURS;
+        if ((long)h->count > recs) h->count = (int)recs;
+    }
     return true;
+}
+
+// beta351: ustaw strumien na rekordzie fizycznym phys przed ZAPISEM.
+// SPIFFS nie zna plikow rzadkich - skok poza koniec pliku zawodzi, a niesprawdzony
+// fwrite pisze wtedy tam, gdzie akurat stoi strumien. Dozwolone sa dwa miejsca:
+// istniejacy rekord i dokladnie koniec pliku (powiekszenie ringu o jeden rekord).
+static bool arc_seek_rec(FILE *f, int hdr, int phys) {
+    long off = arc_rec_off2(hdr, phys);
+    if (fseek(f, 0, SEEK_END) != 0) return false;
+    if (off > ftell(f)) return false;          // dziura - tam pisac nie wolno
+    return fseek(f, off, SEEK_SET) == 0;
 }
 
 // Zapis naglowka v2 na poczatku pliku.
@@ -522,6 +549,12 @@ static void archive_append_hour(const char *id, uint32_t hour_ts, float total,
         if (!f) { ESP_LOGW(TAG, "nie moge utworzyc archiwum %s", path); return; }
         memset(&h, 0, sizeof(h));
         h.v2 = true; h.hdr = ARC_HDR_V2;
+        // beta351: naglowek NATYCHMIAST. Bez tego plik ma 0 B, a zapis pierwszego
+        // rekordu celuje w offset 20 - czyli poza koniec pustego pliku. Na SPIFFS
+        // taki fseek zawodzi, rekord ladowal na pozycji 0 i byl zaraz przykrywany
+        // naglowkiem. Plik zostawal o jeden rekord w tyle za licznikiem count na
+        // zawsze, a to wlasnie ono rozkrecalo lawine powtorzonych godzin.
+        arc_write_header_v2(f, &h);
     } else {
         if (!arc_read_header2(f, &h)) {
             // Nieczytelny naglowek podczas pracy: NIE kasuj po cichu. Zachowaj
@@ -536,6 +569,7 @@ static void archive_append_hour(const char *id, uint32_t hour_ts, float total,
             if (!f) { ESP_LOGW(TAG, "nie moge odtworzyc archiwum %s", path); return; }
             memset(&h, 0, sizeof(h));
             h.v2 = true; h.hdr = ARC_HDR_V2;
+            arc_write_header_v2(f, &h);   // beta351: jak wyzej
         } else if (!h.v2) {
             // Poprawny plik v1 - jednorazowa migracja do v2 (bez utraty danych).
             fclose(f);
@@ -576,7 +610,14 @@ static void archive_append_hour(const char *id, uint32_t hour_ts, float total,
         h.count++;
     }
     hist_bucket_t rec = { hour_ts, total };
-    fseek(f, arc_rec_off2(h.hdr, write_phys), SEEK_SET);
+    // beta351: dotad wynik fseek byl ignorowany. Na SPIFFS skok poza koniec pliku
+    // zawodzi, a fwrite szedl wtedy na koniec pliku - rekordy rozjezdzaly sie z
+    // pozycjami, ktore obiecywal naglowek.
+    if (!arc_seek_rec(f, h.hdr, write_phys)) {
+        ESP_LOGE(TAG, "Archiwum %s: rekord %d poza plikiem - pomijam zapis", path, write_phys);
+        fclose(f);
+        return;
+    }
     fwrite(&rec, sizeof(rec), 1, f);
     arc_write_header_v2(f, &h);
     flush_to_flash(f);
@@ -838,7 +879,11 @@ static void archive_rebuild_from_hours(meter_hist_t *m) {
                 } else {
                     wp = (h.head + h.count) % HIST_ARCHIVE_HOURS; h.count++;
                 }
-                fseek(f, arc_rec_off2(h.hdr, wp), SEEK_SET);
+                if (!arc_seek_rec(f, h.hdr, wp)) {   // beta351: jak w append
+                    ESP_LOGE(TAG, "Archiwum %s: rekord %d poza plikiem - przerywam uzupelnianie",
+                             path, wp);
+                    break;
+                }
                 fwrite(&m->hours[i], sizeof(hist_bucket_t), 1, f);
                 added++;
             }
@@ -2246,23 +2291,35 @@ int history_get_day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf
                 continue;
             }
             if (t >= d1) break;
-            // beta350: ta sama ochrona co w galezi archiwum. Dotychczasowy
-            // straznik "t > newest" byl martwy: nb jest tu zawsze 0, wiec
-            // newest wychodzilo 0 i warunek byl zawsze prawdziwy.
+            // beta351: sprostowanie do beta350. Straznik "t > newest" NIE byl
+            // martwy - nb bywa tu niezerowe, bo archiwum wypelnilo juz bufor.
+            // Co wazniejsze: godziny z RAM, ktore archiwum wlasnie dostarczylo,
+            // to normalna praca tego bloku, a nie powtorzenia w danych. Zliczanie
+            // ich do "dup" zawyzalo diagnostyke. Rekord z RAM jest swiezszy, wiec
+            // przy rownym ts nadpisuje ten z archiwum.
             if (nb > 0 && t == s_day_buf[nb - 1].ts) {
                 s_day_buf[nb - 1] = m->hours[i];
-                dup++;
             } else if (nb > 0 && t < s_day_buf[nb - 1].ts) {
-                dup++;
+                /* ta godzina jest juz w buforze z archiwum */
             } else {
                 s_day_buf[nb++] = m->hours[i];
             }
         }
     }
 
-    if (dup > 0)
-        ESP_LOGW(TAG, "%s: doba %u - odsiano %d powtorzonych godzin (zostalo %d)",
-                 id_hex ? id_hex : "?", (unsigned)d0, dup, nb);
+    // beta351: dlawik 60 s. Panel odpytuje o dobe co kilka sekund, wiec ten wpis
+    // zalewal konsole. Pliki uszkodzone przed ta wersja nie naprawia sie same,
+    // wiec komunikat bedzie sie jeszcze pojawial - ale juz nie przy kazdym
+    // odswiezeniu.
+    if (dup > 0) {
+        static uint32_t s_dup_log_ts = 0;
+        uint32_t now_s = (uint32_t)time(NULL);
+        if (now_s - s_dup_log_ts >= 60) {
+            s_dup_log_ts = now_s;
+            ESP_LOGW(TAG, "%s: doba %u - w archiwum %d powtorzonych godzin (zostalo %d)",
+                     id_hex ? id_hex : "?", (unsigned)d0, dup, nb);
+        }
+    }
 
     // Wypisz punkty (zuzycie = roznica wzgledem poprzedniej godziny dla kumulacyjnych).
     // Luki NIE sa rozkladane na godziny: godziny bez ramek zostaja puste, a caly

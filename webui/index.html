@@ -1902,6 +1902,36 @@ function fmtBuild(src){
   });
   window.sihMalujDiody = malujDiody;
 })();
+
+/* beta347: kolejkowanie zapytan o dobe historii.
+   Serwer ma max_open_sockets=7 i lru_purge_enable=true - przy przepelnieniu puli
+   sam zamyka najstarsze polaczenie, co w logu widac jako
+   "httpd_sock_err: error in recv : 104", a w panelu jako pusty wykres.
+   Panel strzelal wszystkimi /api/history/day rownolegle (osobne zapytanie na
+   kazda iskierke), wiec przy kilku polach i odswiezaniu pula sie przepelniala.
+   Przepuszczamy najwyzej dwa zapytania naraz - reszta czeka w kolejce. */
+(function(){
+  var orig = window.fetchDayCached;
+  if (typeof orig !== 'function') return;
+  var LIMIT = 2, biezace = 0, kolejka = [];
+  function nastepne(){
+    if (biezace >= LIMIT || !kolejka.length) return;
+    var z = kolejka.shift();
+    biezace++;
+    Promise.resolve()
+      .then(function(){ return orig.apply(null, z.args); })
+      .then(z.ok, z.err)
+      .then(function(){ biezace--; nastepne(); },
+            function(){ biezace--; nastepne(); });
+  }
+  window.fetchDayCached = function(){
+    var args = arguments;
+    return new Promise(function(ok, err){
+      kolejka.push({ args: args, ok: ok, err: err });
+      nastepne();
+    });
+  };
+})();
 </script></body></html>
 
 

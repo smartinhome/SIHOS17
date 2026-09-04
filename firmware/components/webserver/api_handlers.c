@@ -592,8 +592,28 @@ static void track_default_meter_field(const meter_config_t *meter) {
 // beta346: to samo, ale dla licznika, ktorego NIE MA w cfg.meters[] - a wiec dla
 // kazdego nieszyfrowanego, bo tam trafiaja tylko liczniki z zapisanym kluczem AES.
 // Typ bierzemy wtedy wprost z dekodera (zna go, bo wypisuje w logu ramki).
+// beta347: pole domyslne prosto z listy pol, ktore dekoder juz wyprodukowal.
+// Potrzebne, bo meter_data_t.type jest kopiowane Z KONFIGURACJI - dla licznika
+// bez zapisanego klucza AES zostaje puste i mapowanie po typie nie ma na czym
+// pracowac (log: "nieznany typ '' dla 814fb7a6").
+static const char *default_field_from_decoder(const char *id) {
+    int n = wmbus_decoder_get_count();
+    for (int i = 0; i < n; i++) {
+        meter_data_t *m = wmbus_decoder_get_meter(i);
+        if (!m || strcasecmp(m->id_hex, id) != 0) continue;
+        for (int f = 0; f < m->field_count; f++) {
+            const char *fn = m->fields[f].field;
+            if (strcmp(fn, "energia_kwh") == 0 || strcmp(fn, "total_m3") == 0)
+                return fn;
+        }
+        break;                      // licznik znaleziony, ale bez pola domyslnego
+    }
+    return NULL;
+}
+
 static void track_default_for_id(const char *id, const sih_config_t *cfg) {
     if (!id || !history_fs_ok()) return;
+
     const char *type = NULL;
     if (cfg) {
         for (int i = 0; i < cfg->meter_count; i++) {
@@ -607,13 +627,25 @@ static void track_default_for_id(const char *id, const sih_config_t *cfg) {
         int n = wmbus_decoder_get_count();
         for (int i = 0; i < n; i++) {
             meter_data_t *m = wmbus_decoder_get_meter(i);
-            if (m && m->valid && strcasecmp(m->id_hex, id) == 0) {
-                type = m->type;
-                break;
-            }
+            if (m && strcasecmp(m->id_hex, id) == 0) { type = m->type; break; }
         }
     }
-    enable_default_history(id, type);
+
+    const char *field = default_field_for_type(type);
+    if (!field) field = default_field_from_decoder(id);
+    if (!field) {
+        ESP_LOGW(TAG, "Historia: dla %s brak pola domyslnego (typ '%s')",
+                 id, type ? type : "");
+        return;
+    }
+    char key[40];
+    snprintf(key, sizeof(key), "%s:%s", id, field);
+    if (history_is_tracked(key)) return;
+    history_set_tracked(key, true);
+    if (history_is_tracked(key))
+        ESP_LOGI(TAG, "Historia wlaczona automatycznie: %s", key);
+    else
+        ESP_LOGW(TAG, "Brak wolnego slotu historii dla %s", key);
 }
 
 static esp_err_t handle_dashboard(httpd_req_t *req) {

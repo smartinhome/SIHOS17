@@ -798,6 +798,22 @@ static const char *PL_MONTHS[12] = {
     "lipca", "sierpnia", "września", "października", "listopada", "grudnia"
 };
 
+// Dzien tygodnia w mianowniku, indeksowany przez tm_wday (0 = niedziela).
+// Najszerszy - "poniedzialek" - ma 12 znakow, czyli 95 px; miesci sie z zapasem.
+static const char *PL_WDAYS[7] = {
+    "niedziela", "poniedziałek", "wtorek", "środa", "czwartek", "piątek", "sobota"
+};
+
+// Uklad dolnej czesci ekranu zegara. Tusz godziny (F32 x2 rysowany od y=19)
+// konczy sie na wierszu 70, panel ma 122 px wysokosci - na dzien tygodnia
+// i date zostaje pas 71..121, czyli 51 px. Dwie linie F16 co 18 px zajmuja
+// 29 px tuszu, wiec po wysrodkowaniu zostaje po 11 px luzu z gory i z dolu.
+// Wartosci sa policzone dla tych konkretnych fontow - przy zmianie skali
+// godziny trzeba je przeliczyc na nowo.
+#define CLOCK_WDAY_Y  80    // dzien tygodnia (tusz od 82)
+#define CLOCK_DATE_Y  98    // data          (tusz od 100)
+#define CLOCK_MSG_Y   89    // pojedyncza linia komunikatu, wysrodkowana w tym samym pasie
+
 // Czas przed synchronizacja SNTP stoi w 1970. Ponizej tego progu (2020-09-13)
 // pokazujemy komunikat zamiast falszywej daty.
 #define TIME_SYNCED_MIN 1600000000
@@ -814,7 +830,7 @@ static void draw_clock_page(int page_no, int total_pages) {
     time_t now = time(NULL);
     if (now < TIME_SYNCED_MIN) {
         fb_draw_text_center_scaled(&F32, LCD_W / 2, 19, "--:--", 2);
-        fb_draw_text_center(&F16, LCD_W / 2, 91, "Czekam na synchronizację");
+        fb_draw_text_center(&F16, LCD_W / 2, CLOCK_MSG_Y, "Czekam na synchronizację");
         return;
     }
 
@@ -824,10 +840,13 @@ static void draw_clock_page(int page_no, int total_pages) {
     snprintf(hhmm, sizeof(hhmm), "%02d:%02d", tm.tm_hour, tm.tm_min);
     fb_draw_text_center_scaled(&F32, LCD_W / 2, 19, hhmm, 2);
 
+    int wday = (tm.tm_wday >= 0 && tm.tm_wday < 7) ? tm.tm_wday : 0;
+    fb_draw_text_center(&F16, LCD_W / 2, CLOCK_WDAY_Y, PL_WDAYS[wday]);
+
     char date[48];
     int mon = (tm.tm_mon >= 0 && tm.tm_mon < 12) ? tm.tm_mon : 0;
     snprintf(date, sizeof(date), "%d %s %d", tm.tm_mday, PL_MONTHS[mon], tm.tm_year + 1900);
-    fb_draw_text_center(&F16, LCD_W / 2, 91, date);
+    fb_draw_text_center(&F16, LCD_W / 2, CLOCK_DATE_Y, date);
 }
 
 static void rebuild_pages(void) {

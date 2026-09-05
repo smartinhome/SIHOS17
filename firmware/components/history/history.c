@@ -62,6 +62,12 @@ typedef struct {
     bool     used;
     float    last_total;
     uint32_t last_ts;
+    // beta361: czas najstarszego rekordu (pierwsza ramka). TYLKO W RAM - nie
+    // trafia do h_*.bin, wiec format pliku sie nie zmienia. Liczony leniwie
+    // przy pierwszym zapytaniu i odswiezany po restarcie; po zawinieciu ringu
+    // (po latach) najstarszy rekord przesuwa sie do przodu, ale roznica jest
+    // widoczna dopiero po ponownym uruchomieniu modulu.
+    uint32_t first_ts;
     hist_bucket_t hours[HIST_HOURS];   int n_hours;
     hist_bucket_t days[HIST_DAYS];     int n_days;
     hist_bucket_t months[HIST_MONTHS]; int n_months;
@@ -401,11 +407,32 @@ static bool arc_read_header2(FILE *f, arc_hdr_t *h) {
 // SPIFFS nie zna plikow rzadkich - skok poza koniec pliku zawodzi, a niesprawdzony
 // fwrite pisze wtedy tam, gdzie akurat stoi strumien. Dozwolone sa dwa miejsca:
 // istniejacy rekord i dokladnie koniec pliku (powiekszenie ringu o jeden rekord).
+// beta361: czas NAJSTARSZEGO rekordu w archiwum godzinowym. Panel wyszarza
+// po nim dni sprzed pierwszej ramki. Czytamy jeden rekord z pozycji head -
+// wynik trafia do meter_hist_t.first_ts, wiec plik otwieramy raz na licznik,
+// a nie przy kazdym zapytaniu o liste.
+static uint32_t arc_first_ts(const char *id);
+
 static bool arc_seek_rec(FILE *f, int hdr, int phys) {
     long off = arc_rec_off2(hdr, phys);
     if (fseek(f, 0, SEEK_END) != 0) return false;
     if (off > ftell(f)) return false;          // dziura - tam pisac nie wolno
     return fseek(f, off, SEEK_SET) == 0;
+}
+
+static uint32_t arc_first_ts(const char *id) {
+    char path[64];
+    archive_path(id, path, sizeof(path));
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    arc_hdr_t h;
+    uint32_t ts = 0;
+    if (arc_read_header2(f, &h) && h.count > 0 && arc_seek_rec(f, h.hdr, h.head)) {
+        hist_bucket_t rec;
+        if (fread(&rec, sizeof(rec), 1, f) == 1) ts = rec.ts;
+    }
+    fclose(f);
+    return ts;
 }
 
 // Zapis naglowka v2 na poczatku pliku.
@@ -2394,10 +2421,28 @@ int history_list_json(char *buf, int buf_cap) {
     bool first = true;
     for (int i = 0; i < MAX_HIST_METERS; i++) {
         if (!s_meters[i] || !s_meters[i]->used) continue;
-        n += snprintf(buf + n, buf_cap - n, "%s{\"id\":\"%s\",\"kind\":%d,\"cumulative\":%d,\"last\":%.3f,\"ts\":%u,\"tracked\":%s}",
+        // Czas pierwszej ramki - liczony raz na licznik i pamietany w RAM.
+        if (!s_meters[i]->first_ts) {
+            uint32_t ft = arc_first_ts(s_meters[i]->id);
+            if (!ft) {   // brak archiwum (swiezy licznik) - najstarszy kubelek z RAM
+                if (s_meters[i]->n_days > 0)       ft = s_meters[i]->days[0].ts;
+                else if (s_meters[i]->n_hours > 0) ft = s_meters[i]->hours[0].ts;
+                else                               ft = s_meters[i]->last_ts;
+            }
+            s_meters[i]->first_ts = ft;
+        }
+        // snprintf zwraca dlugosc, ktora BY sie zapisala - bez clampowania n
+        // moglby przekroczyc bufor, a buf_cap-n podwinaloby sie do ogromnego
+        // size_t. Przy 24 kluczach wpis ma ~120 B, wiec bufor 1 kB byl za maly.
+        if (n >= buf_cap - 2) break;
+        int w = snprintf(buf + n, buf_cap - n,
+                      "%s{\"id\":\"%s\",\"kind\":%d,\"cumulative\":%d,\"last\":%.3f,\"ts\":%u,\"first\":%u,\"tracked\":%s}",
                       first ? "" : ",", s_meters[i]->id, s_meters[i]->kind, s_meters[i]->cumulative,
                       s_meters[i]->last_total, (unsigned)s_meters[i]->last_ts,
+                      (unsigned)s_meters[i]->first_ts,
                       history_is_tracked(s_meters[i]->id) ? "true" : "false");
+        if (w < 0 || w >= buf_cap - n) break;   // nie miesci sie - urwij czysto
+        n += w;
         first = false;
     }
     n += snprintf(buf + n, buf_cap - n, "]");

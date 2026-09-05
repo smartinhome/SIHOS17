@@ -107,7 +107,9 @@ static int read_body(httpd_req_t *req, char *buf, size_t max) {
 
 // ---------- Historia ----------
 static esp_err_t handle_history_list(httpd_req_t *req) {
-    static char buf[1024];
+    // 24 klucze x ~125 B (id do 40 znakow + wartosci) = ~3 kB. Bufor 1 kB
+    // urywal liste juz przy 9 kluczach.
+    static char buf[3200];
     history_list_json(buf, sizeof(buf));
     resp_json(req, buf);
     return ESP_OK;

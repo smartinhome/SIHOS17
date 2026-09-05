@@ -789,6 +789,21 @@
         Gdy zegar jest na ekranie, odświeżanie zgrywa się z pełną minutą — cyfra minut
         zmienia się dokładnie wtedy, kiedy powinna. Pozostałe strony odświeżają się co 60 s jak dotąd.
       </div>
+      <div class="actions-row">
+        <button class="btn" onclick="einkAction('next')" title="To samo, co krótkie naciśnięcie przycisku BOOT na module">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h13M13 6l6 6-6 6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          Następna strona
+        </button>
+        <button class="btn" onclick="einkAction('full')" title="Pełne przemalowanie panelu — usuwa zjawy po odświeżeniach częściowych">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 11a8 8 0 10-2.3 5.7M20 5v6h-6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          Pełne odświeżenie
+        </button>
+      </div>
+      <div class="check-desc">
+        „Następna strona” działa jak krótkie naciśnięcie przycisku BOOT.
+        „Pełne odświeżenie” przemalowuje panel na biało i czarno — trwa kilka sekund
+        i usuwa zjawy, które zostają po wielu odświeżeniach częściowych.
+      </div>
       <div id="eink-msg" class="msg"></div>
     </div>
   </section>
@@ -1005,6 +1020,23 @@ async function loadEinkClock(){
     var d=await(await fetch('/api/eink')).json();
     el.checked=!!d.clock;
   }catch(e){}
+}
+/* beta359: akcje chwilowe wyswietlacza. Moduł tylko przyjmuje zgloszenie -
+   rysowanie robi task e-ink, wiec odpowiedz wraca od razu, a ekran zmienia sie
+   ulamek sekundy pozniej. */
+async function einkAction(what){
+  var msg=document.getElementById('eink-msg');
+  var ok={next:'Przełączono na następną stronę.',
+          full:'Pełne odświeżenie uruchomione — panel mignie kilka razy.'};
+  if(msg){msg.className='msg';msg.textContent='Wysyłam do modułu...';}
+  try{
+    var r=await fetch('/api/eink',{method:'POST',headers:{'Content-Type':'application/json'},
+                                   body:JSON.stringify({action:what})});
+    if(!r.ok)throw 0;
+    if(msg){msg.className='msg ok';msg.textContent=ok[what]||'Wysłano';_msgFade(msg);}
+  }catch(e){
+    if(msg){msg.className='msg err';msg.textContent='Nie udało się wysłać polecenia.';}
+  }
 }
 async function saveEinkClock(){
   var el=document.getElementById('eink-clock'), msg=document.getElementById('eink-msg');

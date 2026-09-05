@@ -761,6 +761,19 @@ static esp_err_t handle_eink(httpd_req_t *req) {
     if (req->method == HTTP_POST) {
         char body[64];
         read_body(req, body, sizeof(body));
+        // Akcje chwilowe sprawdzamy PRZED flaga zegara: cialo {"action":...}
+        // nie zawiera klucza "clock", wiec wpadloby nizej w zapis clock=false
+        // i przy okazji wylaczalo strone zegara.
+        if (strstr(body, "\"action\":\"next\"")) {
+            display_eink_request_next_page();
+            resp_ok(req);
+            return ESP_OK;
+        }
+        if (strstr(body, "\"action\":\"full\"")) {
+            display_eink_request_full_refresh();
+            resp_ok(req);
+            return ESP_OK;
+        }
         bool on = (strstr(body, "\"clock\":true") != NULL);
         nvs_config_set_eink_clock(on);
         // Nie rysujemy tutaj: e-ink to SPI wspoldzielone z CC1101, a handler

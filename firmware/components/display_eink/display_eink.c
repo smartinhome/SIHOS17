@@ -259,10 +259,18 @@ static void eink_partial_refresh(void) {
 
 // Dyspozytor: pelne odswiezenie (ustawia base, czysci artefakty) przy pierwszym
 // odswiezeniu po starcie oraz raz na dobe o godzinie 3:00; pozostale czesciowe.
+// Ustawiane przez display_eink_request_full_refresh(); konsumowane przy
+// najblizszym rysowaniu. Pelne odswiezenie miga biela i czernia, ale czysci
+// zjawy nagromadzone po wielu odswiezeniach czesciowych.
+static volatile bool s_force_full = false;
+
 static void eink_refresh(void) {
     bool do_full = false;
 
-    if (!s_did_first_refresh) {
+    if (s_force_full) {
+        s_force_full = false;
+        do_full = true;
+    } else if (!s_did_first_refresh) {
         do_full = true;                 // pierwsze po restarcie (programowym/sprzetowym)
         s_did_first_refresh = true;
     } else {
@@ -942,12 +950,43 @@ void display_eink_wake(void) {
     if (s_wake) xSemaphoreGive(s_wake);
 }
 
+// Zadania z panelu. Sam zapis flagi + obudzenie tasku; rysowanie robi juz
+// refresh_task u siebie, pod eink_lock().
+static volatile bool s_req_next = false;
+static volatile bool s_req_full = false;
+
+void display_eink_request_next_page(void) {
+    s_req_next = true;
+    display_eink_wake();
+}
+
+void display_eink_request_full_refresh(void) {
+    s_req_full = true;
+    display_eink_wake();
+}
+
 static void refresh_task(void *arg) {
     (void)arg;
     // Pierwsze odswiezenie po 15 s (daj czas na pierwsze ramki i SNTP).
     vTaskDelay(pdMS_TO_TICKS(15000));
     while (1) {
-        if (!s_eink_paused) display_eink_refresh_pages();
+        if (!s_eink_paused) {
+            if (s_req_next) {
+                s_req_next = false;
+                display_eink_next_page();
+            } else if (s_req_full) {
+                s_req_full = false;
+                s_force_full = true;           // eink_refresh() zrobi pelne
+                display_eink_refresh_pages();
+            } else {
+                display_eink_refresh_pages();
+            }
+        }
+
+        // Semafor jest binarny, wiec dwa zgloszenia pod rzad daja tylko jeden
+        // token - drugie czekaloby do konca cyklu. Jesli cos jeszcze wisi,
+        // wracamy na poczatek petli zamiast isc spac.
+        if (s_req_next || s_req_full) continue;
 
         // Domyslnie cykl 60 s. Gdy na ekranie jest zegar, spimy do najblizszej
         // pelnej minuty - inaczej cyfra minut zmienialaby sie w losowym momencie

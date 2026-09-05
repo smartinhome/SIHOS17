@@ -39,6 +39,12 @@ void display_eink_first_page(void);
 // pin_button - GPIO przycisku BOOT (aktywny w stanie niskim).
 void display_eink_start_tasks(int pin_button);
 
+// Akcje chwilowe wyzwalane z panelu. Obie tylko ZGLASZAJA zadanie i budza
+// task e-ink - samo rysowanie idzie w jego watku, bo SPI jest wspoldzielone
+// z CC1101 i nie wolno go zajmowac z tasku serwera HTTP.
+void display_eink_request_next_page(void);      // to samo co krotkie BOOT
+void display_eink_request_full_refresh(void);   // pelne odswiezenie panelu
+
 // Obudz task odswiezania natychmiast (np. po zmianie ustawien w panelu).
 // Bezpieczne do wolania z handlera HTTP - nie dotyka SPI, tylko daje semafor.
 void display_eink_wake(void);

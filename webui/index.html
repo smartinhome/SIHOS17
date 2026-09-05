@@ -331,9 +331,18 @@
 #page-system .sec:nth-of-type(2){ order:2 }                       /* Sieć WiFi     */
 #page-system .sec:nth-of-type(3){ order:3 }                       /* MQTT          */
 #page-system .sec:nth-of-type(4){ grid-column:1 / -1; order:4 }   /* Diody LED     */
-#page-system .sec:nth-of-type(5){ order:5 }                       /* Data i czas   */
-#page-system .sec:nth-of-type(7){ order:6 }                       /* Logi          */
-#page-system .sec:nth-of-type(8){ grid-column:1 / -1; order:7 }   /* Kopia zapas.  */
+/* beta360: Data i czas rozciaga sie na dwa rzedy, a w prawej kolumnie stoja
+   nad soba Logi i Kopia zapasowa. Wczesniej Kopia szla przez cala szerokosc
+   pod spodem, a karta logow - sama w rzedzie obok wysokiej kolumny z zegarem -
+   byla rozciagana na jej wysokosc i zostawiala kilkaset pikseli pustki.
+   Logi dostaja align-self:start, wiec maja swoja naturalna wysokosc; luz
+   rzedu bierze na siebie Kopia, ktora ma co nim wypelnic. */
+#page-system .sec:nth-of-type(5){ order:5; grid-column:1; grid-row:span 2 }  /* Data i czas */
+#page-system .sec:nth-of-type(7){ order:6; grid-column:2; align-self:start } /* Logi        */
+#page-system .sec:nth-of-type(8){ order:7; grid-column:2 }                   /* Kopia zapas.*/
+/* W polowie szerokosci dwie kolumny w karcie kopii robia sie ciasne -
+   pobieranie i przywracanie ukladamy jedno pod drugim. */
+#page-system .sec:nth-of-type(8) .grid-2{ grid-template-columns:1fr }
 #page-system .sec:nth-of-type(6){ grid-column:1 / -1; order:8 }   /* OTA           */
 #page-system .sec:nth-of-type(9){ grid-column:1 / -1; order:9 }   /* Operacje      */
 
@@ -343,7 +352,10 @@
    + haslo) robi sie w tym ciasny i etykiety lamia sie na dwie linie. */
 @media(max-width:1100px){
   #page-system.active{ grid-template-columns:1fr; gap:20px }
-  #page-system .sec{ grid-column:1 / -1 }
+  /* Reset przypisan kolumn i rozpietosci z ukladu dwukolumnowego - bez tego
+     "grid-column:2" utworzyloby druga, niewidoczna kolumne. */
+  #page-system .sec{ grid-column:1 / -1 !important; grid-row:auto !important;
+                     align-self:auto !important }
 }
 
 /* 15. Karta reset fabryczny */

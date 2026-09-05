@@ -413,7 +413,7 @@ static esp_err_t handle_status(httpd_req_t *req) {
     snprintf(buf, sizeof(buf),
         "{\"version\":\"%s\",\"uptime_ms\":%" PRId64 ","
         "\"wifi_state\":\"%s\",\"wifi_rssi\":%d,"
-        "\"ssid\":\"%s\","
+        "\"ssid\":\"%s\",\"wifi_ch\":%d,"
         "\"wifi_disc_reason\":%d,"
         "\"ip\":\"%s\",\"meter_count\":%d,\"partition\":\"%s\"}",
         ota_get_running_version(),
@@ -421,6 +421,7 @@ static esp_err_t handle_status(httpd_req_t *req) {
         wifi_str[ws],
         wifi_manager_get_rssi(),
         scfg.wifi_ssid,
+        wifi_manager_get_channel(),
         wifi_manager_last_disc_reason(),
         ip,
         wmbus_decoder_get_seen_count(),

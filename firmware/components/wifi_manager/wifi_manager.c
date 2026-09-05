@@ -192,6 +192,12 @@ int wifi_manager_get_rssi(void) {
     return s_rssi;
 }
 
+int wifi_manager_get_channel(void) {
+    wifi_ap_record_t ap;
+    if (esp_wifi_sta_get_ap_info(&ap) != ESP_OK) return 0;
+    return ap.primary;
+}
+
 void wifi_manager_get_ip(char *buf, size_t len) {
     // W trybie AP s_ip zostaje "0.0.0.0" (jest ustawiany dopiero po uzyskaniu
     // adresu w sieci domowej), wiec adres bramki czytamy wprost z interfejsu AP.

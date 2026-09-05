@@ -15,6 +15,9 @@ wifi_state_t wifi_manager_get_state(void);
 // Ilu klientow jest podlaczonych do naszego AP (0 = nikt).
 int wifi_manager_ap_clients(void);
 int          wifi_manager_get_rssi(void);
+// Kanal AP, z ktorym jestesmy polaczeni (0 = brak polaczenia).
+// Z niego panel wyprowadza pasmo: 1-14 to 2,4 GHz, 32 i wyzej to 5 GHz.
+int          wifi_manager_get_channel(void);
 void         wifi_manager_get_ip(char *buf, size_t len);
 void         wifi_manager_reconnect(const char *ssid, const char *pass);
 

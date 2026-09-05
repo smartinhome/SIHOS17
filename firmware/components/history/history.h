@@ -5,7 +5,16 @@
 
 // Liczba kubelkow per rozdzielczosc (jak HA Energy, z zapasem)
 #define HIST_HOURS   168   // 7 dni godzinowo (w RAM)
-#define HIST_ARCHIVE_HOURS 17520  // 2 lata godzinowo (tylko na flash, ring buffer)
+// Pojemnosc ringu godzinowego dla NOWO zakladanych plikow archiwum.
+// Od beta362 kazdy plik nosi swoja pojemnosc w naglowku (format v3), wiec
+// zmiana tej stalej NIE rusza juz zebranych archiwow - stare pliki pracuja
+// dalej ze swoja pojemnoscia, dopoki nie zostana zmigrowane.
+// 87600 h = 10 lat = ~700 KB na sledzone pole. Partycja historii ma ~4.1 MB,
+// wiec przy kilku polach limitem robi sie miejsce, a nie czas - o to chodzilo.
+#define HIST_ARCHIVE_HOURS 87600
+// Pojemnosc plikow v1/v2 (do beta361 wlacznie) - byla zaszyta w kodzie, nie
+// w pliku. Potrzebna, zeby poprawnie odczytac archiwa sprzed migracji.
+#define HIST_ARCHIVE_HOURS_LEGACY 17520
 #define HIST_DAYS    90    // 90 dni
 #define HIST_MONTHS  24    // 24 miesiace
 #define HIST_YEARS   10    // 10 lat

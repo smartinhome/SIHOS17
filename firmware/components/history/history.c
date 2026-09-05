@@ -351,15 +351,27 @@ static void archive_path(const char *id, char *out, int cap) {
 #define ARC_HDR_BYTES (2 * (int)sizeof(int))                        // v1
 #define ARC_MAGIC_V2  0x53494832u                                   // "SIH2"
 #define ARC_HDR_V2    (int)(sizeof(uint32_t)*2 + sizeof(int)*2 + sizeof(float))
+// beta362: naglowek v3 = v2 + pojemnosc ringu zapisana w pliku.
+//   [u32 magic][u32 cap][int count][int head][u32 last_ts][float last_total]
+// Po co: do beta361 pozycja fizyczna rekordu i to (head+i) % STALA_Z_KODU.
+// Zmiana tej stalej zmieniala interpretacje WSZYSTKICH istniejacych plikow -
+// dane nie znikaly, ale rozjezdzala sie ich kolejnosc. Z pojemnoscia w pliku
+// limit mozna podnosic bez ruszania archiwow: stary plik czyta sie jego
+// wlasna pojemnoscia, nowy - biezaca.
+#define ARC_MAGIC_V3  0x53494833u                                   // "SIH3"
+#define ARC_HDR_V3    (int)(sizeof(uint32_t)*3 + sizeof(int)*2 + sizeof(float))
 #define ARC_DAY_BUF 64   // rekordow do bufora dnia (doba=24, zapas)
 static hist_bucket_t s_day_buf[ARC_DAY_BUF];
 
 typedef struct {
     int count, head;
-    int hdr;               // rozmiar naglowka w bajtach (v1/v2)
-    bool v2;
-    uint32_t last_ts;      // tylko v2 (0 w v1)
-    float last_total;      // tylko v2
+    int cap;               // pojemnosc ringu TEGO pliku (v3: z naglowka,
+                           // v1/v2: HIST_ARCHIVE_HOURS_LEGACY)
+    int hdr;               // rozmiar naglowka w bajtach (v1/v2/v3)
+    bool v2;               // v2 lub v3 (czyli: jest magic, last_ts, last_total)
+    bool v3;               // ma pojemnosc w naglowku
+    uint32_t last_ts;      // tylko v2/v3 (0 w v1)
+    float last_total;      // tylko v2/v3
 } arc_hdr_t;
 
 static long arc_rec_off2(int hdr, int phys);   // beta351: uzywa jej arc_seek_rec
@@ -370,8 +382,20 @@ static bool arc_read_header2(FILE *f, arc_hdr_t *h) {
     uint32_t first = 0;
     if (fseek(f, 0, SEEK_SET) != 0) return false;
     if (fread(&first, sizeof(uint32_t), 1, f) != 1) return false;
-    if (first == ARC_MAGIC_V2) {
-        h->v2 = true; h->hdr = ARC_HDR_V2;
+    if (first == ARC_MAGIC_V3) {
+        h->v2 = true; h->v3 = true; h->hdr = ARC_HDR_V3;
+        uint32_t cap = 0;
+        if (fread(&cap, sizeof(uint32_t), 1, f) != 1) return false;
+        // Pojemnosc z pliku musi byc sensowna - inaczej caly ring liczylby sie
+        // wzgledem smiecia. Gorna granica z zapasem ponad biezaca stala.
+        if (cap < 24 || cap > (uint32_t)HIST_ARCHIVE_HOURS * 4u) return false;
+        h->cap = (int)cap;
+        if (fread(&h->count, sizeof(int), 1, f) != 1) return false;
+        if (fread(&h->head,  sizeof(int), 1, f) != 1) return false;
+        if (fread(&h->last_ts, sizeof(uint32_t), 1, f) != 1) return false;
+        if (fread(&h->last_total, sizeof(float), 1, f) != 1) return false;
+    } else if (first == ARC_MAGIC_V2) {
+        h->v2 = true; h->hdr = ARC_HDR_V2; h->cap = HIST_ARCHIVE_HOURS_LEGACY;
         if (fread(&h->count, sizeof(int), 1, f) != 1) return false;
         if (fread(&h->head,  sizeof(int), 1, f) != 1) return false;
         if (fread(&h->last_ts, sizeof(uint32_t), 1, f) != 1) return false;
@@ -379,13 +403,13 @@ static bool arc_read_header2(FILE *f, arc_hdr_t *h) {
     } else {
         // v1: pierwszy int to count. Poprawny count jest maly (<=17520), wiec
         // nie koliduje z magic.
-        h->v2 = false; h->hdr = ARC_HDR_BYTES;
+        h->v2 = false; h->hdr = ARC_HDR_BYTES; h->cap = HIST_ARCHIVE_HOURS_LEGACY;
         h->count = (int)first;
         if (fread(&h->head, sizeof(int), 1, f) != 1) return false;
     }
     // Wykryj niezgodny format: count/head poza zakresem -> traktuj jako pusty.
-    if (h->count < 0 || h->count > HIST_ARCHIVE_HOURS) { h->count = 0; h->head = 0; return false; }
-    if (h->head < 0 || h->head >= HIST_ARCHIVE_HOURS)  { h->count = 0; h->head = 0; return false; }
+    if (h->count < 0 || h->count > h->cap) { h->count = 0; h->head = 0; return false; }
+    if (h->head < 0 || h->head >= h->cap)   { h->count = 0; h->head = 0; return false; }
     // beta351: count musi sie miescic w tym, co plik NAPRAWDE zawiera. Naglowek
     // potrafil obiecywac o jeden rekord wiecej niz zapisano (patrz komentarz przy
     // archive_append_hour) - a wtedy sonda "ostatniego rekordu" celowala w EOF,
@@ -397,7 +421,7 @@ static bool arc_read_header2(FILE *f, arc_hdr_t *h) {
         long sz = ftell(f);
         long recs = (sz - (long)h->hdr) / (long)sizeof(hist_bucket_t);
         if (recs < 0) recs = 0;
-        if (recs > HIST_ARCHIVE_HOURS) recs = HIST_ARCHIVE_HOURS;
+        if (recs > h->cap) recs = h->cap;
         if ((long)h->count > recs) h->count = (int)recs;
     }
     return true;
@@ -442,13 +466,22 @@ static uint32_t arc_first_ts(const char *id) {
 // widzial 'v2 z nieprawidlowa count' -> ponizej bounds-check ustawial count=0,
 // glowe=0 i traktowal archiwum jako puste (17520 rekordow godzinowych efektywnie
 // porzucone). Pojedynczy fwrite = SPIFFS albo zapisuje calosc, albo nie zapisuje.
-static void arc_write_header_v2(FILE *f, const arc_hdr_t *h) {
-    uint8_t buf[ARC_HDR_V2];   // ARC_HDR_V2 = 20 (uint32 + int*2 + uint32 + float)
+// beta362: pisze naglowek w formacie TEGO pliku - v3 gdy plik ma pojemnosc
+// w naglowku, v2 dla starszych. Nadpisanie v2 naglowkiem v3 przesunieloby
+// wszystkie rekordy o 4 bajty, wiec format musi zostac taki, jaki zastalismy.
+static void arc_write_header(FILE *f, const arc_hdr_t *h) {
+    uint8_t buf[ARC_HDR_V3];   // v3 = 24 B, v2 = 20 B
     _Static_assert(ARC_HDR_V2 == sizeof(uint32_t) + sizeof(int)*2 + sizeof(uint32_t) + sizeof(float),
-                   "arc_hdr_t rozmiar zmieniony - aktualizuj arc_write_header_v2");
-    uint32_t magic = ARC_MAGIC_V2;
+                   "arc_hdr_t rozmiar zmieniony - aktualizuj arc_write_header");
+    _Static_assert(ARC_HDR_V3 == ARC_HDR_V2 + (int)sizeof(uint32_t),
+                   "v3 to v2 + pojemnosc");
+    uint32_t magic = h->v3 ? ARC_MAGIC_V3 : ARC_MAGIC_V2;
     size_t off = 0;
     memcpy(buf + off, &magic,        sizeof(uint32_t)); off += sizeof(uint32_t);
+    if (h->v3) {
+        uint32_t cap = (uint32_t)h->cap;
+        memcpy(buf + off, &cap,      sizeof(uint32_t)); off += sizeof(uint32_t);
+    }
     memcpy(buf + off, &h->count,     sizeof(int));      off += sizeof(int);
     memcpy(buf + off, &h->head,      sizeof(int));      off += sizeof(int);
     memcpy(buf + off, &h->last_ts,   sizeof(uint32_t)); off += sizeof(uint32_t);
@@ -465,7 +498,7 @@ static long arc_rec_off2(int hdr, int phys) {
 // Jednorazowa migracja pliku v1 -> v2: kopiowanie strumieniowe do pliku .t,
 // potem rename. Rekordy przenoszone 1:1 (fizyczny uklad ringu zachowany),
 // wiec nie tracimy zebranego archiwum. Zwraca otwarty plik v2 (r+b) lub NULL.
-static FILE *arc_migrate_v2(const char *path, arc_hdr_t *h) {
+static FILE *arc_migrate_v3(const char *path, arc_hdr_t *h) {
     // Stala krotka nazwa pliku tymczasowego: SPIFFS ogranicza nazwe obiektu do
     // 31 znakow (z wiodacym '/'), a najdluzsze archiwa (np. ha_..._napiecie_l1_v.bin
     // = 30 zn.) z sufiksem juz sie nie miescily - fopen padal i migracja byla
@@ -478,17 +511,44 @@ static FILE *arc_migrate_v2(const char *path, arc_hdr_t *h) {
     if (!src) return NULL;
     FILE *dst = fopen(tmp, "w+b");
     if (!dst) { fclose(src); return NULL; }
-    h->v2 = true; h->hdr = ARC_HDR_V2; h->last_ts = 0; h->last_total = 0;
-    arc_write_header_v2(dst, h);
-    // Skopiuj region rekordow w calosci (uklad fizyczny bez zmian).
-    static uint8_t cp[1024];
-    fseek(src, ARC_HDR_BYTES, SEEK_SET);
-    size_t n;
-    while ((n = fread(cp, 1, sizeof(cp), src)) > 0) {
-        if (fwrite(cp, 1, n, dst) != n) { fclose(src); fclose(dst); remove(tmp); return NULL; }
+    // beta362: przepisujemy rekordy w kolejnosci LOGICZNEJ (od najstarszego),
+    // a nie 1:1 fizycznie jak przy v1->v2. Powod: nowy plik ma inna pojemnosc
+    // ringu, wiec pozycja (head+i) % cap oznaczalaby co innego. Po migracji
+    // head=0, czyli kolejnosc fizyczna = logiczna i pojemnosc mozna zmieniac
+    // dowolnie. Zaden rekord nie przepada - przenosimy dokladnie count sztuk.
+    const int old_cap  = h->cap;
+    const int old_head = h->head;
+    const int old_hdr  = h->hdr;
+    int n_rec = h->count;
+    if (n_rec > old_cap) n_rec = old_cap;
+    if (n_rec > HIST_ARCHIVE_HOURS) n_rec = HIST_ARCHIVE_HOURS;   // nowa pojemnosc
+
+    arc_hdr_t nh = *h;
+    nh.v2 = true; nh.v3 = true; nh.hdr = ARC_HDR_V3;
+    nh.cap = HIST_ARCHIVE_HOURS;
+    nh.head = 0;
+    nh.count = n_rec;
+    arc_write_header(dst, &nh);
+
+    // Ring rozwijamy dwoma ciaglymi kawalkami: [head..cap) i [0..reszta).
+    static hist_bucket_t cp[128];
+    int done = 0;
+    bool ok = true;
+    while (done < n_rec && ok) {
+        int phys = (old_head + done) % old_cap;
+        int run  = old_cap - phys;                 // ile bez zawiniecia
+        if (run > n_rec - done) run = n_rec - done;
+        if (run > (int)(sizeof(cp) / sizeof(cp[0]))) run = (int)(sizeof(cp) / sizeof(cp[0]));
+        if (fseek(src, arc_rec_off2(old_hdr, phys), SEEK_SET) != 0) { ok = false; break; }
+        size_t got = fread(cp, sizeof(hist_bucket_t), (size_t)run, src);
+        if ((int)got != run) { ok = false; break; }
+        if (fwrite(cp, sizeof(hist_bucket_t), got, dst) != got) { ok = false; break; }
+        done += run;
     }
     fclose(src);
     fclose(dst);
+    if (!ok) { remove(tmp); return NULL; }
+    *h = nh;
     // Marker celu PRZED usunieciem oryginalu: utrata zasilania w oknie
     // remove(path)..rename(tmp,path) nie zgubi archiwum - history_init
     // dokonczy przenoszenie przy nastepnym starcie.
@@ -497,7 +557,8 @@ static FILE *arc_migrate_v2(const char *path, arc_hdr_t *h) {
     remove(path);
     if (rename(tmp, path) != 0) { remove(tmp); remove("/spiffs/arc_mig.dst"); return NULL; }
     remove("/spiffs/arc_mig.dst");
-    ESP_LOGI(TAG, "Archiwum %s zmigrowane do formatu v2", path);
+    ESP_LOGI(TAG, "Archiwum %s zmigrowane do v3 (%d rekordow, pojemnosc %d)",
+             path, h->count, h->cap);
     return fopen(path, "r+b");
 }
 
@@ -516,7 +577,7 @@ static bool arc_validate_repair(const char *path, FILE *f, arc_hdr_t *h) {
     hist_bucket_t rec;
     // Pierwszy i ostatni logiczny rekord.
     int p_first = h->head;
-    int p_last  = (h->head + h->count - 1) % HIST_ARCHIVE_HOURS;
+    int p_last  = (h->head + h->count - 1) % h->cap;
     bool first_ok = (fseek(f, arc_rec_off2(h->hdr, p_first), SEEK_SET) == 0 &&
                      fread(&rec, sizeof(rec), 1, f) == 1 &&
                      rec.ts >= ARC_TS_MIN && rec.ts <= ARC_TS_MAX);
@@ -531,7 +592,7 @@ static bool arc_validate_repair(const char *path, FILE *f, arc_hdr_t *h) {
     int valid = 1;
     uint32_t prev_ts = last.ts;
     for (int back = 1; back < h->count; back++) {
-        int phys = (p_last - back + HIST_ARCHIVE_HOURS) % HIST_ARCHIVE_HOURS;
+        int phys = (p_last - back + h->cap) % h->cap;
         if (fseek(f, arc_rec_off2(h->hdr, phys), SEEK_SET) != 0) break;
         if (fread(&rec, sizeof(rec), 1, f) != 1) break;
         if (rec.ts < ARC_TS_MIN || rec.ts > ARC_TS_MAX) break;
@@ -539,13 +600,13 @@ static bool arc_validate_repair(const char *path, FILE *f, arc_hdr_t *h) {
         prev_ts = rec.ts;
         valid++;
     }
-    int new_head = (p_last - (valid - 1) + HIST_ARCHIVE_HOURS) % HIST_ARCHIVE_HOURS;
+    int new_head = (p_last - (valid - 1) + h->cap) % h->cap;
     ESP_LOGW(TAG, "Archiwum %s: naprawa naglowka (bylo count=%d head=%d, jest count=%d head=%d)",
              path, h->count, h->head, valid, new_head);
     h->count = valid;
     h->head  = new_head;
     if (h->v2) {
-        arc_write_header_v2(f, h);
+        arc_write_header(f, h);
     } else {
         fseek(f, 0, SEEK_SET);
         fwrite(&h->count, sizeof(int), 1, f);
@@ -575,13 +636,13 @@ static void archive_append_hour(const char *id, uint32_t hour_ts, float total,
         f = fopen(path, "w+b");
         if (!f) { ESP_LOGW(TAG, "nie moge utworzyc archiwum %s", path); return; }
         memset(&h, 0, sizeof(h));
-        h.v2 = true; h.hdr = ARC_HDR_V2;
+        h.v2 = true; h.v3 = true; h.hdr = ARC_HDR_V3; h.cap = HIST_ARCHIVE_HOURS;
         // beta351: naglowek NATYCHMIAST. Bez tego plik ma 0 B, a zapis pierwszego
         // rekordu celuje w offset 20 - czyli poza koniec pustego pliku. Na SPIFFS
         // taki fseek zawodzi, rekord ladowal na pozycji 0 i byl zaraz przykrywany
         // naglowkiem. Plik zostawal o jeden rekord w tyle za licznikiem count na
         // zawsze, a to wlasnie ono rozkrecalo lawine powtorzonych godzin.
-        arc_write_header_v2(f, &h);
+        arc_write_header(f, &h);
     } else {
         if (!arc_read_header2(f, &h)) {
             // Nieczytelny naglowek podczas pracy: NIE kasuj po cichu. Zachowaj
@@ -595,12 +656,13 @@ static void archive_append_hour(const char *id, uint32_t hour_ts, float total,
             f = fopen(path, "w+b");
             if (!f) { ESP_LOGW(TAG, "nie moge odtworzyc archiwum %s", path); return; }
             memset(&h, 0, sizeof(h));
-            h.v2 = true; h.hdr = ARC_HDR_V2;
-            arc_write_header_v2(f, &h);   // beta351: jak wyzej
-        } else if (!h.v2) {
-            // Poprawny plik v1 - jednorazowa migracja do v2 (bez utraty danych).
+            h.v2 = true; h.v3 = true; h.hdr = ARC_HDR_V3; h.cap = HIST_ARCHIVE_HOURS;
+            arc_write_header(f, &h);   // beta351: jak wyzej
+        } else if (!h.v3) {
+            // Plik v1 albo v2 - jednorazowa migracja do v3 (bez utraty danych).
+            // Dopiero po niej plik dostaje wieksza pojemnosc ringu.
             fclose(f);
-            f = arc_migrate_v2(path, &h);
+            f = arc_migrate_v3(path, &h);
             if (!f) { ESP_LOGW(TAG, "migracja archiwum %s nieudana", path); return; }
         }
     }
@@ -609,7 +671,7 @@ static void archive_append_hour(const char *id, uint32_t hour_ts, float total,
 
     // Czy ostatnia zapisana godzina == hour_ts? (aktualizacja biezacej godziny)
     if (h.count > 0) {
-        int last_phys = (h.head + h.count - 1) % HIST_ARCHIVE_HOURS;
+        int last_phys = (h.head + h.count - 1) % h.cap;
         hist_bucket_t last;
         if (fseek(f, arc_rec_off2(h.hdr, last_phys), SEEK_SET) == 0 &&
             fread(&last, sizeof(last), 1, f) == 1 && last.ts == hour_ts) {
@@ -617,7 +679,7 @@ static void archive_append_hour(const char *id, uint32_t hour_ts, float total,
             last.total = total;
             fseek(f, arc_rec_off2(h.hdr, last_phys), SEEK_SET);
             fwrite(&last, sizeof(last), 1, f);
-            arc_write_header_v2(f, &h);
+            arc_write_header(f, &h);
             // FAZA 3a: wymus flush do flasha przed fclose. Bez tego SPIFFS trzyma
             // rekord w bufferze VFS - reset zasilania w oknie ~kilku sek moglby
             // stracic zapisane odczyty mimo tego ze fclose sam nie flushuje SPIFFS.
@@ -629,11 +691,11 @@ static void archive_append_hour(const char *id, uint32_t hour_ts, float total,
 
     // Nowa godzina - dopisz rekord. Gdy pelne, przesun head (nadpisz najstarszy).
     int write_phys;
-    if (h.count >= HIST_ARCHIVE_HOURS) {
+    if (h.count >= h.cap) {
         write_phys = h.head;                        // nadpisz najstarszy
-        h.head = (h.head + 1) % HIST_ARCHIVE_HOURS; // przesun okno
+        h.head = (h.head + 1) % h.cap; // przesun okno
     } else {
-        write_phys = (h.head + h.count) % HIST_ARCHIVE_HOURS;
+        write_phys = (h.head + h.count) % h.cap;
         h.count++;
     }
     hist_bucket_t rec = { hour_ts, total };
@@ -645,8 +707,32 @@ static void archive_append_hour(const char *id, uint32_t hour_ts, float total,
         fclose(f);
         return;
     }
-    fwrite(&rec, sizeof(rec), 1, f);
-    arc_write_header_v2(f, &h);
+    size_t wrote = fwrite(&rec, sizeof(rec), 1, f);
+    if (wrote != 1 && h.v3 && h.count > 1) {
+        // beta362: flash pelny - plik nie moze juz rosnac. Zamiast przestac
+        // zbierac dane (tak bylo do tej pory: nieudany fwrite i cisza),
+        // ZAMRAZAMY pojemnosc ringu na tym, co juz lezy na dysku, i od tej
+        // chwili nadpisujemy najstarszy rekord W MIEJSCU. Rozmiar pliku sie
+        // nie zmienia, wiec nie trzeba ani bajta wolnego miejsca - a historia
+        // toczy sie dalej, tracac tylko najstarsze godziny. Pojemnosc siedzi
+        // w naglowku, wiec po restarcie plik pamieta, ze jest juz ringiem.
+        h.count--;                        // cofnij nieudane powiekszenie
+        h.cap = h.count;                  // ring = to, co realnie jest w pliku
+        write_phys = h.head;              // najstarszy rekord
+        h.head = (h.head + 1) % h.cap;
+        if (arc_seek_rec(f, h.hdr, write_phys)) {
+            wrote = fwrite(&rec, sizeof(rec), 1, f);
+            if (wrote == 1)
+                ESP_LOGW(TAG, "Archiwum %s: brak miejsca na flashu - pojemnosc zamrozona "
+                              "na %d rekordach, nadpisuje najstarsze", path, h.cap);
+        }
+    }
+    if (wrote != 1) {
+        ESP_LOGE(TAG, "Archiwum %s: zapis rekordu nieudany (errno=%d)", path, errno);
+        fclose(f);
+        return;
+    }
+    arc_write_header(f, &h);
     flush_to_flash(f);
     fclose(f);
 }
@@ -893,7 +979,7 @@ static void archive_rebuild_from_hours(meter_hist_t *m) {
             uint32_t last = 0;
             if (h.count > 0) {
                 hist_bucket_t rec;
-                int phys = (h.head + h.count - 1) % HIST_ARCHIVE_HOURS;
+                int phys = (h.head + h.count - 1) % h.cap;
                 if (fseek(f, arc_rec_off2(h.hdr, phys), SEEK_SET) == 0 &&
                     fread(&rec, sizeof(rec), 1, f) == 1) last = rec.ts;
             }
@@ -901,10 +987,10 @@ static void archive_rebuild_from_hours(meter_hist_t *m) {
             for (int i = 0; i < m->n_hours; i++) {
                 if (m->hours[i].ts <= last) continue;
                 int wp;
-                if (h.count >= HIST_ARCHIVE_HOURS) {
-                    wp = h.head; h.head = (h.head + 1) % HIST_ARCHIVE_HOURS;
+                if (h.count >= h.cap) {
+                    wp = h.head; h.head = (h.head + 1) % h.cap;
                 } else {
-                    wp = (h.head + h.count) % HIST_ARCHIVE_HOURS; h.count++;
+                    wp = (h.head + h.count) % h.cap; h.count++;
                 }
                 if (!arc_seek_rec(f, h.hdr, wp)) {   // beta351: jak w append
                     ESP_LOGE(TAG, "Archiwum %s: rekord %d poza plikiem - przerywam uzupelnianie",
@@ -917,7 +1003,7 @@ static void archive_rebuild_from_hours(meter_hist_t *m) {
             if (added) {
                 if (h.v2) {
                     if (h.last_ts < m->last_ts) { h.last_ts = m->last_ts; h.last_total = m->last_total; }
-                    arc_write_header_v2(f, &h);
+                    arc_write_header(f, &h);
                 } else {
                     fseek(f, 0, SEEK_SET);
                     fwrite(&h.count, sizeof(int), 1, f);
@@ -945,9 +1031,10 @@ static void archive_rebuild_from_hours(meter_hist_t *m) {
     // Brak pliku lub naglowek nie do odczytania: utworz od nowa z godzin w RAM.
     f = fopen(path, "w+b");
     if (!f) { ESP_LOGW(TAG, "nie moge odbudowac archiwum %s", path); return; }
-    arc_hdr_t h = { .count = m->n_hours, .head = 0, .hdr = ARC_HDR_V2, .v2 = true,
+    arc_hdr_t h = { .count = m->n_hours, .head = 0, .cap = HIST_ARCHIVE_HOURS,
+                    .hdr = ARC_HDR_V3, .v2 = true, .v3 = true,
                     .last_ts = m->last_ts, .last_total = m->last_total };
-    arc_write_header_v2(f, &h);
+    arc_write_header(f, &h);
     for (int i = 0; i < m->n_hours; i++) {
         fwrite(&m->hours[i], sizeof(hist_bucket_t), 1, f);
     }
@@ -972,7 +1059,7 @@ static void restore_from_archive(meter_hist_t *m) {
     bool hdr_ok = arc_read_header2(f, &h);
     if (hdr_ok && h.count > 0) {
         hist_bucket_t rec;
-        int phys = (h.head + h.count - 1) % HIST_ARCHIVE_HOURS;   // najnowszy rekord
+        int phys = (h.head + h.count - 1) % h.cap;   // najnowszy rekord
         if (fseek(f, arc_rec_off2(h.hdr, phys), SEEK_SET) == 0 &&
             fread(&rec, sizeof(rec), 1, f) == 1 &&
             rec.ts >= 1700000000) {
@@ -1002,12 +1089,12 @@ static void restore_from_archive(meter_hist_t *m) {
     // starcie - nie czekajac na pierwsza ramke - i zapisz najlepszy znany stan.
     // Dzieki temu kazdy KOLEJNY restart (nawet chwile pozniej) ma naglowek v2,
     // a ramki odbierane od teraz aktualizuja go co odczyt.
-    if (hdr_ok && !h.v2) {
-        FILE *fm = arc_migrate_v2(path, &h);
+    if (hdr_ok && !h.v3) {
+        FILE *fm = arc_migrate_v3(path, &h);
         if (fm) {
             h.last_ts = m->last_ts;
             h.last_total = m->last_total;
-            arc_write_header_v2(fm, &h);
+            arc_write_header(fm, &h);
             fclose(fm);
         } else {
             ESP_LOGW(TAG, "migracja archiwum %s przy starcie nieudana", path);
@@ -1692,7 +1779,7 @@ void history_init(void) {
                     arc_hdr_t ah;
                     if (arc_read_header2(af, &ah) && ah.count > 0) {
                         hist_bucket_t r0, r1;
-                        int p0 = ah.head, p1 = (ah.head + ah.count - 1) % HIST_ARCHIVE_HOURS;
+                        int p0 = ah.head, p1 = (ah.head + ah.count - 1) % ah.cap;
                         if (fseek(af, arc_rec_off2(ah.hdr, p0), SEEK_SET) == 0 &&
                             fread(&r0, sizeof(r0), 1, af) == 1 &&
                             fseek(af, arc_rec_off2(ah.hdr, p1), SEEK_SET) == 0 &&
@@ -1932,13 +2019,13 @@ static bool total_at_ts(meter_hist_t *m, uint32_t t, float *out) {
         hist_bucket_t rec;
         while (lo < hi) {
             int mid = lo + (hi - lo) / 2;
-            int phys = (h.head + mid) % HIST_ARCHIVE_HOURS;
+            int phys = (h.head + mid) % h.cap;
             if (fseek(f, arc_rec_off2(h.hdr, phys), SEEK_SET) != 0 ||
                 fread(&rec, sizeof(rec), 1, f) != 1) { lo = 0; break; }
             if (rec.ts <= t) lo = mid + 1; else hi = mid;
         }
         if (lo > 0) {                            // rekord tuz przed/na t
-            int phys = (h.head + lo - 1) % HIST_ARCHIVE_HOURS;
+            int phys = (h.head + lo - 1) % h.cap;
             if (fseek(f, arc_rec_off2(h.hdr, phys), SEEK_SET) == 0 &&
                 fread(&rec, sizeof(rec), 1, f) == 1 && rec.ts <= t) {
                 if (!found || rec.ts >= best_ts) { best = rec.total; found = true; }
@@ -2116,7 +2203,7 @@ int history_debug_day(const char *key, uint32_t day_ts, char *buf, int cap) {
     int lo = 0, hi = h.count;
     while (lo < hi) {
         int mid = lo + (hi - lo) / 2;
-        int phys = (h.head + mid) % HIST_ARCHIVE_HOURS;
+        int phys = (h.head + mid) % h.cap;
         if (fseek(f, arc_rec_off2(h.hdr, phys), SEEK_SET) != 0 ||
             fread(&rec, sizeof(rec), 1, f) != 1) { lo = h.count; break; }
         if (rec.ts < d0) lo = mid + 1; else hi = mid;
@@ -2125,7 +2212,7 @@ int history_debug_day(const char *key, uint32_t day_ts, char *buf, int cap) {
     n += snprintf(buf + n, cap - n, ",\"arc_w_dobie\":[");
     int cnt = 0;
     for (int i = lo; i < h.count && cnt < 26 && n < cap - 80; i++) {
-        int phys = (h.head + i) % HIST_ARCHIVE_HOURS;
+        int phys = (h.head + i) % h.cap;
         if (fseek(f, arc_rec_off2(h.hdr, phys), SEEK_SET) != 0) break;
         if (fread(&rec, sizeof(rec), 1, f) != 1) break;
         if (rec.ts >= d1) break;
@@ -2137,7 +2224,7 @@ int history_debug_day(const char *key, uint32_t day_ts, char *buf, int cap) {
     }
     n += snprintf(buf + n, cap - n, "],\"arc_znalezionych\":%d", cnt);
     if (lo > 0) {
-        int phys = (h.head + lo - 1) % HIST_ARCHIVE_HOURS;
+        int phys = (h.head + lo - 1) % h.cap;
         if (fseek(f, arc_rec_off2(h.hdr, phys), SEEK_SET) == 0 &&
             fread(&rec, sizeof(rec), 1, f) == 1)
             n += snprintf(buf + n, cap - n, ",\"prev_rekord\":{\"ts\":%u,\"v\":%.3f}",
@@ -2259,14 +2346,14 @@ int history_get_day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf
                 int lo = 0, hi = h.count;
                 while (lo < hi) {
                     int mid = lo + (hi - lo) / 2;
-                    int phys = (h.head + mid) % HIST_ARCHIVE_HOURS;
+                    int phys = (h.head + mid) % h.cap;
                     if (fseek(f, arc_rec_off2(h.hdr, phys), SEEK_SET) != 0 ||
                         fread(&rec, sizeof(rec), 1, f) != 1) { lo = h.count; break; }
                     if (rec.ts < d0) lo = mid + 1; else hi = mid;
                 }
                 // Rekord poprzedzajacy dobe - baza roznicy dla pierwszej godziny.
                 if (lo > 0 && lo <= h.count) {
-                    int phys = (h.head + lo - 1) % HIST_ARCHIVE_HOURS;
+                    int phys = (h.head + lo - 1) % h.cap;
                     if (fseek(f, arc_rec_off2(h.hdr, phys), SEEK_SET) == 0 &&
                         fread(&rec, sizeof(rec), 1, f) == 1 && rec.ts < d0) {
                         prev = rec; has_prev = true;
@@ -2279,7 +2366,7 @@ int history_get_day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf
                 // roznica wzgledem poprzednika przy rownych ts wynosi zero,
                 // slupek z prawdziwym zuzyciem byl nadpisywany zerami.
                 for (int i = lo; i < h.count && nb < ARC_DAY_BUF; i++) {
-                    int phys = (h.head + i) % HIST_ARCHIVE_HOURS;
+                    int phys = (h.head + i) % h.cap;
                     if (fseek(f, arc_rec_off2(h.hdr, phys), SEEK_SET) != 0) break;
                     if (fread(&rec, sizeof(rec), 1, f) != 1) break;
                     if (rec.ts >= d1) break;
@@ -2310,7 +2397,6 @@ int history_get_day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf
     // zjedzony przez uszkodzony ring), a RAM ma te godziny. Wczesniej reguła
     // "albo RAM, albo archiwum" dawala PUSTY wykres mimo danych w pamieci.
     if (m) {
-        uint32_t newest = (nb > 0) ? s_day_buf[nb-1].ts : 0;
         for (int i = 0; i < m->n_hours && nb < ARC_DAY_BUF; i++) {
             uint32_t t = m->hours[i].ts;
             if (t < d0) {

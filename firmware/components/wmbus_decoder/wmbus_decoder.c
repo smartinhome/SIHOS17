@@ -127,7 +127,10 @@ static void apply_config(meter_data_t *m) {
     const sih_config_t *cfg = nvs_config_ptr();
     for (int i = 0; i < cfg->meter_count; i++) {
         if (strcasecmp(cfg->meters[i].id_hex, m->id_hex) == 0) {
-            strlcpy(m->type, cfg->meters[i].type, sizeof(m->type));
+            // beta363: pusty typ w konfiguracji NIE kasuje typu rozpoznanego
+            // z ramki. Wpis bez typu powstaje przy samym zapisie klucza AES.
+            if (cfg->meters[i].type[0])
+                strlcpy(m->type, cfg->meters[i].type, sizeof(m->type));
             strlcpy(m->name, cfg->meters[i].name, sizeof(m->name));
             return;
         }
@@ -181,6 +184,21 @@ static bool decode_frame(const uint8_t *data, size_t len, meter_data_t *out) {
         case 0x62:
         case 0x72: strlcpy(out->type, "water",       sizeof(out->type)); break;
         default:   strlcpy(out->type, "unknown",     sizeof(out->type)); break;
+    }
+
+    // beta363: nazwa sterownika ma pierwszenstwo nad samym medium - niesie
+    // MODEL, wiec panel pokaze "Techem MK Radio 4 (woda)" zamiast ogolnego
+    // "Licznik wody", a ikone dobierze po nazwie sterownika tak samo jak dla
+    // IZAR-a. Zgadywanki konczace sie znakiem zapytania ("woda?", "gaz?")
+    // pomijamy - dla nich medium jest lepszym zrodlem.
+    const char *drv = meter_total_driver_name(data, len);
+    if (drv && drv[0] && !strchr(drv, '?')) {
+        strlcpy(out->type, drv, sizeof(out->type));
+    } else if (drv && strcmp(drv, "techem?") == 0 &&
+               strcmp(out->type, "unknown") == 0) {
+        // Techem o medium spoza tabeli. Nie rozrozniamy cieplej i zimnej wody -
+        // kazdy rozpoznany Techem to licznik wody i taka ma dostac ikone.
+        strlcpy(out->type, "techem", sizeof(out->type));
     }
 
     mtf_field_t fields[MTF_MAX_FIELDS];
@@ -382,6 +400,11 @@ void wmbus_decoder_on_frame(const wmbus_frame_t *frame) {
         m->last_seen = tmp.last_seen;
         m->last_seen_unix = tmp.last_seen_unix;
         m->valid     = true;
+        // beta363: typ rozpoznany z ramki. Dotad NIE byl przepisywany z tmp,
+        // wiec trwaly slot mial typ wylacznie z konfiguracji - a licznik bez
+        // zapisanego klucza AES (np. Techem) szedl do panelu z pustym typem
+        // i dostawal ikone ze znakiem zapytania.
+        if (tmp.type[0]) strlcpy(m->type, tmp.type, sizeof(m->type));
         // Kopiuj pola z tmp
         for (int i = 0; i < tmp.field_count; i++)
             add_field(m, tmp.fields[i].field,

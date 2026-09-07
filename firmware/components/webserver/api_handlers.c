@@ -559,6 +559,10 @@ static const char *default_field_for_type(const char *type) {
     if (strcasecmp(type, "izar") == 0 ||
         strcasecmp(type, "apator") == 0 ||
         strcasecmp(type, "apator162") == 0 ||
+        // beta363: napisy, ktore od teraz zwraca dekoder wprost z nazwy
+        // sterownika - bez nich automat historii spadal na awaryjny skan pol.
+        strcasecmp(type, "apator16-2") == 0 ||
+        strcasecmp(type, "techem") == 0 ||
         strcasecmp(type, "op041a") == 0 ||
         strcasecmp(type, "mkradio4") == 0 ||
         strcasecmp(type, "water") == 0 ||

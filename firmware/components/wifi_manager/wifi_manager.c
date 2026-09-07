@@ -135,6 +135,13 @@ static void start_ap(const sih_config_t *cfg) {
     s_state = WIFI_STATE_AP_MODE;
     mqtt_pub_stop();   // w trybie AP nie ma dostepu do brokera
     esp_wifi_disconnect();   // STA ma byc bezczynny, tylko do skanowania
+    // beta364: sterownik WiFi (tag "wifi", mala litera - nie nasz "WIFI") mimo
+    // pustej konfiguracji STA i tak co chwile zglasza "Haven't to connect to a
+    // suitable AP now!". Nie ma SSID, wiec nie ma proby polaczenia, przestrojenia
+    // kanalu ani przerwy w pracy AP - to sam komunikat, nie zdarzenie. Kilkanascie
+    // linii na sekunde wypychalo jednak z 8 KB bufora wszystko inne, wiec zakladka
+    // Logi w trybie AP byla bezuzyteczna. Bledy sterownika nadal widac.
+    esp_log_level_set("wifi", ESP_LOG_ERROR);
     ESP_LOGI(TAG, "Tryb AP: %s", cfg->ap_ssid);
 }
 

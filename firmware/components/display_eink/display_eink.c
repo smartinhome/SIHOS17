@@ -572,20 +572,52 @@ static const char* key_field(const char *key) {
     return c ? c + 1 : "";
 }
 
-// Narysuj jedna strone licznika (wszystkie sledzone pola tego ID).
+// Czy wartosc pola jest AKTUALNA. Pola chwilowe (moc, prad, napiecie) maja sens
+// tylko dopoki licznik je nadaje. Klucz, ktory zostal w tracked.txt po zmianie
+// zestawu pol (albo po wylaczeniu ich w liczniku), nadal ma plik na flashu i
+// history_display_summary zwraca dla niego ostatnia zapamietana liczbe - stad
+// na ekranie potrafil wisiec zamrozony odczyt typu "Qc: 399", ktorego w panelu
+// nie da sie odznaczyc, bo pola nie ma juz na liscie ramki.
+#define EINK_FIELD_MAX_AGE 7200      // 2 h; ramki przychodza co kilka minut
+
+static bool field_is_fresh(const hist_display_t *s) {
+    if (!s->has_value) return false;
+    uint32_t now = (uint32_t)time(NULL);
+    if (now < 1700000000) return true;          // brak synchronizacji czasu
+    if (s->last_ts > now) return true;
+    return (now - s->last_ts) <= EINK_FIELD_MAX_AGE;
+}
+
+// Narysuj jedna strone licznika (pola tego ID wybrane przez uzytkownika).
 static void draw_meter_page(const char *id, int page_no, int total_pages) {
     fb_clear_white();
 
     // Zbierz wszystkie sledzone klucze tego licznika.
+    char all[8][40];
+    int nall = history_keys_for_id(id, all, 8);
+
+    // beta366: rysujemy WYLACZNIE pola zaznaczone przez uzytkownika.
+    // Gdy licznik ma wybrane pola dashboardu - one rzadza (odznaczenie pola w
+    // panelu ma natychmiast zdejmowac je z e-inka). Gdy zaden nie jest wybrany,
+    // zostaje stare zachowanie: pola sledzone w historii.
     char keys[8][40];
-    int nkeys = history_keys_for_id(id, keys, 8);
+    int nkeys = 0;
+    bool any_dash = false;
+    for (int i = 0; i < nall; i++)
+        if (nvs_config_dash_field_is_set(all[i])) { any_dash = true; break; }
+    for (int i = 0; i < nall; i++) {
+        if (any_dash && !nvs_config_dash_field_is_set(all[i])) continue;
+        strncpy(keys[nkeys], all[i], 39);
+        keys[nkeys][39] = 0;
+        nkeys++;
+    }
 
     // Wybierz glowne pole kumulacyjne (energia/woda/gaz) - do duzego widoku.
     int main_idx = -1;
     hist_display_t main_s; bool main_ok = false;
     for (int i = 0; i < nkeys; i++) {
         hist_display_t s;
-        if (history_display_summary(keys[i], &s) && s.cumulative) {
+        if (history_display_summary(keys[i], &s) && s.cumulative && s.has_value) {
             main_idx = i; main_s = s; main_ok = true; break;
         }
     }
@@ -645,6 +677,12 @@ static void draw_meter_page(const char *id, int page_no, int total_pages) {
             const char *f = key_field(keys[i]);
             hist_display_t fs;
             if (!history_display_summary(keys[i], &fs) || !fs.has_value) continue;
+            // Prawa kolumna to WARTOSCI CHWILOWE. Licznik kumulacyjny (np.
+            // energia_bierna_c_kvarh) trafial tu przez luzne strstr("bierna")
+            // i byl rysowany jako "Qc: 399", czyli stan licznika w kVARh udajacy
+            // moc bierna w VAR. Kumulacyjne pola maja swoj widok glowny.
+            if (fs.cumulative) continue;
+            if (!field_is_fresh(&fs)) continue;
             // UWAGA: dopasowanie DOKLADNE. Luzne strstr(f,"moc") lapalo tez
             // moc_bierna_l_var / moc_bierna_c_var / moc_max_kw i pokazywalo je
             // jako "akt. pobor" przemnozone przez 1000 (bledna wartosc w W).
@@ -658,7 +696,7 @@ static void draw_meter_page(const char *id, int page_no, int total_pages) {
                 fb_draw_text_inv(&F24, pw_x, 18, pw);
                 int lbl_w = fb_text_width(&F14, "akt. pobór");
                 fb_draw_text(&F14, LCD_W - lbl_w - 4, 44, "akt. pobór");
-            } else if (strstr(f, "bierna")) {
+            } else if (strncmp(f, "moc_bierna", 10) == 0) {
                 // Moc bierna w VAR (NIE mnozyc przez 1000 - juz jest w VAR).
                 char v[16];
                 snprintf(v, sizeof(v), "%.0f", fs.last_total);
@@ -714,6 +752,7 @@ static void draw_meter_page(const char *id, int page_no, int total_pages) {
         for (int i = 0; i < nkeys && y < 104; i++) {
             hist_display_t s;
             if (!history_display_summary(keys[i], &s) || !s.has_value) continue;
+            if (!s.cumulative && !field_is_fresh(&s)) continue;
             const char *f = key_field(keys[i]);
             const char *unit = field_unit(f);
             char line[40];

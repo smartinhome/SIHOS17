@@ -627,23 +627,26 @@ static void draw_meter_page(const char *id, int page_no, int total_pages) {
     fb_clear_white();
 
     // Zbierz wszystkie sledzone klucze tego licznika.
-    char all[8][40];
-    int nall = history_keys_for_id(id, all, 8);
+    char keys[8][40];
+    int nkeys = history_keys_for_id(id, keys, 8);
 
     // beta366: rysujemy WYLACZNIE pola zaznaczone przez uzytkownika.
     // Gdy licznik ma wybrane pola dashboardu - one rzadza (odznaczenie pola w
     // panelu ma natychmiast zdejmowac je z e-inka). Gdy zaden nie jest wybrany,
     // zostaje stare zachowanie: pola sledzone w historii.
-    char keys[8][40];
-    int nkeys = 0;
+    // beta371: filtrujemy W MIEJSCU. Druga tablica all[8][40] dokladala 320 B do
+    // ramki tej funkcji (672 -> 992 B) i przepelniala stos taska przycisku.
     bool any_dash = false;
-    for (int i = 0; i < nall; i++)
-        if (nvs_config_dash_field_is_set(all[i])) { any_dash = true; break; }
-    for (int i = 0; i < nall; i++) {
-        if (any_dash && !nvs_config_dash_field_is_set(all[i])) continue;
-        strncpy(keys[nkeys], all[i], 39);
-        keys[nkeys][39] = 0;
-        nkeys++;
+    for (int i = 0; i < nkeys; i++)
+        if (nvs_config_dash_field_is_set(keys[i])) { any_dash = true; break; }
+    if (any_dash) {
+        int w = 0;
+        for (int i = 0; i < nkeys; i++) {
+            if (!nvs_config_dash_field_is_set(keys[i])) continue;
+            if (w != i) memcpy(keys[w], keys[i], sizeof(keys[0]));
+            w++;
+        }
+        nkeys = w;
     }
     // beta368: staly porzadek na ekranie zamiast kolejnosci wlaczania pol.
     sort_keys_by_field(keys, nkeys);
@@ -1006,8 +1009,14 @@ static void button_task(void *arg) {
                 held += 20;
                 if (held > 5000) break;
             }
-            if (held >= LONG_MS) display_eink_first_page();
-            else if (held >= 40)  display_eink_next_page();  // odfiltruj drgania <40ms
+            // beta371: przycisk NIE rysuje sam. Rysowanie strony licznika
+            // potrzebuje ~2,5 KB stosu (draw_meter_page + odczyt historii z
+            // flasha + SPI), a ten task ma 3 KB - po rozbudowie draw_meter_page
+            // konczylo sie to przepelnieniem stosu i restartem modulu. Teraz
+            // idzie ta sama droga co przyciski w panelu: flaga + obudzenie
+            // taska odswiezania, ktory ma wlasne 4 KB.
+            if (held >= LONG_MS) display_eink_request_first_page();
+            else if (held >= 40)  display_eink_request_next_page();  // odfiltruj drgania <40ms
             prev_up = false;
         } else if (!down) {
             prev_up = true;
@@ -1029,9 +1038,15 @@ void display_eink_wake(void) {
 // refresh_task u siebie, pod eink_lock().
 static volatile bool s_req_next = false;
 static volatile bool s_req_full = false;
+static volatile bool s_req_first = false;
 
 void display_eink_request_next_page(void) {
     s_req_next = true;
+    display_eink_wake();
+}
+
+void display_eink_request_first_page(void) {
+    s_req_first = true;
     display_eink_wake();
 }
 
@@ -1045,10 +1060,17 @@ static void refresh_task(void *arg) {
     // Pierwsze odswiezenie po 15 s (daj czas na pierwsze ramki i SNTP).
     vTaskDelay(pdMS_TO_TICKS(15000));
     while (1) {
-        if (!s_eink_paused) {
+        if (s_eink_paused) {
+            // W pauzie (OTA, restart) nic nie rysujemy - zaleglych zadan nie
+            // trzymamy, bo inaczej ponizsze "continue" krecilo by petle w kolko.
+            s_req_next = s_req_full = s_req_first = false;
+        } else {
             if (s_req_next) {
                 s_req_next = false;
                 display_eink_next_page();
+            } else if (s_req_first) {
+                s_req_first = false;
+                display_eink_first_page();
             } else if (s_req_full) {
                 s_req_full = false;
                 s_force_full = true;           // eink_refresh() zrobi pelne
@@ -1061,7 +1083,7 @@ static void refresh_task(void *arg) {
         // Semafor jest binarny, wiec dwa zgloszenia pod rzad daja tylko jeden
         // token - drugie czekaloby do konca cyklu. Jesli cos jeszcze wisi,
         // wracamy na poczatek petli zamiast isc spac.
-        if (s_req_next || s_req_full) continue;
+        if (s_req_next || s_req_full || s_req_first) continue;
 
         // Domyslnie cykl 60 s. Gdy na ekranie jest zegar, spimy do najblizszej
         // pelnej minuty - inaczej cyfra minut zmienialaby sie w losowym momencie

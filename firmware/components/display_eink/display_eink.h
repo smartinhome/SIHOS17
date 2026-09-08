@@ -43,6 +43,7 @@ void display_eink_start_tasks(int pin_button);
 // task e-ink - samo rysowanie idzie w jego watku, bo SPI jest wspoldzielone
 // z CC1101 i nie wolno go zajmowac z tasku serwera HTTP.
 void display_eink_request_next_page(void);      // to samo co krotkie BOOT
+void display_eink_request_first_page(void);     // to samo co dlugie BOOT
 void display_eink_request_full_refresh(void);   // pelne odswiezenie panelu
 
 // Obudz task odswiezania natychmiast (np. po zmianie ustawien w panelu).

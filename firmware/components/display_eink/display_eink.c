@@ -572,6 +572,40 @@ static const char* key_field(const char *key) {
     return c ? c + 1 : "";
 }
 
+// beta368: ranga pola = miejsce w stalym porzadku na ekranie. Bez tego pola
+// szly w kolejnosci WLACZANIA w panelu (tak trzyma je tracked.txt), wiec po
+// kilku zmianach napiecia wypadaly np. "L2 L3 L1". Nic nie bylo sortowane po
+// wartosci - teraz sortujemy po nazwie pola.
+static int field_rank(const char *f) {
+    int phase = 0;
+    if      (strstr(f, "l1")) phase = 1;
+    else if (strstr(f, "l2")) phase = 2;
+    else if (strstr(f, "l3")) phase = 3;
+    if (strcmp(f, "moc_kw") == 0)          return 0;
+    if (strncmp(f, "moc_bierna", 10) == 0) return 10 + (strstr(f, "_c_") ? 1 : 0);
+    if (strncmp(f, "prad", 4) == 0)        return 20 + phase;
+    if (strncmp(f, "napiecie", 8) == 0)    return 30 + phase;
+    return 40 + phase;   // kumulacyjne i nierozpoznane - jedna wspolna ranga
+}
+
+// Sortowanie przez wstawianie: kluczy jest najwyzej 8, a metoda jest STABILNA.
+// Stabilnosc jest tu istotna - wszystkie pola kumulacyjne maja range 40, wiec
+// zachowuja dotychczasowa kolejnosc i glownym polem duzego widoku zostaje
+// dokladnie to samo co przedtem.
+static void sort_keys_by_field(char keys[][40], int n) {
+    for (int i = 1; i < n; i++) {
+        char cur[40];
+        memcpy(cur, keys[i], 40);
+        int r = field_rank(key_field(cur));
+        int j = i - 1;
+        while (j >= 0 && field_rank(key_field(keys[j])) > r) {
+            memcpy(keys[j + 1], keys[j], 40);
+            j--;
+        }
+        memcpy(keys[j + 1], cur, 40);
+    }
+}
+
 // Czy wartosc pola jest AKTUALNA. Pola chwilowe (moc, prad, napiecie) maja sens
 // tylko dopoki licznik je nadaje. Klucz, ktory zostal w tracked.txt po zmianie
 // zestawu pol (albo po wylaczeniu ich w liczniku), nadal ma plik na flashu i
@@ -611,6 +645,8 @@ static void draw_meter_page(const char *id, int page_no, int total_pages) {
         keys[nkeys][39] = 0;
         nkeys++;
     }
+    // beta368: staly porzadek na ekranie zamiast kolejnosci wlaczania pol.
+    sort_keys_by_field(keys, nkeys);
 
     // Wybierz glowne pole kumulacyjne (energia/woda/gaz) - do duzego widoku.
     int main_idx = -1;

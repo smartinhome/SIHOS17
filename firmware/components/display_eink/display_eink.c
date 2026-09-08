@@ -582,7 +582,6 @@ static int field_rank(const char *f) {
     else if (strstr(f, "l2")) phase = 2;
     else if (strstr(f, "l3")) phase = 3;
     if (strcmp(f, "moc_kw") == 0)          return 0;
-    if (strncmp(f, "moc_bierna", 10) == 0) return 10 + (strstr(f, "_c_") ? 1 : 0);
     if (strncmp(f, "prad", 4) == 0)        return 20 + phase;
     if (strncmp(f, "napiecie", 8) == 0)    return 30 + phase;
     return 40 + phase;   // kumulacyjne i nierozpoznane - jedna wspolna ranga
@@ -630,24 +629,10 @@ static void draw_meter_page(const char *id, int page_no, int total_pages) {
     char keys[8][40];
     int nkeys = history_keys_for_id(id, keys, 8);
 
-    // beta366: rysujemy WYLACZNIE pola zaznaczone przez uzytkownika.
-    // Gdy licznik ma wybrane pola dashboardu - one rzadza (odznaczenie pola w
-    // panelu ma natychmiast zdejmowac je z e-inka). Gdy zaden nie jest wybrany,
-    // zostaje stare zachowanie: pola sledzone w historii.
-    // beta371: filtrujemy W MIEJSCU. Druga tablica all[8][40] dokladala 320 B do
-    // ramki tej funkcji (672 -> 992 B) i przepelniala stos taska przycisku.
-    bool any_dash = false;
-    for (int i = 0; i < nkeys; i++)
-        if (nvs_config_dash_field_is_set(keys[i])) { any_dash = true; break; }
-    if (any_dash) {
-        int w = 0;
-        for (int i = 0; i < nkeys; i++) {
-            if (!nvs_config_dash_field_is_set(keys[i])) continue;
-            if (w != i) memcpy(keys[w], keys[i], sizeof(keys[0]));
-            w++;
-        }
-        nkeys = w;
-    }
+    // beta372: o zawartosci ekranu decyduje WYLACZNIE sledzenie w historii.
+    // Wczesniej (beta366) rzadzil wybor pol dashboardu, wiec zaznaczenie mocy
+    // biernej "na dashboard" wyrzucalo z e-inka napiecia i wstawialo w ich
+    // miejsce Qc. Dashboard i e-ink to teraz dwie niezalezne rzeczy.
     // beta368: staly porzadek na ekranie zamiast kolejnosci wlaczania pol.
     sort_keys_by_field(keys, nkeys);
 
@@ -736,15 +721,10 @@ static void draw_meter_page(const char *id, int page_no, int total_pages) {
                 int lbl_w = fb_text_width(&F14, "akt. pobór");
                 fb_draw_text(&F14, LCD_W - lbl_w - 4, 44, "akt. pobór");
             } else if (strncmp(f, "moc_bierna", 10) == 0) {
-                // Moc bierna w VAR (NIE mnozyc przez 1000 - juz jest w VAR).
-                char v[16];
-                snprintf(v, sizeof(v), "%.0f", fs.last_total);
-                const char *lbl = strstr(f, "_c_") ? "Qc:" : "Ql:";
-                if (volt_y <= 90) {
-                    fb_draw_text(&F14, 188, volt_y, lbl);
-                    fb_draw_text(&F14, 210, volt_y, v);
-                    volt_y += 14;
-                }
+                // beta372: moc bierna (Qc/Ql) NIE idzie na e-ink. Na 250x122
+                // mieszcza sie trzy wiersze i zajmowala miejsce napiec, ktore
+                // sa tu wazniejsze. W panelu (dashboard, historia) zostaje.
+                continue;
             } else if (strncmp(f, "prad", 4) == 0) {
                 // Prad fazowy w amperach.
                 char v[16];
@@ -793,6 +773,7 @@ static void draw_meter_page(const char *id, int page_no, int total_pages) {
             if (!history_display_summary(keys[i], &s) || !s.has_value) continue;
             if (!s.cumulative && !field_is_fresh(&s)) continue;
             const char *f = key_field(keys[i]);
+            if (strncmp(f, "moc_bierna", 10) == 0) continue;   // beta372: tylko panel
             const char *unit = field_unit(f);
             char line[40];
             snprintf(line, sizeof(line), "%s:", field_label(f));

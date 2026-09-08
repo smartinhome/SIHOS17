@@ -211,17 +211,26 @@ static esp_err_t handle_history_day(httpd_req_t *req) {
     // Krzywa dnia 1-min (pola chwilowe): do 1440 punktow (~40KB JSON) -
     // strumieniowanie chunked zamiast jednego wielkiego bufora.
     hist_bucket_t *pts = malloc(HIST_CURVE * sizeof(hist_bucket_t));
+    // beta370: obwiednia maksimow. Brak RAM na te tablice nie jest bledem -
+    // wykres narysuje sie wtedy bez tla, jak przed ta wersja.
+    float *pmax = pts ? malloc(HIST_CURVE * sizeof(float)) : NULL;
     if (pts) {
-        int np = history_curve_day(id, day_ts, pts, HIST_CURVE);
+        int np = history_curve_day(id, day_ts, pts, pmax, HIST_CURVE);
         if (np > 0) {
             httpd_resp_set_type(req, "application/json");
             char chunk[2048];
             int n = snprintf(chunk, sizeof(chunk),
                              "{\"id\":\"%s\",\"cumulative\":0,\"curve\":1,\"points\":[", id);
             for (int i = 0; i < np; i++) {
-                n += snprintf(chunk + n, sizeof(chunk) - n, "%s{\"t\":%u,\"v\":%.3f}",
+                n += snprintf(chunk + n, sizeof(chunk) - n, "%s{\"t\":%u,\"v\":%.3f",
                               i ? "," : "", (unsigned)pts[i].ts, pts[i].total);
-                if (n > (int)sizeof(chunk) - 48) {
+                // beta370: maksimum kubelka jako "m". Wartosc mniejsza od sredniej
+                // znaczy "brak danych" - wtedy pola nie wypisujemy, a panel rysuje
+                // sama linie (doby sprzed tej wersji wygladaja jak dotad).
+                if (pmax && pmax[i] >= pts[i].total)
+                    n += snprintf(chunk + n, sizeof(chunk) - n, ",\"m\":%.3f", pmax[i]);
+                n += snprintf(chunk + n, sizeof(chunk) - n, "}");
+                if (n > (int)sizeof(chunk) - 80) {
                     httpd_resp_send_chunk(req, chunk, n);
                     n = 0;
                 }
@@ -229,11 +238,12 @@ static esp_err_t handle_history_day(httpd_req_t *req) {
             n += snprintf(chunk + n, sizeof(chunk) - n, "]}");
             httpd_resp_send_chunk(req, chunk, n);
             httpd_resp_send_chunk(req, NULL, 0);
-            free(pts);
+            free(pts); free(pmax);
             return ESP_OK;
         }
         free(pts);
     }
+    free(pmax);
 
     // Pola kumulacyjne (slupki godzinowe) - dotychczasowa sciezka buforowana.
     char *buf = malloc(12288);

@@ -93,6 +93,16 @@ typedef struct {
     // dnia po flashu jest NULL, wczoraj fallback do archiwum godzinnego (jak dotad).
     hist_bucket_t *curve_yesterday;    int n_curve_yesterday;
     uint32_t curve_yesterday_day_ts;   // TS doby (floor_day) dla ktorej to jest wczoraj
+    // beta370: obwiednia maksimow. curve_max[i] to najwyzsza probka kubelka
+    // curve[i] - te same indeksy, ta sama dlugosc n_curve. Osobna tablica
+    // float zamiast trzeciego pola w hist_bucket_t, bo ten typ opisuje takze
+    // godziny, doby i lata (pliki h_ i ha_), gdzie maksimum nie ma sensu.
+    // Umowa: max < srednia oznacza "nieznane" (maksimum okna nie moze byc
+    // mniejsze od jego sredniej), wiec kubelki sprzed aktualizacji - zera w
+    // swiezo zaalokowanej tablicy - same sie odsiewaja przy rysowaniu.
+    float   *curve_max;                // NULL gdy pole spoza curve_max_wanted()
+    float   *curve_yesterday_max;
+    float    curve_run_max;            // maksimum OTWARTEGO kubelka
     // Stan licznika o polnocy - REZERWA na pierwsze godziny po instalacji, gdy
     // nie ma jeszcze kubelka sprzed polnocy. TYLKO W RAM (nie zapisywane): po
     // restarcie w srodku dnia baza jest nieznana i liczenie MUSI spasc na
@@ -152,9 +162,24 @@ static uint32_t floor_hour(uint32_t t)  { return t - (t % 3600); }
 
 #define CURVE_HEAP_RESERVE (60 * 1024)
 
+// beta370: obwiednia maksimow tylko tam, gdzie szczyt niesie informacje.
+// Moc czynna i bierna - bo interesuje nas, kiedy pobor naprawde skoczyl.
+// Napiecia - bo skok i zapad to zdarzenia, ktore srednia z 5 minut zaciera.
+// Prady i reszta zostaja przy samej sredniej: nie placimy pamiecia za dane,
+// ktorych nikt nie oglada.
+static bool curve_max_wanted(const char *key) {
+    if (!key) return false;
+    const char *f = strchr(key, ':');
+    f = f ? f + 1 : key;
+    return strcmp(f, "moc_kw") == 0 ||
+           strncmp(f, "moc_bierna", 10) == 0 ||
+           strncmp(f, "napiecie", 8) == 0;
+}
+
 static bool ensure_curve(meter_hist_t *m) {
     if (m->curve) return true;
     size_t need = HIST_CURVE * sizeof(hist_bucket_t);
+    if (curve_max_wanted(m->id)) need += HIST_CURVE * sizeof(float);
     size_t freeb = heap_caps_get_free_size(MALLOC_CAP_8BIT);
     if (freeb < need + CURVE_HEAP_RESERVE) {
         ESP_LOGW(TAG, "%s: brak RAM na krzywa minutowa (wolne %u B) - dane godzinowe",
@@ -164,6 +189,13 @@ static bool ensure_curve(meter_hist_t *m) {
     }
     m->curve = calloc(HIST_CURVE, sizeof(hist_bucket_t));
     if (!m->curve) { m->n_curve = 0; return false; }
+    // beta370: brak RAM na obwiednie nie jest bledem - krzywa srednich dziala
+    // dalej, po prostu bez tla maksimow.
+    if (!m->curve_max && curve_max_wanted(m->id)) {
+        m->curve_max = calloc(HIST_CURVE, sizeof(float));
+        if (!m->curve_max)
+            ESP_LOGW(TAG, "%s: brak RAM na obwiednie maksimow", m->id);
+    }
     return true;
 }
 static void free_curve(meter_hist_t *m) {
@@ -171,6 +203,10 @@ static void free_curve(meter_hist_t *m) {
     m->n_curve = 0;
     // FAZA 5a: curve_yesterday zwalniane razem - alokowane parami przy rotacji.
     if (m->curve_yesterday) { free(m->curve_yesterday); m->curve_yesterday = NULL; }
+    // beta370: obwiednie ida razem z krzywymi, ktore opisuja.
+    if (m->curve_max) { free(m->curve_max); m->curve_max = NULL; }
+    if (m->curve_yesterday_max) { free(m->curve_yesterday_max); m->curve_yesterday_max = NULL; }
+    m->curve_run_max = 0.0f;
     m->n_curve_yesterday = 0;
     m->curve_yesterday_day_ts = 0;
     m->curve_sum = 0.0f;
@@ -184,7 +220,36 @@ static uint32_t floor_day(uint32_t t);
 static void series_update(hist_bucket_t *arr, int *n, int cap, uint32_t bts, float total);
 // FAZA 9b: dopisanie ZAMKNIETEGO kubelka 5-min do archiwum hc_*.bin na flashu
 // (definicja przy pozostalych funkcjach archiwum - potrzebuje safe_key()).
-static void curve_archive_append(const char *id, uint32_t bucket_ts, float value);
+// beta370: maxfile=false -> hc_*.bin (srednie, jak dotad), true -> hm_*.bin
+// (maksima, plik zakladany dopiero po tej aktualizacji).
+static void curve_archive_append(const char *id, uint32_t bucket_ts, float value,
+                                 bool maxfile);
+
+// beta370: series_update dla krzywej - utrzymuje curve[] i curve_max[] w
+// idealnej zgodnosci indeksow. Osobne wywolanie series_update dla kazdej
+// tablicy rozjechaloby je przy przewijaniu ringu (memmove w jednej, brak
+// w drugiej), a caly odczyt opiera sie na tym, ze indeks i znaczy w obu to samo.
+static void curve_update(meter_hist_t *m, uint32_t bts, float avg, float mx) {
+    int *n = &m->n_curve;
+    if (*n > 0 && m->curve[*n - 1].ts == bts) {
+        m->curve[*n - 1].total = avg;
+        if (m->curve_max) m->curve_max[*n - 1] = mx;
+        return;
+    }
+    if (*n < HIST_CURVE) {
+        m->curve[*n].ts = bts; m->curve[*n].total = avg;
+        if (m->curve_max) m->curve_max[*n] = mx;
+        (*n)++;
+        return;
+    }
+    memmove(m->curve, m->curve + 1, (HIST_CURVE - 1) * sizeof(hist_bucket_t));
+    m->curve[HIST_CURVE - 1].ts = bts;
+    m->curve[HIST_CURVE - 1].total = avg;
+    if (m->curve_max) {
+        memmove(m->curve_max, m->curve_max + 1, (HIST_CURVE - 1) * sizeof(float));
+        m->curve_max[HIST_CURVE - 1] = mx;
+    }
+}
 
 // FAZA 5a: dodaje probke do krzywej dnia z running average.
 // - Detekcja przejscia bucketu 5-min: zamyka poprzedni sredniej (sum/count),
@@ -205,18 +270,25 @@ static void curve_add_sample_avg(meter_hist_t *m, float value, uint32_t ts_unix)
             // Zamknij ostatni bucket poprzedniej doby (jesli byla otwarta srednia).
             if (m->curve_count > 0) {
                 float avg = m->curve_sum / (float)m->curve_count;
-                series_update(m->curve, &m->n_curve, HIST_CURVE,
-                              m->curve_bucket_ts, avg);
+                curve_update(m, m->curve_bucket_ts, avg, m->curve_run_max);
                 // FAZA 9b: ostatni kubelek doby trafia na flash zanim curve[]
                 // zostanie wyczyszczona pod nowa dobe.
-                curve_archive_append(m->id, m->curve_bucket_ts, avg);
+                curve_archive_append(m->id, m->curve_bucket_ts, avg, false);
+                if (m->curve_max)
+                    curve_archive_append(m->id, m->curve_bucket_ts, m->curve_run_max, true);
             }
             // Alokuj curve_yesterday jesli jeszcze nie ma (pierwszy dzien po flashu = NULL).
             if (!m->curve_yesterday) {
                 m->curve_yesterday = calloc(HIST_CURVE, sizeof(hist_bucket_t));
             }
+            // beta370: obwiednia rotuje razem z krzywa, inaczej wczoraj mialoby
+            // tlo z dzisiaj. Alokacja leniwa, tak samo jak curve_yesterday.
+            if (m->curve_max && !m->curve_yesterday_max)
+                m->curve_yesterday_max = calloc(HIST_CURVE, sizeof(float));
             if (m->curve_yesterday) {
                 memcpy(m->curve_yesterday, m->curve, HIST_CURVE * sizeof(hist_bucket_t));
+                if (m->curve_yesterday_max && m->curve_max)
+                    memcpy(m->curve_yesterday_max, m->curve_max, HIST_CURVE * sizeof(float));
                 m->n_curve_yesterday = m->n_curve;
                 m->curve_yesterday_day_ts = old_day;
                 ESP_LOGI(TAG, "%s: curve->curve_yesterday (%d pkt, day_ts=%u)",
@@ -230,7 +302,9 @@ static void curve_add_sample_avg(meter_hist_t *m, float value, uint32_t ts_unix)
             m->curve_sum = 0.0f;
             m->curve_count = 0;
             m->curve_bucket_ts = 0;
+            m->curve_run_max = 0.0f;
             memset(m->curve, 0, HIST_CURVE * sizeof(hist_bucket_t));
+            if (m->curve_max) memset(m->curve_max, 0, HIST_CURVE * sizeof(float));
         }
     }
 
@@ -238,16 +312,19 @@ static void curve_add_sample_avg(meter_hist_t *m, float value, uint32_t ts_unix)
     if (m->curve_bucket_ts != bucket_ts) {
         if (m->curve_count > 0 && m->curve_bucket_ts != 0) {
             float avg = m->curve_sum / (float)m->curve_count;
-            series_update(m->curve, &m->n_curve, HIST_CURVE,
-                          m->curve_bucket_ts, avg);
+            curve_update(m, m->curve_bucket_ts, avg, m->curve_run_max);
             // FAZA 9b: kubelek jest domkniety - zapisz go do archiwum 5-min.
             // Jeden zapis na 5 min na pole (60x rzadziej niz archiwum godzinowe,
             // ktore pisze co ramke) - zuzycie flasha praktycznie bez zmian.
-            curve_archive_append(m->id, m->curve_bucket_ts, avg);
+            curve_archive_append(m->id, m->curve_bucket_ts, avg, false);
+            // beta370: drugi plik, ten sam rytm zapisu.
+            if (m->curve_max)
+                curve_archive_append(m->id, m->curve_bucket_ts, m->curve_run_max, true);
         }
         m->curve_bucket_ts = bucket_ts;
         m->curve_sum = 0.0f;
         m->curve_count = 0;
+        m->curve_run_max = value;      // beta370: nowe okno zaczyna sie od tej probki
     }
 
     // 3. Dodaj probke do biezacej sredniej + zapisz partial average do curve
@@ -255,8 +332,10 @@ static void curve_add_sample_avg(meter_hist_t *m, float value, uint32_t ts_unix)
     //    zamknieta poprzednia).
     m->curve_sum += value;
     m->curve_count++;
-    series_update(m->curve, &m->n_curve, HIST_CURVE,
-                  bucket_ts, m->curve_sum / (float)m->curve_count);
+    // beta370: maksimum biezacego okna rosnie razem ze srednia, wiec otwarty
+    // kubelek ma juz sensowna obwiednie - nie czeka na domkniecie.
+    if (m->curve_count == 1 || value > m->curve_run_max) m->curve_run_max = value;
+    curve_update(m, bucket_ts, m->curve_sum / (float)m->curve_count, m->curve_run_max);
 }
 
 // tm_isdst = -1: pozwol mktime wyliczyc czy w tym momencie obowiazuje CEST czy CET.
@@ -757,10 +836,13 @@ static void archive_append_hour(const char *id, uint32_t hour_ts, float total,
 // wiec ten prog powstrzymuje zapychanie flasha przy duzej liczbie pol chwilowych.
 #define CARC_MIN_FREE (512 * 1024)
 
-static void curve_archive_path(const char *id, char *out, int cap) {
+// beta370: maxfile wybiera plik. hc_ - srednie (jak od FAZY 9b), hm_ - maksima
+// (od tej wersji). Uklad naglowka i rekordow jest identyczny, wiec caly kod
+// ringu ponizej obsluguje oba pliki bez rozgalezien.
+static void curve_archive_path(const char *id, char *out, int cap, bool maxfile) {
     char safe[SAFE_KEY_MAX + 1];
     safe_key(id, safe);
-    snprintf(out, cap, "/spiffs/hc_%s.bin", safe);
+    snprintf(out, cap, "/spiffs/%s%s.bin", maxfile ? "hm_" : "hc_", safe);
 }
 
 typedef struct { int count, head; } carc_hdr_t;
@@ -808,10 +890,11 @@ static bool carc_space_for_new_file(const char *id) {
     return false;
 }
 
-static void curve_archive_append(const char *id, uint32_t bucket_ts, float value) {
+static void curve_archive_append(const char *id, uint32_t bucket_ts, float value,
+                                 bool maxfile) {
     if (!s_fs_ok || !id) return;
     if (bucket_ts < ARC_TS_MIN || bucket_ts > ARC_TS_MAX) return;   // czas niezsynchronizowany
-    char path[64]; curve_archive_path(id, path, sizeof(path));
+    char path[64]; curve_archive_path(id, path, sizeof(path), maxfile);
 
     carc_hdr_t h = { 0, 0 };
     errno = 0;
@@ -876,9 +959,9 @@ static void curve_archive_append(const char *id, uint32_t bucket_ts, float value
 // Punkty 5-min dla doby [d0, d1) z archiwum na flashu. Zwraca liczbe punktow.
 // Wyszukiwanie binarne po indeksie LOGICZNYM - nie wczytuje calego ringu do RAM.
 static int curve_archive_read_day(const char *id, uint32_t d0, uint32_t d1,
-                                  hist_bucket_t *out, int cap) {
+                                  hist_bucket_t *out, int cap, bool maxfile) {
     if (!s_fs_ok || !id || !out || cap <= 0) return 0;
-    char path[64]; curve_archive_path(id, path, sizeof(path));
+    char path[64]; curve_archive_path(id, path, sizeof(path), maxfile);
     FILE *f = fopen(path, "rb");
     if (!f) return 0;
     carc_hdr_t h;
@@ -906,6 +989,36 @@ static int curve_archive_read_day(const char *id, uint32_t d0, uint32_t d1,
     return n;
 }
 
+// beta370: wspolny bufor na dobe maksimow. Uzywany przez odtwarzanie po
+// restarcie i przez budowanie JSON-a - nigdy jednoczesnie (oba pod mutexem
+// historii, a odtwarzanie konczy sie zanim ruszy czytanie doby).
+static hist_bucket_t s_curve_max_buf[HIST_CURVE];
+
+// beta370: po restarcie curve_max[] jest puste, a curve[] wraca z pliku h_ juz
+// z kubelkami sprzed restartu - obwiednia mialaby dziure od polnocy do chwili
+// wlaczenia modulu. Maksima tych kubelkow leza w hm_*.bin, wiec wystarczy jedno
+// czytanie przy wczytywaniu licznika (nie przy kazdym zapytaniu o wykres).
+static void curve_max_seed_today(meter_hist_t *m) {
+    if (!m || !m->curve || !m->curve_max || m->n_curve <= 0) return;
+    uint32_t now = (uint32_t)time(NULL);
+    if (now < ARC_TS_MIN) return;                 // czas niezsynchronizowany
+    uint32_t d0 = floor_day(now);
+    int n = curve_archive_read_day(m->id, d0, d0 + 86400,
+                                   s_curve_max_buf, HIST_CURVE, true);
+    if (n <= 0) return;
+    // Obie listy sa posortowane rosnaco po ts - jedno przejscie scalajace.
+    int j = 0, hit = 0;
+    for (int i = 0; i < m->n_curve && j < n; i++) {
+        while (j < n && s_curve_max_buf[j].ts < m->curve[i].ts) j++;
+        if (j < n && s_curve_max_buf[j].ts == m->curve[i].ts) {
+            m->curve_max[i] = s_curve_max_buf[j].total;
+            j++; hit++;
+        }
+    }
+    if (hit > 0)
+        ESP_LOGI(TAG, "%s: odtworzono %d maksimow 5-min z archiwum", m->id, hit);
+}
+
 // Zasianie archiwum przy PIERWSZYM starcie po aktualizacji: przepisuje krzywe
 // dzis + wczoraj (juz obecne w h_*.bin v2) do nowego hc_*.bin, zeby te dwa dni
 // nie stracily rozdzielczosci 5 min w chwili, gdy przestana byc dzis/wczoraj.
@@ -914,7 +1027,7 @@ static int curve_archive_read_day(const char *id, uint32_t d0, uint32_t d1,
 static void curve_archive_seed(meter_hist_t *m) {
     if (!s_fs_ok || !m || m->cumulative) return;
     if (m->n_curve <= 0 && m->n_curve_yesterday <= 0) return;
-    char path[64]; curve_archive_path(m->id, path, sizeof(path));
+    char path[64]; curve_archive_path(m->id, path, sizeof(path), false);
     FILE *chk = fopen(path, "rb");
     if (chk) { fclose(chk); return; }          // archiwum juz istnieje - nie ruszamy
     if (!carc_space_for_new_file(m->id)) return;
@@ -944,7 +1057,7 @@ static void curve_archive_seed(meter_hist_t *m) {
 
 // Diagnostyka przy starcie - zasieg archiwum krzywej (analogicznie do ha_).
 static void curve_archive_log_range(const char *id) {
-    char path[64]; curve_archive_path(id, path, sizeof(path));
+    char path[64]; curve_archive_path(id, path, sizeof(path), false);
     FILE *f = fopen(path, "rb");
     if (!f) return;
     carc_hdr_t h;
@@ -1480,7 +1593,7 @@ void history_erase_all(void) {
                 // "hc_" (archiwum krzywej 5-min) NIE lapie sie na "h_" -
                 // drugi znak rozni sie od '_'; trzeba je wymienic osobno.
                 if (strncmp(nm, "h_", 2) == 0 || strncmp(nm, "ha_", 3) == 0 ||
-                    strncmp(nm, "hc_", 3) == 0 ||
+                    strncmp(nm, "hc_", 3) == 0 || strncmp(nm, "hm_", 3) == 0 ||
                     strcmp(nm, "tracked.txt") == 0 || strncmp(nm, "arc_", 4) == 0) {
                     snprintf(victims[nv], sizeof(victims[0]), "%.39s", nm);
                     nv++;
@@ -1512,6 +1625,9 @@ size_t history_free_curves(void) {
         if (!s_meters[i]) continue;
         if (s_meters[i]->curve)           freed += HIST_CURVE * sizeof(hist_bucket_t);
         if (s_meters[i]->curve_yesterday) freed += HIST_CURVE * sizeof(hist_bucket_t);
+        // beta370: obwiednie tez sa odtwarzalne - siedza w hm_ na flashu.
+        if (s_meters[i]->curve_max)           freed += HIST_CURVE * sizeof(float);
+        if (s_meters[i]->curve_yesterday_max) freed += HIST_CURVE * sizeof(float);
         if (s_meters[i]->curve || s_meters[i]->curve_yesterday)
             free_curve(s_meters[i]);   // zwalnia oba
     }
@@ -1815,6 +1931,7 @@ static meter_hist_t *get_or_load(const char *id, bool create_if_missing) {
     }
     if (load_meter(slot, id)) {
         restore_from_archive(slot);   // scal swiezszy stan z archiwum ha_ (po restarcie)
+        curve_max_seed_today(slot);   // beta370: obwiednia biezacej doby z hm_
         return slot;   // wczytano z dysku
     }
     // brak pliku
@@ -2266,11 +2383,17 @@ int history_get_day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf
     bool use_curve = false;
     hist_bucket_t *curve_src = NULL;
     int curve_src_n = 0;
+    // beta370: zrodlo obwiedni maksimow. Z RAM idzie tablica rownolegla do
+    // curve_src (te same indeksy); z flasha - osobna lista z wlasnymi ts,
+    // scalana po znaczniku czasu.
+    const float *curve_src_max = NULL;
+    int max_flash_n = 0;
     if (m && !cumulative && m->curve_yesterday && m->n_curve_yesterday > 0 &&
         m->curve_yesterday_day_ts == d0) {
         // Wczoraj z 5-min curve
         curve_src = m->curve_yesterday;
         curve_src_n = m->n_curve_yesterday;
+        curve_src_max = m->curve_yesterday_max;   // beta370
         use_curve = true;
     } else if (m && !cumulative && m->curve && m->n_curve > 0) {
         bool has_day = false;
@@ -2286,6 +2409,7 @@ int history_get_day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf
             if (use_curve) {
                 curve_src = m->curve;
                 curve_src_n = m->n_curve;
+                curve_src_max = m->curve_max;     // beta370
             }
         }
     }
@@ -2293,8 +2417,13 @@ int history_get_day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf
     // 5-min na flashu, zanim spadniemy do slupkow godzinowych.
     static hist_bucket_t s_curve_day_buf[HIST_CURVE];
     if (!use_curve && m && !cumulative) {
-        int na = curve_archive_read_day(id_hex, d0, d1, s_curve_day_buf, HIST_CURVE);
-        if (na > 0) { curve_src = s_curve_day_buf; curve_src_n = na; use_curve = true; }
+        int na = curve_archive_read_day(id_hex, d0, d1, s_curve_day_buf, HIST_CURVE, false);
+        if (na > 0) {
+            curve_src = s_curve_day_buf; curve_src_n = na; use_curve = true;
+            // beta370: maksima dla tej samej doby, osobny plik.
+            max_flash_n = curve_archive_read_day(id_hex, d0, d1,
+                                                 s_curve_max_buf, HIST_CURVE, true);
+        }
     }
 
     if (use_curve && curve_src) {
@@ -2302,11 +2431,28 @@ int history_get_day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf
                           "{\"id\":\"%s\",\"kind\":%d,\"cumulative\":0,\"curve\":1,\"points\":[",
                           id_hex ? id_hex : "", kind);
         bool first2 = true;
-        for (int i = 0; i < curve_src_n && n2 < buf_cap - 48; i++) {
+        int jmx = 0;   // beta370: kursor po liscie maksimow z flasha
+        for (int i = 0; i < curve_src_n && n2 < buf_cap - 72; i++) {
             uint32_t t = curve_src[i].ts;
             if (t < d0 || t >= d1) continue;
-            n2 += snprintf(buf + n2, buf_cap - n2, "%s{\"t\":%u,\"v\":%.3f}",
+            n2 += snprintf(buf + n2, buf_cap - n2, "%s{\"t\":%u,\"v\":%.3f",
                            first2 ? "" : ",", (unsigned)t, curve_src[i].total);
+            // beta370: maksimum kubelka jako pole "m". Umowa: maksimum okna nie
+            // moze byc MNIEJSZE od jego sredniej, wiec wartosc mniejsza znaczy
+            // "nie mam tych danych" - kubelek sprzed aktualizacji albo pole
+            // spoza curve_max_wanted(). Wtedy pola po prostu nie wypisujemy
+            // i panel rysuje sama linie, dokladnie jak przed ta wersja.
+            float mv = 0.0f;
+            if (curve_src_max) {
+                mv = curve_src_max[i];
+            } else if (max_flash_n > 0) {
+                while (jmx < max_flash_n && s_curve_max_buf[jmx].ts < t) jmx++;
+                if (jmx < max_flash_n && s_curve_max_buf[jmx].ts == t)
+                    mv = s_curve_max_buf[jmx].total;
+            }
+            if (mv >= curve_src[i].total)
+                n2 += snprintf(buf + n2, buf_cap - n2, ",\"m\":%.3f", mv);
+            n2 += snprintf(buf + n2, buf_cap - n2, "}");
             first2 = false;
         }
         n2 += snprintf(buf + n2, buf_cap - n2, "]}");
@@ -2789,7 +2935,8 @@ void history_flush(void) {
     ESP_LOGI(TAG, "Historia zrzucona na flash (flush)");
 }
 
-int history_curve_day(const char *key, uint32_t day_ts, hist_bucket_t *out, int cap) {
+int history_curve_day(const char *key, uint32_t day_ts, hist_bucket_t *out,
+                      float *out_max, int cap) {
     if (!key || !out || cap <= 0) return 0;
     int n = 0;
     if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
@@ -2804,8 +2951,13 @@ int history_curve_day(const char *key, uint32_t day_ts, hist_bucket_t *out, int 
         if (m->curve_yesterday && m->n_curve_yesterday > 0 &&
             m->curve_yesterday_day_ts == d0) {
             for (int i = 0; i < m->n_curve_yesterday && n < cap; i++) {
-                if (m->curve_yesterday[i].ts >= d0 && m->curve_yesterday[i].ts < d1)
-                    out[n++] = m->curve_yesterday[i];
+                if (m->curve_yesterday[i].ts < d0 || m->curve_yesterday[i].ts >= d1)
+                    continue;
+                // beta370: maksimum tego samego kubelka - indeksy w curve_yesterday
+                // i curve_yesterday_max sa zawsze zgodne (patrz curve_update).
+                if (out_max)
+                    out_max[n] = m->curve_yesterday_max ? m->curve_yesterday_max[i] : 0.0f;
+                out[n++] = m->curve_yesterday[i];
             }
         }
         // Fallback: krzywa dnia biezacego (jak dotad - lub gdy szukana doba to
@@ -2815,7 +2967,9 @@ int history_curve_day(const char *key, uint32_t day_ts, hist_bucket_t *out, int 
             bool fully_covered  = (m->curve[0].ts <= d0);
             if (is_current_day || fully_covered) {
                 for (int i = 0; i < m->n_curve && n < cap; i++) {
-                    if (m->curve[i].ts >= d0 && m->curve[i].ts < d1) out[n++] = m->curve[i];
+                    if (m->curve[i].ts < d0 || m->curve[i].ts >= d1) continue;
+                    if (out_max) out_max[n] = m->curve_max ? m->curve_max[i] : 0.0f;
+                    out[n++] = m->curve[i];
                 }
             }
             // FAZA 5a fix: nadpisz OSTATNI punkt biezacym last_total, zeby "teraz"
@@ -2829,6 +2983,10 @@ int history_curve_day(const char *key, uint32_t day_ts, hist_bucket_t *out, int 
                 out[n-1].ts == m->curve_bucket_ts &&
                 m->last_ts >= m->curve_bucket_ts) {
                 out[n-1].total = m->last_total;
+                // beta370: maksimum otwartego kubelka obejmuje takze te ostatnia
+                // ramke, wiec po podmianie sredniej na last_total relacja
+                // "maksimum >= wartosc" nadal sie trzyma.
+                if (out_max) out_max[n-1] = m->curve_run_max;
             }
         }
 
@@ -2836,7 +2994,23 @@ int history_curve_day(const char *key, uint32_t day_ts, hist_bucket_t *out, int 
         // (hc_*.bin). Wczesniej w tym miejscu zwracalismy 0 punktow i API
         // schodzilo do slupkow godzinowych; dlatego 5-min widac bylo tylko
         // przez dwie doby trzymane w RAM.
-        if (n == 0) n = curve_archive_read_day(m->id, d0, d1, out, cap);
+        if (n == 0) {
+            n = curve_archive_read_day(m->id, d0, d1, out, cap, false);
+            // beta370: maksima tej samej doby leza w osobnym pliku i maja wlasne
+            // znaczniki czasu - scalamy je z krzywa jednym przejsciem po obu
+            // listach (obie rosnaco po ts).
+            if (n > 0 && out_max) {
+                for (int i = 0; i < n; i++) out_max[i] = 0.0f;
+                int nm = curve_archive_read_day(m->id, d0, d1, s_curve_max_buf,
+                                                HIST_CURVE, true);
+                int j = 0;
+                for (int i = 0; i < n && j < nm; i++) {
+                    while (j < nm && s_curve_max_buf[j].ts < out[i].ts) j++;
+                    if (j < nm && s_curve_max_buf[j].ts == out[i].ts)
+                        out_max[i] = s_curve_max_buf[j++].total;
+                }
+            }
+        }
     }
     if (s_mutex) xSemaphoreGive(s_mutex);
     return n;

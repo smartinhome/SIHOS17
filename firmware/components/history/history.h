@@ -160,4 +160,9 @@ int history_debug_day(const char *key, uint32_t day_ts, char *buf, int cap);
 // Punkty krzywej dnia (pola chwilowe) dla podanej doby - do strumieniowania
 // przez API (1440 pkt nie miesci sie w jednym buforze JSON). Zwraca liczbe
 // punktow skopiowanych do out (moze byc 0 gdy brak krzywej / pole kumulacyjne).
-int history_curve_day(const char *key, uint32_t day_ts, hist_bucket_t *out, int cap);
+// beta370: out_max (opcjonalne, moze byc NULL) to tablica RoWNOLEGLA do out -
+// out_max[i] jest najwyzszym odczytem kubelka out[i]. Wartosc mniejsza od
+// out[i].total oznacza "nie mam tych danych" (kubelek sprzed bety 370 albo pole
+// spoza listy, dla ktorej zbieramy maksima).
+int history_curve_day(const char *key, uint32_t day_ts, hist_bucket_t *out,
+                      float *out_max, int cap);

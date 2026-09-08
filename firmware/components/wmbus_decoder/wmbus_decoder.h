@@ -28,7 +28,9 @@ typedef struct {
 // 24 sloty (bylo 8): od kiedy pola sa dekodowane w firmware, panel bierze
 // stad wartosci dla dashboardu. Przy 8 slotach czesc licznikow dostawalaby
 // dane tylko z przegladarki, wiec inne niz te zapisane w historii.
-// Koszt: 940 B na slot, ok. 22 KB w .bss zamiast 7 KB.
+// Koszt: meter_field_t = 44 B, wiec meter_data_t = 76 B naglowka + 24 pola
+// x 44 B = 1132 B na slot, czyli 27168 B (26,5 KB) w .bss zamiast 9 KB.
+// Poprzednie "940 B / 22 KB" pochodzilo sprzed podniesienia MAX_METER_VALUES.
 #define MAX_ACTIVE_METERS 24
 
 // ── Bufor surowych ramek (do "łapania" liczników w Web UI) ──────────

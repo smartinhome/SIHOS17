@@ -20,9 +20,13 @@ static const char *TAG = "WMBUS";
 static meter_data_t  s_meters[MAX_ACTIVE_METERS] = {0};
 static int           s_meter_count = 0;
 
-// Rejestr WSZYSTKICH uslyszanych ID. s_meters[] ma tylko 8 slotow (pelne dane
-// pol), a w eterze slychac tez liczniki sasiadow - System pokazywal wiec
-// zanizona liczbe. Tu trzymamy same identyfikatory: 64 x 9 B = 576 B.
+// Rejestr WSZYSTKICH uslyszanych ID. s_meters[] ma MAX_ACTIVE_METERS slotow
+// (pelne dane pol), a w eterze slychac tez liczniki sasiadow - System pokazywal
+// wiec zanizona liczbe. Tu trzymamy same identyfikatory z czasem ostatniej
+// ramki: seen_t to 9 B napisu + 3 B dopelnienia + 4 B uint32 = 16 B,
+// czyli 64 x 16 = 1024 B w .bss. Po zapelnieniu tablicy seen_add() nadpisuje
+// wpis najdawniej slyszany - odbior i historia dzialaja dalej bez zmian,
+// nasyca sie tylko sama liczba na ekranie System.
 #define MAX_SEEN_IDS 64
 // Licznik "znika" z zestawienia, gdy nie odezwie sie przez ten czas. Bez tego
 // wartosc tylko rosla i po testach w innej lokalizacji wisiala na maksimum.

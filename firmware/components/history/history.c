@@ -139,9 +139,13 @@ static bool s_rebase_pending = false;
 // ---------- Pomocnicze: zaokraglenia czasu ----------
 static uint32_t floor_hour(uint32_t t)  { return t - (t % 3600); }
 // Alokacja bufora krzywej na zadanie; NULL-safe (bez krzywej gdy brak RAM).
-// Zapas sterty, ktory musi zostac PO alokacji krzywej (11.2 KB kazda).
-// Amiplus ma ~10 pol chwilowych; bez tego progu zaznaczenie ich wszystkich
-// zjadloby ponad 100 KB i wywrocilo moduł. Brak krzywej nie psuje wykresu -
+// Zapas sterty, ktory musi zostac PO alokacji krzywej. Krzywa to
+// HIST_CURVE(288) x hist_bucket_t(8 B) = 2304 B, a z bliznaczym buforem
+// "wczoraj" 4608 B (4,6 KB) na pole. Amiplus ma ~10 pol chwilowych, wiec
+// zaznaczenie ich wszystkich to ~45 KB - stad ten prog. Liczba 11,2 KB
+// z poprzedniej wersji komentarza pochodzila z krzywej 1-minutowej
+// (1440 punktow), sprzed przejscia na kubelek 5-minutowy w FAZIE 5a.
+// Brak krzywej nie psuje wykresu -
 // dzien rysuje sie wtedy z kubelkow godzinowych (grubsza rozdzielczosc).
 // Bufor na JSON doby przy liczeniu sumy dla e-ink: max ~48 slupkow po ~30 B.
 #define DAY_SUM_BUF 3072
@@ -1498,8 +1502,9 @@ void history_erase_all(void) {
 }
 
 size_t history_free_curves(void) {
-    // Krzywe minutowe (po 11.2 KB) sa odtwarzalne - po restarcie i tak buduja sie
-    // od nowa, a dane godzinowe zostaja. Zwalniamy je przed OTA, bo TLS do GitHuba
+    // Krzywe 5-minutowe (2,3 KB, z buforem "wczoraj" 4,6 KB na pole) sa
+    // odtwarzalne - po restarcie i tak buduja sie od nowa, a dane godzinowe
+    // zostaja. Zwalniamy je przed OTA, bo TLS do GitHuba
     // potrzebuje sporego, spojnego kawalka sterty.
     size_t freed = 0;
     if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
@@ -1592,7 +1597,7 @@ void history_set_tracked(const char *id_hex, bool tracked) {
         s_tracked_count--;
         tracked_save();
         ESP_LOGI(TAG, "Sledzenie WYLACZONE: %s (%d/%d)", id_hex, s_tracked_count, MAX_TRACKED);
-        // Zwolnij slot RAM (2.9KB + ew. krzywa 11.5KB) - inaczej wisialby do
+        // Zwolnij slot RAM (2,9 KB + ewentualne krzywe 2 x 2,3 KB) - inaczej wisialby do
         // restartu. Pliki na flashu zostaja, wiec ponowne wlaczenie sledzenia
         // odzyskuje historie.
         for (int i = 0; i < MAX_HIST_METERS; i++) {

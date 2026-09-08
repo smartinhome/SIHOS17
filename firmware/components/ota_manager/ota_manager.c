@@ -223,10 +223,64 @@ static void ota_url_task(void *arg) {
 // dla sih-wmbus-reader.bin. Zwraca true + wypelnia out_url.
 #define GITHUB_API_URL "https://api.github.com/repos/smartinhome/SIHOS17/releases?per_page=15"
 
+// Stan wyboru najlepszego assetu - parser ogląda teraz kolejne fragmenty
+// odpowiedzi, wiec wynik musi przezyc miedzy nimi.
+typedef struct {
+    int  best;      // najwyzszy dotad numer wersji
+    int  count;     // ile assetow widzielismy (do logu)
+    bool found;
+} gh_pick_t;
+
+// Jeden "browser_download_url" z odpowiedzi API. Filtruje po kanale
+// (beta/oficjalna) i zapamietuje URL z najwyzszym numerem wersji - lista
+// releasow z API NIE musi byc posortowana wg wersji.
+static void github_consider_asset(const char *url, bool beta_channel,
+                                  char *out_url, size_t out_max, gh_pick_t *st) {
+    st->count++;
+    ESP_LOGI(TAG, "GitHub: asset[%d]: %s", st->count, url);
+    if (!strstr(url, "sih-wmbus-reader.bin")) return;
+    if (strlen(url) >= out_max) return;
+
+    const char *bp = strstr(url, "beta");
+    bool is_beta = (bp != NULL);
+    if (beta_channel != is_beta) return;      // kanaly sie nie mieszaja
+
+    int ver;
+    if (is_beta) {
+        ver = atoi(bp + 4);                   // numer beta
+    } else {
+        // stabilne: "vX.Y.Z" -> X*10000+Y*100+Z do porownania
+        const char *vp = strstr(url, "/v");
+        int a = 0, b = 0, c = 0;
+        if (vp) sscanf(vp + 2, "%d.%d.%d", &a, &b, &c);
+        ver = a * 10000 + b * 100 + c;
+    }
+    if (ver > st->best) {
+        st->best = ver;
+        strlcpy(out_url, url, out_max);
+        st->found = true;
+        ESP_LOGI(TAG, "GitHub: kandydat %s, wersja=%d -> %s",
+                 is_beta ? "beta" : "oficjalna", ver, out_url);
+    }
+}
+
 static bool github_get_latest_bin_url(char *out_url, size_t out_max, bool beta_channel) {
     ESP_LOGI(TAG, "GitHub: wolny heap = %lu B, najwiekszy blok = %lu B",
              (unsigned long)esp_get_free_heap_size(),
              (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    // beta373: bufor bierzemy PRZED polaczeniem. mbedTLS zajmuje na handshake
+    // kilkadziesiat KB, wiec najwiekszy wolny blok potrafil spasc ponizej 24 KB
+    // i malloc konczyl sie bledem "brak pamieci na bufor". Przy okazji nie
+    // trzymamy juz calej odpowiedzi (ponad 100 KB) w RAM - parsujemy w locie
+    // przez przesuwane okno, wiec nic sie tez nie obcina.
+    const size_t CAP  = 4096;     // okno odczytu
+    const int    KEEP = 560;      // ogon na rekord przeciety granica bloku
+    char *buf = malloc(CAP);
+    if (!buf) {
+        ESP_LOGE(TAG, "GitHub: brak pamieci na bufor %d B", (int)CAP);
+        return false;
+    }
+
     ESP_LOGI(TAG, "GitHub: laczenie z %s", GITHUB_API_URL);
 
     esp_http_client_config_t cfg = {
@@ -244,6 +298,7 @@ static bool github_get_latest_bin_url(char *out_url, size_t out_max, bool beta_c
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (!client) {
         ESP_LOGE(TAG, "GitHub: esp_http_client_init zwrocil NULL");
+        free(buf);
         return false;
     }
 
@@ -264,6 +319,7 @@ static bool github_get_latest_bin_url(char *out_url, size_t out_max, bool beta_c
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "GitHub: open failed po 3 probach: %s", esp_err_to_name(err));
         esp_http_client_cleanup(client);
+        free(buf);
         return false;
     }
 
@@ -276,93 +332,66 @@ static bool github_get_latest_bin_url(char *out_url, size_t out_max, bool beta_c
         ESP_LOGE(TAG, "GitHub: zly status HTTP %d (403=rate limit, 404=brak repo)", status);
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
-        return false;
-    }
-
-    // Wiekszy bufor — odpowiedz GitHub API bywa >16KB
-    const size_t BUFSZ = 24576;
-    char *buf = malloc(BUFSZ);
-    if (!buf) {
-        ESP_LOGE(TAG, "GitHub: brak pamieci na bufor %d B", (int)BUFSZ);
-        esp_http_client_close(client);
-        esp_http_client_cleanup(client);
-        return false;
-    }
-
-    int total = 0, r;
-    while ((r = esp_http_client_read(client, buf + total,
-                                     BUFSZ - 1 - total)) > 0) {
-        total += r;
-        if (total >= (int)BUFSZ - 1) {
-            ESP_LOGW(TAG, "GitHub: odpowiedz obcieta do %d B", (int)BUFSZ);
-            break;
-        }
-    }
-    buf[total > 0 ? total : 0] = 0;
-    esp_http_client_close(client);
-    esp_http_client_cleanup(client);
-
-    ESP_LOGI(TAG, "GitHub: odebrano %d B JSON", total);
-    if (total <= 0) {
-        ESP_LOGE(TAG, "GitHub: pusta odpowiedz");
         free(buf);
         return false;
     }
 
-    // Znajdz wszystkie browser_download_url. Lista releasow z API moze NIE byc
-    // posortowana wg numeru wersji (data tagu/dwa rownolegle buildy), wiec
-    // wybieramy URL z NAJWYZSZYM numerem beta, nie pierwszy z brzegu.
+    // Skanujemy odpowiedz w locie: czytamy blok, wyciagamy z niego komplety
+    // "browser_download_url":"...", a niedokonczony rekord z konca przenosimy
+    // na poczatek bufora i doklejamy nastepny blok.
     const char *key = "\"browser_download_url\":\"";
-    char *p = buf;
-    int found_count = 0;
-    int best_beta = -1;
-    bool result = false;
-    while ((p = strstr(p, key)) != NULL) {
-        p += strlen(key);
-        char *end = strchr(p, '"');
-        if (!end) break;
-        size_t ulen = end - p;
-        if (ulen > 0 && ulen < 470) {
-            char tmp[480];
-            strncpy(tmp, p, ulen);
-            tmp[ulen] = 0;
-            found_count++;
-            ESP_LOGI(TAG, "GitHub: asset[%d]: %s", found_count, tmp);
-            if (strstr(tmp, "sih-wmbus-reader.bin") && ulen < out_max) {
-                // wyciagnij numer beta z URL ".../v1.0.0-betaN/..."
-                char *bp = strstr(tmp, "beta");
-                bool is_beta = (bp != NULL);
-                // Filtruj wg kanalu: oficjalna = tylko stabilne (bez beta),
-                // beta = tylko beta. Kanaly sie nie mieszaja.
-                if (beta_channel != is_beta) { p = end; continue; }
-                int ver;
-                if (is_beta) {
-                    ver = atoi(bp + 4);            // numer beta
-                } else {
-                    // stabilne: numer z "vX.Y.Z" -> X*10000+Y*100+Z dla porownania
-                    char *vp = strstr(tmp, "/v");
-                    int a = 0, b = 0, cc = 0;
-                    if (vp) sscanf(vp + 2, "%d.%d.%d", &a, &b, &cc);
-                    ver = a * 10000 + b * 100 + cc;
-                }
-                if (ver > best_beta) {
-                    best_beta = ver;
-                    strlcpy(out_url, tmp, out_max);
-                    result = true;
-                    ESP_LOGI(TAG, "GitHub: kandydat %s (%s) -> %s",
-                             is_beta ? "beta" : "stable",
-                             is_beta ? "beta" : "oficjalna", out_url);
-                }
+    gh_pick_t st = { .best = -1, .count = 0, .found = false };
+    int fill = 0, total = 0, r;
+
+    while ((r = esp_http_client_read(client, buf + fill, (int)(CAP - 1 - fill))) > 0) {
+        fill  += r;
+        total += r;
+        buf[fill] = 0;
+
+        char *p = buf, *done = buf;
+        while ((p = strstr(p, key)) != NULL) {
+            char *v   = p + strlen(key);
+            char *end = strchr(v, '"');
+            if (!end) break;               // rekord uciety - dokonczymy po doczytaniu
+            size_t ulen = end - v;
+            if (ulen > 0 && ulen < 470) {
+                char tmp[480];
+                memcpy(tmp, v, ulen);
+                tmp[ulen] = 0;
+                github_consider_asset(tmp, beta_channel, out_url, out_max, &st);
             }
+            p    = end + 1;
+            done = p;
         }
-        p = end;
+
+        // Ogon: albo niedokonczony rekord (od "done"), albo ostatnie KEEP bajtow,
+        // zeby klucz przeciety granica bloku dalo sie dopasowac.
+        int keep = fill - (int)(done - buf);
+        if (keep > KEEP) { done = buf + fill - KEEP; keep = KEEP; }
+        if (keep < 0) keep = 0;
+        if (keep > 0 && done != buf) memmove(buf, done, keep);
+        fill = keep;
     }
+
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+    free(buf);
+
+    ESP_LOGI(TAG, "GitHub: przeskanowano %d B JSON", total);
+    if (total <= 0) {
+        ESP_LOGE(TAG, "GitHub: pusta odpowiedz");
+        return false;
+    }
+
+    bool result     = st.found;
+    int  found_count = st.count;
+    int  best_beta   = st.best;
+
     if (result) ESP_LOGI(TAG, "GitHub: WYBRANO %s, wersja=%d: %s",
                          beta_channel ? "beta" : "oficjalna", best_beta, out_url);
 
     ESP_LOGI(TAG, "GitHub: znaleziono %d assetow, firmware %s",
              found_count, result ? "OK" : "NIE ZNALEZIONO");
-    free(buf);
     return result;
 }
 

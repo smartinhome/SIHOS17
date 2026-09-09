@@ -1,6 +1,7 @@
 #include "meter_total.h"
 #include "mbedtls/aes.h"
 #include <string.h>
+#include <math.h>
 #include <stdlib.h>
 #include <stdio.h>
 
@@ -511,6 +512,32 @@ static void mtf_put(mtf_field_t *out, int *nf, int max, const char *name,
     (*nf)++;
 }
 
+// Pola WYLICZANE, ktorych licznik nie nadaje, ale da sie je policzyc z tego,
+// co przyszlo w ramce. cos fi = P/S mowi, jaka czesc pradu plynacego przewodem
+// wykonuje realna prace; tg fi = Q/P to ta sama informacja w formie, ktorej
+// uzywaja taryfy biznesowe (limit umowny zwykle 0,4).
+// Znak: Q dodatnie = charakter indukcyjny (silniki), ujemne = pojemnosciowy
+// (zasilacze impulsowe, LED, dlugie kable).
+static void mtf_derive_power_factor(mtf_field_t *out, int *nf, int max) {
+    int ip = mtf_find(out, *nf, "moc_kw");
+    if (ip < 0) return;
+    int il = mtf_find(out, *nf, "moc_bierna_l_var");
+    int ic = mtf_find(out, *nf, "moc_bierna_c_var");
+    if (il < 0 && ic < 0) return;
+
+    double p = out[ip].value * 1000.0;                    // kW -> W
+    double q = (il >= 0 ? out[il].value : 0.0)
+             - (ic >= 0 ? out[ic].value : 0.0);           // VAR, ze znakiem
+    // Ponizej ~20 W pobor to praktycznie sam szum pomiaru - cos fi wychodzilby
+    // z niego losowy (0,05 przy 5 W nic nie znaczy), wiec pola nie tworzymy.
+    if (p < 20.0) return;
+
+    double s2 = sqrt(p * p + q * q);
+    if (s2 <= 0) return;
+    mtf_put(out, nf, max, "cos_fi", p / s2, "", 0);
+    mtf_put(out, nf, max, "tg_fi",  q / p,  "", 0);
+}
+
 // ---------- Wielopolowy parser DIF/VIF (Amiplus: energia/moc/napiecia) ----------
 static int difvif_fields(const uint8_t *p, int len, mtf_field_t *out, int max_fields) {
     int nf = 0;
@@ -639,6 +666,8 @@ static int difvif_fields(const uint8_t *p, int len, mtf_field_t *out, int max_fi
         }
         i += dn;
     }
+    // Na koniec, gdy znamy juz moc czynna i bierna z TEJ ramki.
+    mtf_derive_power_factor(out, &nf, max_fields);
     return nf;
 }
 

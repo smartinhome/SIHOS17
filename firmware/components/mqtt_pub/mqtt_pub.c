@@ -128,6 +128,10 @@ static void ha_announce_one(const ha_item_t *h) {
     char pref[24]; prefix_of(pref, sizeof(pref));
     const char *dc = "", *sc = "";
     ha_class_for(h->unit, &dc, &sc);
+    // beta375: pola wyliczane nie maja jednostki, wiec klasa musi isc z nazwy.
+    // Bez state_class Home Assistant nie prowadzi dla nich statystyk.
+    if (strcmp(h->field, "cos_fi") == 0) { dc = "power_factor"; sc = "measurement"; }
+    else if (strcmp(h->field, "tg_fi") == 0) { dc = ""; sc = "measurement"; }
 
     char topic[TOPIC_MAX];
     snprintf(topic, sizeof(topic), "homeassistant/sensor/%s_%s_%s/config",

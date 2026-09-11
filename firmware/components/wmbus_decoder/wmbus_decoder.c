@@ -9,6 +9,8 @@
 #include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/queue.h"     // beta378: kolejka ramek
+#include "freertos/task.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -159,7 +161,10 @@ static const char *meter_key_for_id(const char *id_hex) {
 // trwałą historię, dzięki czemu /api/meters nie jest już atrapą z samym RSSI.
 // Zwraca true, gdy udało się rozpoznać poprawne ID ramki; brak pól oznacza np.
 // nieobsługiwany typ licznika albo brak klucza AES.
-static bool decode_frame(const uint8_t *data, size_t len, meter_data_t *out) {
+// beta378: fields/out_nf/out_kind - gotowa tablica pol dla wolajacego, zeby
+// historia nie musiala drugi raz deszyfrowac tej samej ramki.
+static bool decode_frame(const uint8_t *data, size_t len, meter_data_t *out,
+                         mtf_field_t *fields, int *out_nf, int *out_kind) {
     if (len < 12) return false;
 
     char id[12];
@@ -205,19 +210,53 @@ static bool decode_frame(const uint8_t *data, size_t len, meter_data_t *out) {
         strlcpy(out->type, "techem", sizeof(out->type));
     }
 
-    mtf_field_t fields[MTF_MAX_FIELDS];
     int kind = 0;
     int nf = meter_total_extract_fields(data, len, meter_key_for_id(id),
                                         fields, MTF_MAX_FIELDS, &kind);
     for (int i = 0; i < nf; i++)
         add_field(out, fields[i].field, (float)fields[i].value, fields[i].unit);
+    *out_nf = nf;
+    *out_kind = kind;
 
     return true;
 }
 
+// beta378: kolejka ramek miedzy taskiem radia a obrobka. Glebokosc 6: przy
+// jednej ramce na minute z licznika to zapas na najdluzszy zastoj (save_meter
+// dla kilkunastu pol, ~1 s), a przy sasiadach w eterze - na ich naklad.
+#define FRAME_Q_LEN 6
+static QueueHandle_t s_frame_q = NULL;
+static volatile uint32_t s_frames_dropped = 0;
+static void process_frame(const wmbus_frame_t *frame);
+
+static void worker_task(void *arg) {
+    (void)arg;
+    static wmbus_frame_t frame;       // 520 B - statyczny, nie na stosie
+    int cnt = 0;
+    while (1) {
+        if (xQueueReceive(s_frame_q, &frame, portMAX_DELAY) != pdTRUE) continue;
+        process_frame(&frame);
+        // Ta sama diagnostyka co w rx_task: minimalny wolny stos co 50 ramek.
+        // Stos 8 KB jest dobrany z zapasem; te liczby pozwola go przyciac.
+        if (++cnt % 50 == 0) {
+            UBaseType_t hw = uxTaskGetStackHighWaterMark(NULL);
+            ESP_LOGI(TAG, "wmbus_work min. wolny stos: %u B, odrzuconych ramek: %u",
+                     (unsigned)(hw * sizeof(StackType_t)), (unsigned)s_frames_dropped);
+        }
+    }
+}
+
 void wmbus_decoder_init(void) {
     s_mutex = xSemaphoreCreateMutex();
-    ESP_LOGI(TAG, "Dekoder wMbus gotowy");
+    s_frame_q = xQueueCreate(FRAME_Q_LEN, sizeof(wmbus_frame_t));
+    if (!s_frame_q) {
+        ESP_LOGE(TAG, "brak RAM na kolejke ramek - odbior nie ruszy");
+        return;
+    }
+    // Priorytet 6: ponizej radia (7), powyzej HTTP, MQTT i e-inka - ramka ma
+    // trafic do historii szybciej, niz panel zdazy o nia zapytac.
+    xTaskCreate(worker_task, "wmbus_work", 8192, NULL, 6, NULL);
+    ESP_LOGI(TAG, "Dekoder wMbus gotowy (kolejka %d ramek)", FRAME_Q_LEN);
 }
 
 // --- FAZA 4a-1: CRC-16/EN13757 per-block WARN-ONLY -------------------------
@@ -306,13 +345,31 @@ static void check_encryption_key(const uint8_t *data, size_t len, const char *id
     }
 }
 
+// beta378: wolane z rx_task. Robi TYLKO kopie ramki do kolejki i wraca -
+// radio ma byc z powrotem przy FIFO zanim nadejdzie kolejna ramka. Wszystko,
+// co trwa (log przez UART, AES, flash, MQTT), dzieje sie w worker_task.
 void wmbus_decoder_on_frame(const wmbus_frame_t *frame) {
     if (!frame || frame->len < 12) return;
     // Ochrona przed wywolaniem callbacku PRZED wmbus_decoder_init() -
-    // xSemaphoreTake(NULL, portMAX_DELAY) leci na configASSERT i wywala system.
-    // Sytuacja mozliwa gdy cc1101_start() wystartuje task RX zanim main.c zdazy
-    // zainicjalizowac dekoder (kolejnosc bootu w app_main).
-    if (!s_mutex) return;
+    // kolejnosc bootu w app_main: cc1101_start_receive jest po init, ale
+    // gdyby ktos to kiedys przestawil, xQueueSend(NULL) wywali system.
+    if (!s_mutex || !s_frame_q) return;
+    if (xQueueSend(s_frame_q, frame, 0) != pdTRUE) {
+        // Kolejka pelna = obrobka nie nadaza od 6 ramek. Nie czekamy - lepiej
+        // stracic te ramke niz zablokowac radio i stracic kilka nastepnych.
+        s_frames_dropped++;
+        static uint32_t s_last_warn_ms = 0;
+        uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        if (now_ms - s_last_warn_ms > 60000) {
+            s_last_warn_ms = now_ms;
+            ESP_LOGW(TAG, "Kolejka ramek pelna - odrzucono (razem %u)",
+                     (unsigned)s_frames_dropped);
+        }
+    }
+}
+
+// Pelna obrobka jednej ramki - na worker_task, nigdy na tasku radia.
+static void process_frame(const wmbus_frame_t *frame) {
 
     // Blysk diody RX: domyslnie przy KAZDYM telegramie; w trybie
     // "tylko dashboard" wylacznie gdy ramka pochodzi od licznika
@@ -327,10 +384,22 @@ void wmbus_decoder_on_frame(const wmbus_frame_t *frame) {
     int maxb = (int)frame->len;
     if (maxb > 290) maxb = 290;  // zabezpieczenie bufora
 
-    // Wersja ze spacjami - czytelna w logach
-    char hex_log[900] = {0};
-    for (int i = 0; i < maxb; i++)
-        snprintf(hex_log + i*3, sizeof(hex_log) - i*3, "%02X ", frame->data[i]);
+    // Wersja ze spacjami - czytelna w logach.
+    // beta378: tablica nibbli zamiast snprintf na kazdy bajt - to samo wyjscie,
+    // ~10x mniej pracy; przy 290 bajtach snprintf bylo wolane 580 razy na ramke.
+    static const char HEXU[] = "0123456789ABCDEF";
+    static const char HEXL[] = "0123456789abcdef";
+    char hex_log[900];
+    {
+        int p = 0;
+        for (int i = 0; i < maxb; i++) {
+            uint8_t b = frame->data[i];
+            hex_log[p++] = HEXU[b >> 4];
+            hex_log[p++] = HEXU[b & 0x0F];
+            hex_log[p++] = ' ';
+        }
+        hex_log[p] = 0;
+    }
     // ID licznika i sterownik od razu w naglowku - bez tego przy kilkudziesieciu
     // licznikach w zasiegu nie da sie rozpoznac, czyja jest ktora ramka.
     char id_log[12] = "????????";
@@ -343,9 +412,16 @@ void wmbus_decoder_on_frame(const wmbus_frame_t *frame) {
 
     // Wersja bez spacji + gotowy link do analizatora wmbusmeters.org
     // (wmbusmeters sam usuwa CRC blokow, wiec podajemy surowa ramke z CRC)
-    char hex_raw[600] = {0};
-    for (int i = 0; i < maxb; i++)
-        snprintf(hex_raw + i*2, sizeof(hex_raw) - i*2, "%02x", frame->data[i]);
+    char hex_raw[600];
+    {
+        int p = 0;
+        for (int i = 0; i < maxb; i++) {
+            uint8_t b = frame->data[i];
+            hex_raw[p++] = HEXL[b >> 4];
+            hex_raw[p++] = HEXL[b & 0x0F];
+        }
+        hex_raw[p] = 0;
+    }
     ESP_LOGI(TAG, "  -> https://wmbusmeters.org/analyze/%s", hex_raw);
 
     // FAZA 4a-1: weryfikacja CRC-16/EN13757 per-block (WARN-ONLY - nie odrzuca).
@@ -365,7 +441,11 @@ void wmbus_decoder_on_frame(const wmbus_frame_t *frame) {
     time_t frame_time = time(NULL);
     tmp.last_seen_unix = (frame_time > 1700000000) ? (uint32_t)frame_time : 0;
 
-    if (!decode_frame(frame->data, frame->len, &tmp)) {
+    // beta378: pola z ramki wyciagane RAZ - decode_frame oddaje je tutaj,
+    // a blok historii ponizej korzysta z nich wprost.
+    mtf_field_t fields[MTF_MAX_FIELDS];
+    int nf = 0, kind = 0;
+    if (!decode_frame(frame->data, frame->len, &tmp, fields, &nf, &kind)) {
         ESP_LOGW(TAG, "Nie można zdekodować ramki");
         return;
     }
@@ -377,14 +457,11 @@ void wmbus_decoder_on_frame(const wmbus_frame_t *frame) {
 
     // --- HISTORIA 24/7: wyciagnij wszystkie pola i zapisz sledzone ---
     {
-        const char *key_hex = meter_key_for_id(tmp.id_hex);
         time_t now = time(NULL);
         uint32_t ts_unix = (now > 1700000000) ? (uint32_t)now : 0;
         if (ts_unix) {
-            mtf_field_t fields[MTF_MAX_FIELDS];
-            int kind = 0;
-            int nf = meter_total_extract_fields(frame->data, frame->len, key_hex,
-                                                fields, MTF_MAX_FIELDS, &kind);
+            // beta378: dotad w tym miejscu bylo DRUGIE meter_total_extract_fields
+            // na te sama ramke (AES + DIF/VIF od nowa). Pola juz mamy z decode_frame.
             if (nf > 0) mqtt_pub_rssi(tmp.id_hex, frame->rssi);
             for (int i = 0; i < nf; i++) {
                 // zapis tylko sledzonych pol (filtr w history_on_field)

@@ -36,7 +36,10 @@ static void append_to_buf(const char *data, size_t len) {
 static int log_vprintf(const char *fmt, va_list args) {
     // Bufor STATYCZNY (nie na stosie!) - 768B na stosie wywalało male taski ESP-IDF.
     // Chroniony tym samym mutexem co zapis do bufora kolowego.
-    static char line[768];
+    // beta378: 768 -> 1024. Linia z ramka to ~60 B naglowka + 3 B na bajt,
+    // wiec powyzej ~235 B ramki byla w zakladce Logi ucinana; 1024 miesci
+    // kazda ramke do MAX_FRAME_SIZE razem ze znacznikiem czasu.
+    static char line[1024];
     int n = 0;
     // Timeout 1 tick (~10 ms) zamiast 0: pozwol krotko poczekac na mutex zamiast
     // od razu drop-owac linii. Pod normalnym obciazeniem dump HTTP trzyma mutex

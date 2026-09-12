@@ -652,7 +652,7 @@ static void draw_meter_page(const char *id, int page_no, int total_pages) {
     const char *cust = nvs_config_meter_name(id);
     const char *title = (cust && cust[0]) ? cust : (kind ? kind_title(kind) : "Licznik");
     fb_draw_text_inv(&F14, 3, 0, title);
-    char pg[12];
+    char pg[24];   // -Os: "%d/%d" z dwoma int moze miec do 23 znakow
     snprintf(pg, sizeof(pg), "%d/%d", page_no, total_pages);
     int pgw = fb_text_width(&F14, pg);
     fb_draw_text_inv(&F14, LCD_W - pgw - 4, 0, pg);
@@ -889,7 +889,7 @@ static void draw_clock_page(int page_no, int total_pages) {
     fb_clear_white();
     fb_fill_rect(0, 0, LCD_W, 16, 1);
     fb_draw_text_inv(&F14, 3, 0, "Czas");
-    char pg[12];
+    char pg[24];   // -Os: "%d/%d" z dwoma int moze miec do 23 znakow
     snprintf(pg, sizeof(pg), "%d/%d", page_no, total_pages);
     int pgw = fb_text_width(&F14, pg);
     fb_draw_text_inv(&F14, LCD_W - pgw - 4, 0, pg);

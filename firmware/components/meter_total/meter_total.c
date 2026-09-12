@@ -45,7 +45,14 @@ static int remove_block_crc(const uint8_t *d, int len, uint8_t *out, int out_cap
         memcpy(out, d, len);
         return len;
     }
-    if (len < 12) { if (len > out_cap) len = out_cap; memcpy(out, d, len); return len; }
+    if (len < 12) {
+        // len moze byc ujemne (wywolania z (int)len ramki) - -Os wychwycil
+        // memcpy z ujemnym rozmiarem, ktory rzutowal sie na 4 GB.
+        if (len < 0) return 0;
+        if (len > out_cap) len = out_cap;
+        memcpy(out, d, len);
+        return len;
+    }
 
     int n = 0;
     // blok 1: 10 bajtow + 2 CRC

@@ -432,7 +432,10 @@ void ota_start_from_github(bool beta_channel) {
     }
     s_status.state    = OTA_STATE_IDLE;
     s_status.error[0] = 0;
-    xTaskCreate(ota_github_task, "ota_github", 24576,
+    // beta380: 16 KB jak ota_url - to ta sama sciezka (esp_https_ota z bundlem
+    // CA), tylko poprzedzona krotkim zapytaniem do API. 24 KB to bylo 8 KB
+    // zamrozone dokladnie wtedy, gdy pamieci jest najmniej.
+    xTaskCreate(ota_github_task, "ota_github", 16384,
                 (void *)(intptr_t)beta_channel, 6, NULL);
 }
 

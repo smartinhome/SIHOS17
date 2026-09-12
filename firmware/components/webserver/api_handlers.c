@@ -106,11 +106,17 @@ static int read_body(httpd_req_t *req, char *buf, size_t max) {
 }
 
 // ---------- Historia ----------
+// beta380: jeden wspolny bufor odpowiedzi zamiast czterech statycznych
+// (3200 + 1600 + 1536 + 1024 B). Handlery httpd wykonuja sie sekwencyjnie na
+// jednym tasku, wiec nigdy nie sa potrzebne dwa naraz. Statyczny, a nie na
+// stosie, bo stos httpd (12 KB) ma zostac z zapasem na TLS i littlefs.
+static char s_resp_buf[3200];
+
 static esp_err_t handle_history_list(httpd_req_t *req) {
     // 24 klucze x ~125 B (id do 40 znakow + wartosci) = ~3 kB. Bufor 1 kB
     // urywal liste juz przy 9 kluczach.
-    static char buf[3200];
-    history_list_json(buf, sizeof(buf));
+    char *buf = s_resp_buf;
+    history_list_json(buf, sizeof(s_resp_buf));
     resp_json(req, buf);
     return ESP_OK;
 }
@@ -256,8 +262,8 @@ static esp_err_t handle_history_day(httpd_req_t *req) {
 
 // POST /api/history/track  body: {"id":"...","tracked":true|false}
 static esp_err_t handle_history_tracked(httpd_req_t *req) {
-    static char buf[1024];
-    history_tracked_json(buf, sizeof(buf));
+    char *buf = s_resp_buf;
+    history_tracked_json(buf, sizeof(s_resp_buf));
     resp_json(req, buf);
     return ESP_OK;
 }
@@ -712,10 +718,10 @@ static esp_err_t handle_dashboard(httpd_req_t *req) {
     // Statyczny bufor: 32 przypiecia + 32 pola nie zmieszcza sie w 256 B, a
     // handlery httpd i tak trzymaja juz na stosie kopie konfiguracji (3 kB).
     // snprintf zwraca dlugosc, ktora BY sie zapisala - bez clampowania pos
-    // moglby przekroczyc rozmiar bufora i sizeof(buf)-pos podwinelo by sie
+    // moglby przekroczyc rozmiar bufora i sizeof(s_resp_buf)-pos podwinelo by sie
     // do ogromnego size_t (zapis poza buforem przy wielu przypieciach).
-    static char buf[1600];
-    int cap = (int)sizeof(buf);
+    char *buf = s_resp_buf;
+    int cap = (int)sizeof(s_resp_buf);
     int pos = snprintf(buf, cap, "{\"pinned\":[");
     bool first = true;
     for (int i = 0; i < MAX_PINS && pos < cap - 2; i++) {
@@ -1535,8 +1541,8 @@ static esp_err_t handle_logs_clear(httpd_req_t *req) {
 }
 
 static esp_err_t handle_wifi_scan(httpd_req_t *req) {
-    static char buf[1536];
-    int n = wifi_manager_scan(buf, sizeof(buf));
+    char *buf = s_resp_buf;
+    int n = wifi_manager_scan(buf, sizeof(s_resp_buf));
     if (n < 0) {
         httpd_resp_set_type(req, "application/json");
         httpd_resp_sendstr(req, "[]");

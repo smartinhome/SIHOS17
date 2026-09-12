@@ -56,3 +56,46 @@ CONFIG_FREERTOS_HZ=1000
 # Domyslnie 10 gniazd; webserver przy auto-odswiezaniu zajmowal wszystkie,
 # przez co OTA nie moglo otworzyc gniazda TLS (Failed to create socket).
 CONFIG_LWIP_MAX_SOCKETS=16
+
+# ======================= beta380: RAM =======================
+# Na ESP32-C6 IRAM i DRAM to jedna pamiec SRAM: kazdy kilobajt kodu
+# wyrzucony z IRAM do flasha powieksza sterte o tyle samo.
+
+# -Os zamiast -Og (Debug). Kod jest krotszy o ok. 1/3, w tym czesc trzymana
+# w IRAM; przy okazji szybszy. Asercje zostaja wlaczone.
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+
+# Sterownik WiFi i FreeRTOS z flasha zamiast z IRAM. Koszt: nieco wieksze
+# opoznienia pakietow w czasie zapisu na flash (historia), bez znaczenia
+# przy ruchu rzedu kilku KB/s. Krytyczne ISR-y i tak zostaja w IRAM.
+CONFIG_ESP_WIFI_IRAM_OPT=n
+CONFIG_ESP_WIFI_RX_IRAM_OPT=n
+CONFIG_ESP_WIFI_SLP_IRAM_OPT=n
+CONFIG_FREERTOS_PLACE_FUNCTIONS_INTO_FLASH=y
+CONFIG_RINGBUF_PLACE_FUNCTIONS_INTO_FLASH=y
+
+# Bufory WiFi: 16 statycznych x 1,6 KB = 25,6 KB zajete na stale od startu.
+# Odbiornik licznikow nie potrzebuje przepustowosci laptopa - 8 wystarcza
+# takze na OTA. Okno BA musi byc <= 2 x statyczne i <= dynamiczne/2.
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=8
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=16
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=16
+CONFIG_ESP_WIFI_RX_BA_WIN=6
+
+# Okna TCP 32 KB na gniazdo to byl glowny zjadacz sterty przy OTA (bufor
+# nadawczy + odbiorczy kazdego polaczenia). 8 x MSS w zupelnosci starcza
+# w sieci lokalnej; panel (71 KB gz) laduje sie nadal w ulamku sekundy.
+CONFIG_LWIP_TCP_WND_DEFAULT=11520
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=11520
+
+# mbedTLS: bufory rekordow (16 KB + 4 KB) alokowane dopiero gdy sa potrzebne
+# i zwalniane po uzyciu, zamiast na caly czas trwania polaczenia. Klucze
+# i certyfikaty CA zwalniane zaraz po handshake. To glownie tu OTA z GitHuba
+# potrzebowalo "spojnego bloku ~40 KB".
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y
+CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT=y
+
+# Nieuzywane: WPA2-Enterprise (siec domowa), OWE.
+CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT=n
+CONFIG_ESP_WIFI_ENABLE_WPA3_OWE_STA=n

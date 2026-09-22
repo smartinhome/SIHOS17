@@ -586,6 +586,9 @@ static const char *default_field_for_type(const char *type) {
         strcasecmp(type, "gas") == 0) {
         return "total_m3";
     }
+    // beta384: podzielnik ogrzewania - domyslnie sledzimy jednostki biezacego
+    // okresu (temperatury zostaja swiadomym wyborem z UI).
+    if (strcasecmp(type, "fhkvdata3") == 0) return "jednostki_hca";
     return NULL;   // nie zgadujemy dla nieznanych sterownikow
 }
 

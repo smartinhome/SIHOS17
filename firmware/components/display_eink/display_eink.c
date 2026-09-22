@@ -529,12 +529,15 @@ static char s_page_ids[MAX_PAGES][12];  // ID licznikow ze sledzonymi polami
 static int  s_page_count = 0;
 static int  s_cur_page = 0;
 
-// Etykieta i jednostka wg rodzaju licznika (kind: 1=woda,2=prad,3=gaz).
+// Etykieta i jednostka wg rodzaju licznika (kind: 1=woda,2=prad,3=gaz,
+// 4=podzielnik kosztow ogrzewania - beta384).
 static const char* kind_title(int kind) {
-    switch (kind) { case 1: return "Woda"; case 2: return "Elektryczność"; case 3: return "Gaz"; default: return "Licznik"; }
+    switch (kind) { case 1: return "Woda"; case 2: return "Elektryczność"; case 3: return "Gaz";
+                    case 4: return "Ogrzewanie"; default: return "Licznik"; }
 }
 static const char* kind_unit(int kind) {
-    switch (kind) { case 1: return "m\u00b3"; case 2: return "kWh"; case 3: return "m\u00b3"; default: return ""; }
+    switch (kind) { case 1: return "m\u00b3"; case 2: return "kWh"; case 3: return "m\u00b3";
+                    case 4: return "j."; default: return ""; }
 }
 
 // Sformatuj liczbe z jednostka do bufora.
@@ -554,6 +557,12 @@ static const char* field_label(const char *field) {
     if (strstr(field, "napiecie_l1")) return "napięcie L1";
     if (strstr(field, "napiecie_l2")) return "napięcie L2";
     if (strstr(field, "napiecie_l3")) return "napięcie L3";
+    // beta384: podzielnik ogrzewania. "poprz" sprawdzamy PRZED "jednostki",
+    // inaczej oba pola dostalyby te sama etykiete.
+    if (strstr(field, "jednostki_poprz")) return "poprz. okres";
+    if (strstr(field, "jednostki")) return "jednostki";
+    if (strstr(field, "temp_pokoj")) return "temp. pokoju";
+    if (strstr(field, "temp_grzejnik")) return "temp. grzejnika";
     return field;
 }
 
@@ -563,6 +572,10 @@ static const char* field_unit(const char *field) {
     if (strstr(field, "kw"))  return "kW";
     if (strstr(field, "_v"))  return "V";
     if (strstr(field, "m3"))  return "m\u00b3";
+    // beta384: zaden z istniejacych pol nie zawiera "hca" ani "temp_",
+    // wiec te dwa testy nie moga przechwycic niczego po drodze.
+    if (strstr(field, "hca")) return "j.";
+    if (strstr(field, "temp_")) return "\u00b0" "C";
     return "";
 }
 

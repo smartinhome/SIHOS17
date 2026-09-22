@@ -1,12 +1,9 @@
 #include "meter_total.h"
 #include "mbedtls/aes.h"
-#include "esp_log.h"          // beta383: ostrzezenie o niepotwierdzonej wersji
 #include <string.h>
 #include <math.h>
 #include <stdlib.h>
 #include <stdio.h>
-
-static const char *TAG = "METER";
 
 // ---------- CRC16 EN 13757 (poly 0x3D65) ----------
 static uint16_t crc16(const uint8_t *d, int off, int len) {
@@ -706,6 +703,22 @@ int meter_total_extract_fields(const uint8_t *data, size_t len,
         return 0;
     }
 
+    // beta384: podzielnik kosztow ogrzewania - cztery pola naraz.
+    if (strcmp(mf, "TCH") == 0 && medium == 0x80) {
+        fhkv_t h;
+        if (!fhkv_decode(clean, clen, &h)) return 0;
+        int nf = 0;
+        // Jednostki biezacego okresu rosna narastajaco - jak stan licznika,
+        // wiec kumulacyjne (wykres pokaze przyrosty). Reszta to wartosci
+        // chwilowe: poprzedni okres jest staly, temperatury sie wahaja.
+        mtf_put(out, &nf, max_fields, "jednostki_hca",       (double)h.curr_hca, "j.", 1);
+        mtf_put(out, &nf, max_fields, "jednostki_poprz_hca", (double)h.prev_hca, "j.", 0);
+        mtf_put(out, &nf, max_fields, "temp_pokoj_c",    h.t_room / 100.0, "\u00b0" "C", 0);
+        mtf_put(out, &nf, max_fields, "temp_grzejnik_c", h.t_rad  / 100.0, "\u00b0" "C", 0);
+        *out_kind = 4;   // 4 = podzielnik ogrzewania
+        return nf;
+    }
+
     // Pozostale liczniki: jedno pole total (uzyj istniejacej funkcji)
     double total = 0; int kind = 0;
     if (meter_total_extract(data, len, key_hex, &total, &kind)) {
@@ -722,27 +735,40 @@ int meter_total_extract_fields(const uint8_t *data, size_t len,
 // Nazwa sterownika rozpoznana z samego NAGLOWKA ramki, bez pelnego dekodowania.
 // Dzieki temu mozna ja wypisac w logu od razu po odbiorze, nie przestawiajac
 // kolejnosci - gdyby dekodowanie sie wywalilo, wpis w logu i tak powstanie.
-// beta383: wersje Techema, dla ktorych obowiazuje uklad pol MK Radio 4 (CI 0xA2).
-//   0x95 - potwierdzona wektorem testowym wmbusmeters (jedynym, jaki maja),
-//   0x70 - zadeklarowana przez wmbusmeters w liscie wykrywania, bez wektora,
-//   0x52 - dopisana na podstawie ramki z terenu (TCH,52,62, id 20850045).
-//          Tresc producenta zgadza sie z wektorem 0x95 na bajtach-znacznikach
-//          +0 (0x06), +5 (0x60) oraz +9/+10 (0x04 0x00); roznia sie wylacznie
-//          pozycje niosace dane. Sterownika na te wersje nie ma ani u nas, ani
-//          w wmbusmeters 3.0.0, wiec odczyt pozostaje NIEPOTWIERDZONY do czasu
-//          porownania z wyswietlaczem licznika - patrz ostrzezenie nizej.
-// Jedna funkcja dla rozpoznawania nazwy i dla dekodowania, zeby te dwa miejsca
-// nie mogly sie rozjechac (dotad kazde mialo wlasna kopie warunku).
-static bool tch_mk4_version(uint8_t ver) {
-    return ver == 0x95 || ver == 0x70 || ver == 0x52;
+// beta384: Techem FHKV data III - podzielnik kosztow ogrzewania.
+// TCH + medium 0x80. Brak DIF/VIF: pola na stalych pozycjach, a wariant
+// wybiera PIERWSZY bajt tresci, nie wersja z naglowka - ta sama wersja 0x69
+// wystepuje ze znacznikiem 0x11 i 0x01. CI bywa 0xA0 albo 0xA2, wiec po CI
+// nie filtrujemy. Uklad wprost z gramatyki sterownika fhkvdataiii wmbusmeters;
+// odtwarza wszystkie trzy ich wektory testowe co do cyfry.
+typedef struct {
+    uint16_t prev_hca, curr_hca;   // jednostki: poprzedni okres i biezacy
+    uint16_t t_room, t_rad;        // setne stopnia Celsjusza
+} fhkv_t;
+
+static bool fhkv_decode(const uint8_t *clean, int clen, fhkv_t *out) {
+    if (clen < 24) return false;
+    const uint8_t *p = clean + 11;      // tresc producenta zaczyna sie po CI
+    int n = clen - 11;
+    int tr;                             // pozycja temperatury pokoju
+    if (p[0] == 0x01 || p[0] == 0x11)   tr = 9;
+    else if (p[0] == 0x0F)              tr = 10;  // wariant z dodatkowym bajtem
+    else return false;                  // nieznany uklad - nie zgadujemy
+    if (n < tr + 4) return false;
+    out->prev_hca = (uint16_t)(p[3] | (p[4] << 8));
+    out->curr_hca = (uint16_t)(p[7] | (p[8] << 8));
+    out->t_room   = (uint16_t)(p[tr]     | (p[tr + 1] << 8));
+    out->t_rad    = (uint16_t)(p[tr + 2] | (p[tr + 3] << 8));
+    return true;
 }
 
 const char *meter_total_driver_name(const uint8_t *data, size_t len) {
     if (!data || len < 12) return "?";
     char mf[4]; manuf3(data, mf);
     uint8_t ver = data[8], medium = data[9];
-    if (strcmp(mf, "TCH") == 0 && tch_mk4_version(ver) &&
+    if (strcmp(mf, "TCH") == 0 && ver == 0x95 &&
         (medium == 0x62 || medium == 0x72))      return "mkradio4";
+    if (strcmp(mf, "TCH") == 0 && medium == 0x80) return "fhkvdata3";  // beta384
     if (strcmp(mf, "TCH") == 0)                  return "techem?";
     if (strcmp(mf, "SAP") == 0 || strcmp(mf, "DME") == 0 ||
         strcmp(mf, "HYD") == 0)                  return "izar";
@@ -777,32 +803,18 @@ bool meter_total_extract(const uint8_t *data, size_t len,
     uint8_t clean[300];
     int clen = remove_block_crc(data, (int)len, clean, sizeof(clean));
 
-    // Techem MK Radio 4 (TCH, CI 0xA2 = format producenta; wersje w
-    // tch_mk4_version). Nie ma tu DIF/VIF - dane leza na stalych pozycjach
-    // ramki BEZ CRC blokow:
+    // Techem MK Radio 4 (TCH, wersja 0x95, CI 0xA2 = format producenta).
+    // Nie ma tu DIF/VIF - dane leza na stalych pozycjach ramki BEZ CRC blokow:
     //   [14..15] licznik z konca poprzedniego okresu rozliczeniowego (LE, 0.1 m3)
     //   [18..19] przyrost od tamtego momentu               (LE, 0.1 m3)
-    // Stan biezacy = suma obu. Zgodne z wmbusmeters (driver mkradio4) - ich
-    // wektor testowy dla wersji 0x95 wychodzi z tej arytmetyki co do cyfry.
+    // Stan biezacy = suma obu. Zgodne z wmbusmeters (driver mkradio4).
     // Typ 0x62 = woda ciepla, 0x72 = woda zimna - oba obslugiwane tak samo.
-    if (strcmp(mf, "TCH") == 0 && clen >= 20 && tch_mk4_version(clean[8]) &&
+    if (strcmp(mf, "TCH") == 0 && clen >= 20 && clean[8] == 0x95 &&
         (clean[9] == 0x62 || clean[9] == 0x72) && clean[10] == 0xA2) {
         uint16_t prev = (uint16_t)(clean[14] | (clean[15] << 8));
         uint16_t curr = (uint16_t)(clean[18] | (clean[19] << 8));
         *out_total = (double)(prev + curr) / 10.0;
         *out_kind  = 1;   // woda
-        // beta383: wersja 0x52 nie ma potwierdzenia z wyswietlacza licznika.
-        // Mowimy o tym RAZ na uruchomienie - przy testach w terenie ma byc
-        // jasne, ze ta liczba to hipoteza, ale bez wpisu przy kazdej ramce.
-        if (clean[8] == 0x52) {
-            static bool s_warned_52 = false;
-            if (!s_warned_52) {
-                s_warned_52 = true;
-                ESP_LOGW(TAG, "Techem %02X%02X%02X%02X wersja 0x52: uklad pol wziety "
-                              "z MK Radio 4, odczyt %.1f m3 DO WERYFIKACJI z licznikiem",
-                         clean[7], clean[6], clean[5], clean[4], *out_total);
-            }
-        }
         return true;
     }
     // IZAR / PRIOS (Diehl: SAP, DME, Hydrometer: HYD) - LFSR, bez klucza AES.
@@ -826,6 +838,16 @@ bool meter_total_extract(const uint8_t *data, size_t len,
     if (strcmp(mf, "AMX") == 0 && medium == 0x03) {
         int k = 0;
         if (difvif_meter(clean, clen, key, have_key, out_total, &k)) { *out_kind = 3; return true; }  // 3=gaz
+        return false;
+    }
+    // beta384: podzielnik ogrzewania - "stanem" sa jednostki biezacego okresu.
+    if (strcmp(mf, "TCH") == 0 && medium == 0x80) {
+        fhkv_t h;
+        if (fhkv_decode(clean, clen, &h)) {
+            *out_total = (double)h.curr_hca;
+            *out_kind  = 4;   // podzielnik
+            return true;
+        }
         return false;
     }
     // Generyczny fallback: liczniki z naglowkiem TPL (0x7A/0x72) i standardowym

@@ -1,9 +1,12 @@
 #include "meter_total.h"
 #include "mbedtls/aes.h"
+#include "esp_log.h"          // beta383: ostrzezenie o niepotwierdzonej wersji
 #include <string.h>
 #include <math.h>
 #include <stdlib.h>
 #include <stdio.h>
+
+static const char *TAG = "METER";
 
 // ---------- CRC16 EN 13757 (poly 0x3D65) ----------
 static uint16_t crc16(const uint8_t *d, int off, int len) {
@@ -719,11 +722,26 @@ int meter_total_extract_fields(const uint8_t *data, size_t len,
 // Nazwa sterownika rozpoznana z samego NAGLOWKA ramki, bez pelnego dekodowania.
 // Dzieki temu mozna ja wypisac w logu od razu po odbiorze, nie przestawiajac
 // kolejnosci - gdyby dekodowanie sie wywalilo, wpis w logu i tak powstanie.
+// beta383: wersje Techema, dla ktorych obowiazuje uklad pol MK Radio 4 (CI 0xA2).
+//   0x95 - potwierdzona wektorem testowym wmbusmeters (jedynym, jaki maja),
+//   0x70 - zadeklarowana przez wmbusmeters w liscie wykrywania, bez wektora,
+//   0x52 - dopisana na podstawie ramki z terenu (TCH,52,62, id 20850045).
+//          Tresc producenta zgadza sie z wektorem 0x95 na bajtach-znacznikach
+//          +0 (0x06), +5 (0x60) oraz +9/+10 (0x04 0x00); roznia sie wylacznie
+//          pozycje niosace dane. Sterownika na te wersje nie ma ani u nas, ani
+//          w wmbusmeters 3.0.0, wiec odczyt pozostaje NIEPOTWIERDZONY do czasu
+//          porownania z wyswietlaczem licznika - patrz ostrzezenie nizej.
+// Jedna funkcja dla rozpoznawania nazwy i dla dekodowania, zeby te dwa miejsca
+// nie mogly sie rozjechac (dotad kazde mialo wlasna kopie warunku).
+static bool tch_mk4_version(uint8_t ver) {
+    return ver == 0x95 || ver == 0x70 || ver == 0x52;
+}
+
 const char *meter_total_driver_name(const uint8_t *data, size_t len) {
     if (!data || len < 12) return "?";
     char mf[4]; manuf3(data, mf);
     uint8_t ver = data[8], medium = data[9];
-    if (strcmp(mf, "TCH") == 0 && ver == 0x95 &&
+    if (strcmp(mf, "TCH") == 0 && tch_mk4_version(ver) &&
         (medium == 0x62 || medium == 0x72))      return "mkradio4";
     if (strcmp(mf, "TCH") == 0)                  return "techem?";
     if (strcmp(mf, "SAP") == 0 || strcmp(mf, "DME") == 0 ||
@@ -759,18 +777,32 @@ bool meter_total_extract(const uint8_t *data, size_t len,
     uint8_t clean[300];
     int clen = remove_block_crc(data, (int)len, clean, sizeof(clean));
 
-    // Techem MK Radio 4 (TCH, wersja 0x95, CI 0xA2 = format producenta).
-    // Nie ma tu DIF/VIF - dane leza na stalych pozycjach ramki BEZ CRC blokow:
+    // Techem MK Radio 4 (TCH, CI 0xA2 = format producenta; wersje w
+    // tch_mk4_version). Nie ma tu DIF/VIF - dane leza na stalych pozycjach
+    // ramki BEZ CRC blokow:
     //   [14..15] licznik z konca poprzedniego okresu rozliczeniowego (LE, 0.1 m3)
     //   [18..19] przyrost od tamtego momentu               (LE, 0.1 m3)
-    // Stan biezacy = suma obu. Zgodne z wmbusmeters (driver mkradio4).
+    // Stan biezacy = suma obu. Zgodne z wmbusmeters (driver mkradio4) - ich
+    // wektor testowy dla wersji 0x95 wychodzi z tej arytmetyki co do cyfry.
     // Typ 0x62 = woda ciepla, 0x72 = woda zimna - oba obslugiwane tak samo.
-    if (strcmp(mf, "TCH") == 0 && clen >= 20 && clean[8] == 0x95 &&
+    if (strcmp(mf, "TCH") == 0 && clen >= 20 && tch_mk4_version(clean[8]) &&
         (clean[9] == 0x62 || clean[9] == 0x72) && clean[10] == 0xA2) {
         uint16_t prev = (uint16_t)(clean[14] | (clean[15] << 8));
         uint16_t curr = (uint16_t)(clean[18] | (clean[19] << 8));
         *out_total = (double)(prev + curr) / 10.0;
         *out_kind  = 1;   // woda
+        // beta383: wersja 0x52 nie ma potwierdzenia z wyswietlacza licznika.
+        // Mowimy o tym RAZ na uruchomienie - przy testach w terenie ma byc
+        // jasne, ze ta liczba to hipoteza, ale bez wpisu przy kazdej ramce.
+        if (clean[8] == 0x52) {
+            static bool s_warned_52 = false;
+            if (!s_warned_52) {
+                s_warned_52 = true;
+                ESP_LOGW(TAG, "Techem %02X%02X%02X%02X wersja 0x52: uklad pol wziety "
+                              "z MK Radio 4, odczyt %.1f m3 DO WERYFIKACJI z licznikiem",
+                         clean[7], clean[6], clean[5], clean[4], *out_total);
+            }
+        }
         return true;
     }
     // IZAR / PRIOS (Diehl: SAP, DME, Hydrometer: HYD) - LFSR, bez klucza AES.

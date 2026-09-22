@@ -542,6 +542,9 @@ static const char* kind_unit(int kind) {
 
 // Sformatuj liczbe z jednostka do bufora.
 static void fmt_val(char *buf, int cap, double v, const char *unit, int decimals) {
+    // beta386: jednostki podzielnika sa calkowite. Pole jest kumulacyjne,
+    // wiec wolajacy prosi o trzy miejsca po przecinku - dla "j." nie maja sensu.
+    if (unit && strcmp(unit, "j.") == 0) decimals = 0;
     if (decimals <= 0) snprintf(buf, cap, "%.0f %s", v, unit);
     else if (decimals == 2) snprintf(buf, cap, "%.2f %s", v, unit);
     else snprintf(buf, cap, "%.3f %s", v, unit);

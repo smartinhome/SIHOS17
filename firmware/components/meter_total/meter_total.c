@@ -678,6 +678,33 @@ static int difvif_fields(const uint8_t *p, int len, mtf_field_t *out, int max_fi
     return nf;
 }
 
+// beta384: Techem FHKV data III - podzielnik kosztow ogrzewania.
+// TCH + medium 0x80. Brak DIF/VIF: pola na stalych pozycjach, a wariant
+// wybiera PIERWSZY bajt tresci, nie wersja z naglowka - ta sama wersja 0x69
+// wystepuje ze znacznikiem 0x11 i 0x01. CI bywa 0xA0 albo 0xA2, wiec po CI
+// nie filtrujemy. Uklad wprost z gramatyki sterownika fhkvdataiii wmbusmeters;
+// odtwarza wszystkie trzy ich wektory testowe co do cyfry.
+typedef struct {
+    uint16_t prev_hca, curr_hca;   // jednostki: poprzedni okres i biezacy
+    uint16_t t_room, t_rad;        // setne stopnia Celsjusza
+} fhkv_t;
+
+static bool fhkv_decode(const uint8_t *clean, int clen, fhkv_t *out) {
+    if (clen < 24) return false;
+    const uint8_t *p = clean + 11;      // tresc producenta zaczyna sie po CI
+    int n = clen - 11;
+    int tr;                             // pozycja temperatury pokoju
+    if (p[0] == 0x01 || p[0] == 0x11)   tr = 9;
+    else if (p[0] == 0x0F)              tr = 10;  // wariant z dodatkowym bajtem
+    else return false;                  // nieznany uklad - nie zgadujemy
+    if (n < tr + 4) return false;
+    out->prev_hca = (uint16_t)(p[3] | (p[4] << 8));
+    out->curr_hca = (uint16_t)(p[7] | (p[8] << 8));
+    out->t_room   = (uint16_t)(p[tr]     | (p[tr + 1] << 8));
+    out->t_rad    = (uint16_t)(p[tr + 2] | (p[tr + 3] << 8));
+    return true;
+}
+
 int meter_total_extract_fields(const uint8_t *data, size_t len,
                                const char *key_hex,
                                mtf_field_t *out, int max_fields, int *out_kind) {
@@ -735,33 +762,6 @@ int meter_total_extract_fields(const uint8_t *data, size_t len,
 // Nazwa sterownika rozpoznana z samego NAGLOWKA ramki, bez pelnego dekodowania.
 // Dzieki temu mozna ja wypisac w logu od razu po odbiorze, nie przestawiajac
 // kolejnosci - gdyby dekodowanie sie wywalilo, wpis w logu i tak powstanie.
-// beta384: Techem FHKV data III - podzielnik kosztow ogrzewania.
-// TCH + medium 0x80. Brak DIF/VIF: pola na stalych pozycjach, a wariant
-// wybiera PIERWSZY bajt tresci, nie wersja z naglowka - ta sama wersja 0x69
-// wystepuje ze znacznikiem 0x11 i 0x01. CI bywa 0xA0 albo 0xA2, wiec po CI
-// nie filtrujemy. Uklad wprost z gramatyki sterownika fhkvdataiii wmbusmeters;
-// odtwarza wszystkie trzy ich wektory testowe co do cyfry.
-typedef struct {
-    uint16_t prev_hca, curr_hca;   // jednostki: poprzedni okres i biezacy
-    uint16_t t_room, t_rad;        // setne stopnia Celsjusza
-} fhkv_t;
-
-static bool fhkv_decode(const uint8_t *clean, int clen, fhkv_t *out) {
-    if (clen < 24) return false;
-    const uint8_t *p = clean + 11;      // tresc producenta zaczyna sie po CI
-    int n = clen - 11;
-    int tr;                             // pozycja temperatury pokoju
-    if (p[0] == 0x01 || p[0] == 0x11)   tr = 9;
-    else if (p[0] == 0x0F)              tr = 10;  // wariant z dodatkowym bajtem
-    else return false;                  // nieznany uklad - nie zgadujemy
-    if (n < tr + 4) return false;
-    out->prev_hca = (uint16_t)(p[3] | (p[4] << 8));
-    out->curr_hca = (uint16_t)(p[7] | (p[8] << 8));
-    out->t_room   = (uint16_t)(p[tr]     | (p[tr + 1] << 8));
-    out->t_rad    = (uint16_t)(p[tr + 2] | (p[tr + 3] << 8));
-    return true;
-}
-
 const char *meter_total_driver_name(const uint8_t *data, size_t len) {
     if (!data || len < 12) return "?";
     char mf[4]; manuf3(data, mf);

@@ -7,7 +7,7 @@
 // Dziala WYLACZNIE po polaczeniu z siecia domowa - w trybie AP modul nie ma
 // dostepu do brokera, wiec klient nie jest wtedy uruchamiany.
 //
-// Tematy:
+// Tematy (tylko pola przypiete do dashboardu lub sledzone w historii):
 //   <prefiks>/<id licznika>/<pole>   wartosc liczbowa
 //   <prefiks>/<id licznika>/rssi     sila sygnalu
 //   <prefiks>/status                 online / offline (Last Will)
@@ -26,7 +26,9 @@ bool mqtt_pub_connected(void);
 
 // Zglos odczyt do wyslania. Wolane z zadania odbioru ramek - NIE blokuje,
 // wrzuca do kolejki i wraca. Gdy MQTT jest wylaczony, nic nie robi.
-void mqtt_pub_field(const char *id_hex, const char *field,
+// beta389: wysyla tylko pola z dashboardu lub historii; zwraca true,
+// gdy pole do nich nalezy (nawet jesli tym razem pominiete przez odstep).
+bool mqtt_pub_field(const char *id_hex, const char *field,
                     double value, const char *unit, int8_t rssi);
 
 // Sila sygnalu - raz na odebrana ramke, nie na kazde pole.

@@ -462,15 +462,18 @@ static void process_frame(const wmbus_frame_t *frame) {
         if (ts_unix) {
             // beta378: dotad w tym miejscu bylo DRUGIE meter_total_extract_fields
             // na te sama ramke (AES + DIF/VIF od nowa). Pola juz mamy z decode_frame.
-            if (nf > 0) mqtt_pub_rssi(tmp.id_hex, frame->rssi);
+            bool mq_any = false;
             for (int i = 0; i < nf; i++) {
                 // zapis tylko sledzonych pol (filtr w history_on_field)
                 history_on_field(tmp.id_hex, fields[i].field, fields[i].value,
                                  kind, fields[i].cumulative, ts_unix);
                 // Publikacja przez MQTT - kolejkuje i wraca, nie blokuje odbioru.
-                mqtt_pub_field(tmp.id_hex, fields[i].field, fields[i].value,
-                               fields[i].unit, frame->rssi);
+                if (mqtt_pub_field(tmp.id_hex, fields[i].field, fields[i].value,
+                                   fields[i].unit, frame->rssi))
+                    mq_any = true;
             }
+            // beta389: RSSI tylko dla licznikow, z ktorych cos publikujemy.
+            if (mq_any) mqtt_pub_rssi(tmp.id_hex, frame->rssi);
         }
     }
 

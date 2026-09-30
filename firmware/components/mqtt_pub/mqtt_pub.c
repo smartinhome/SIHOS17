@@ -1,5 +1,6 @@
 #include "mqtt_pub.h"
 #include "nvs_config.h"
+#include "history.h"
 #include "mqtt_client.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -37,7 +38,8 @@ typedef struct {
     uint32_t last_ms;     // kiedy ostatnio opublikowano to pole
 } ha_item_t;
 
-#define HA_MAX 24
+// beta389: tyle, ile pol moze byc przypietych do dashboardu (MAX_DASH_FIELDS).
+#define HA_MAX 32
 
 // Najkrotszy odstep miedzy publikacjami TEGO SAMEGO pola. Otus nadaje co
 // kilkanascie sekund i ma ~20 pol - bez tego brokera zalewaloby kilkaset
@@ -168,14 +170,31 @@ static void ha_announce_one(const ha_item_t *h) {
         esp_mqtt_client_publish(s_client, topic, cfg, 0, 0, 1);   // retain
 }
 
+// beta389: publikujemy tylko pola przypiete do dashboardu lub sledzone w
+// historii. Dashboard bez recznie przypietych pol pokazuje pola z historii,
+// wiec ta suma pokrywa dokladnie to, co widac w panelu.
+static bool mq_wanted(const char *id_hex, const char *field) {
+    char key[DASH_FIELD_LEN];
+    snprintf(key, sizeof(key), "%s:%s", id_hex, field);
+    return history_is_tracked(key) || nvs_config_dash_field_is_set(key);
+}
+
 // Zapamietaj pole i ogloś je raz. Kolejne odczyty tego samego pola nie
 // generuja juz ogloszen.
 static ha_item_t *ha_remember(const char *id_hex, const char *field, const char *unit) {
     for (int i = 0; i < s_ha_count; i++)
         if (strcmp(s_ha[i].id_hex, id_hex) == 0 && strcmp(s_ha[i].field, field) == 0)
             return &s_ha[i];
-    if (s_ha_count >= HA_MAX) return NULL;
-    ha_item_t *h = &s_ha[s_ha_count++];
+    ha_item_t *h = NULL;
+    if (s_ha_count < HA_MAX) {
+        h = &s_ha[s_ha_count++];
+    } else {
+        // Pelna lista - zajmij miejsce pola odpietego w panelu.
+        for (int i = 0; i < s_ha_count && !h; i++)
+            if (!mq_wanted(s_ha[i].id_hex, s_ha[i].field)) h = &s_ha[i];
+        if (!h) return NULL;
+    }
+    memset(h, 0, sizeof(*h));
     snprintf(h->id_hex, sizeof(h->id_hex), "%s", id_hex);
     snprintf(h->field,  sizeof(h->field),  "%s", field);
     snprintf(h->unit,   sizeof(h->unit),   "%s", unit ? unit : "");
@@ -184,7 +203,8 @@ static ha_item_t *ha_remember(const char *id_hex, const char *field, const char 
 }
 
 static void ha_announce_all(void) {
-    for (int i = 0; i < s_ha_count; i++) ha_announce_one(&s_ha[i]);
+    for (int i = 0; i < s_ha_count; i++)
+        if (mq_wanted(s_ha[i].id_hex, s_ha[i].field)) ha_announce_one(&s_ha[i]);
 }
 
 // ---------- beta388: test publikacji w obie strony ----------
@@ -450,13 +470,14 @@ int mqtt_pub_test_status(char *buf, int cap) {
         (unsigned)s_mt_ms_puback, (unsigned)s_mt_ms_echo, s_mt_err);
 }
 
-void mqtt_pub_field(const char *id_hex, const char *field,
+bool mqtt_pub_field(const char *id_hex, const char *field,
                     double value, const char *unit, int8_t rssi) {
-    if (!s_running || !id_hex || !field) return;
+    if (!s_running || !id_hex || !field) return false;
+    if (!mq_wanted(id_hex, field)) return false;
     ha_item_t *h = ha_remember(id_hex, field, unit);
     uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
     if (h) {
-        if (h->last_ms && (uint32_t)(now_ms - h->last_ms) < MIN_INTERVAL_MS) return;
+        if (h->last_ms && (uint32_t)(now_ms - h->last_ms) < MIN_INTERVAL_MS) return true;
         h->last_ms = now_ms;
     }
 
@@ -467,6 +488,7 @@ void mqtt_pub_field(const char *id_hex, const char *field,
     mq_push(topic, val, true);
 
     (void)rssi;   // RSSI publikuje mqtt_pub_rssi() raz na ramke
+    return true;
 }
 
 void mqtt_pub_rssi(const char *id_hex, int8_t rssi) {

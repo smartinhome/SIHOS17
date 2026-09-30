@@ -39,6 +39,14 @@ void mqtt_pub_day(const char *id_hex, const char *field,
 // Liczba wyslanych wiadomosci i bledow OD STARTU MODULU - do zakladki System.
 void mqtt_pub_stats(uint32_t *sent, uint32_t *failed);
 
+// beta388: test publikacji w obie strony (przycisk w zakladce System).
+// start  - subskrybuje <prefiks>/test, publikuje tam z QoS 1 i wraca od razu;
+// status - JSON ze stanem testu, do odpytywania przez panel.
+// Wynik "ok" oznacza, ze wiadomosc WROCILA od brokera - a wiec zostala przyjeta
+// i rozeslana. Sam licznik "wyslanych" tego nie dowodzi (patrz mqtt_pub.c).
+bool mqtt_pub_test_start(void);
+int  mqtt_pub_test_status(char *buf, int cap);
+
 // To samo, ale za BIEZACA DOBE. Liczniki zeruja sie samoczynnie po lokalnej
 // polnocy (strefa z konfiguracji), przy pierwszym odwolaniu juz po zmianie daty.
 void mqtt_pub_stats_day(uint32_t *sent, uint32_t *failed);

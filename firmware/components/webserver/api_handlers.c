@@ -1283,6 +1283,16 @@ static esp_err_t handle_mqtt_cfg(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// beta388: test publikacji MQTT. POST startuje test, GET odpytuje o wynik
+// (panel pyta co 300 ms). Obie metody zwracaja ten sam JSON ze stanem.
+static esp_err_t handle_mqtt_test(httpd_req_t *req) {
+    if (req->method == HTTP_POST) mqtt_pub_test_start();
+    char buf[512];
+    mqtt_pub_test_status(buf, sizeof(buf));
+    resp_json(req, buf);
+    return ESP_OK;
+}
+
 static esp_err_t handle_backup_get(httpd_req_t *req) {
     // Kopia wysylana STRUMIENIOWO. Wczesniej budowala sie w buforze 60 kB w RAM,
     // przez co miescily sie w niej tylko biezace pliki historii (168 godzin =
@@ -1594,6 +1604,9 @@ void api_register_handlers(httpd_handle_t server) {
         { .uri="/api/factory-reset",.method=HTTP_POST,.handler=handle_factory_reset,.user_ctx=NULL, .is_websocket=false },
         { .uri="/api/mqtt",        .method=HTTP_GET,  .handler=handle_mqtt_cfg,    .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/mqtt",        .method=HTTP_POST, .handler=handle_mqtt_cfg,    .user_ctx=NULL, .is_websocket=false },
+        // beta388: 45 z 48 uchwytow (max_uri_handlers w webserver.c)
+        { .uri="/api/mqtt/test",   .method=HTTP_GET,  .handler=handle_mqtt_test,   .user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/mqtt/test",   .method=HTTP_POST, .handler=handle_mqtt_test,   .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/backup",      .method=HTTP_GET,  .handler=handle_backup_get,  .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/backup",      .method=HTTP_POST, .handler=handle_backup_post, .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/logs",        .method=HTTP_GET,  .handler=handle_logs,        .user_ctx=NULL, .is_websocket=false },

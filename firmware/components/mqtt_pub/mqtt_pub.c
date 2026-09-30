@@ -187,6 +187,50 @@ static void ha_announce_all(void) {
     for (int i = 0; i < s_ha_count; i++) ha_announce_one(&s_ha[i]);
 }
 
+// ---------- beta388: test publikacji w obie strony ----------
+// Licznik "wyslanych" liczy wywolania publish() z QoS 0 - sukces oznacza tylko
+// zapis do gniazda, bez potwierdzenia od brokera. Broker, ktory po cichu
+// odrzuca temat (ACL), i tak go podbija. Test dowodzi wiecej: subskrybuje temat
+// testowy, publikuje na nim i czeka, az wiadomosc do nas WROCI.
+typedef enum { MT_IDLE = 0, MT_RUN, MT_OK, MT_FAIL } mt_state_t;
+#define MT_TIMEOUT_MS 6000
+
+static portMUX_TYPE        s_mt_mux = portMUX_INITIALIZER_UNLOCKED;
+static volatile mt_state_t s_mt_state = MT_IDLE;
+static volatile bool       s_mt_sub_ok = false, s_mt_puback = false;
+static volatile int        s_mt_pub_id = -1;
+static volatile uint32_t   s_mt_t0 = 0, s_mt_ms_puback = 0, s_mt_ms_echo = 0;
+static char                s_mt_topic[TOPIC_MAX];
+static char                s_mt_payload[PAYLOAD_MAX];
+static const char         *s_mt_err = "";
+
+static uint32_t mt_now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
+
+// Ustaw stan koncowy bez wolania API klienta (bezpieczne z kazdego miejsca).
+static void mt_set(mt_state_t st, const char *err) {
+    portENTER_CRITICAL(&s_mt_mux);
+    s_mt_state = st;
+    s_mt_err = err ? err : "";
+    portEXIT_CRITICAL(&s_mt_mux);
+}
+
+// Zakoncz TRWAJACY test i zdejmij subskrypcje. Wolac POZA sekcja krytyczna -
+// unsubscribe to wywolanie API klienta. Zwraca false, gdy test juz sie zakonczyl
+// (np. wiadomosc wrocila dokladnie w chwili uplywu czasu) - wtedy nic nie rusza.
+static bool mt_finish(mt_state_t st, const char *err) {
+    bool bylo = false;
+    portENTER_CRITICAL(&s_mt_mux);
+    if (s_mt_state == MT_RUN) {
+        s_mt_state = st;
+        s_mt_err = err ? err : "";
+        bylo = true;
+    }
+    portEXIT_CRITICAL(&s_mt_mux);
+    if (bylo && s_client && s_mt_topic[0])
+        esp_mqtt_client_unsubscribe(s_client, s_mt_topic);
+    return bylo;
+}
+
 // ---------- zdarzenia klienta ----------
 
 static void on_mqtt_event(void *arg, esp_event_base_t base,
@@ -206,7 +250,55 @@ static void on_mqtt_event(void *arg, esp_event_base_t base,
         case MQTT_EVENT_DISCONNECTED:
             s_connected = false;
             ESP_LOGW(TAG, "Rozlaczono z brokerem");
+            // beta388: bez polaczenia subskrypcja przepadla - nie ma czego zdejmowac.
+            if (s_mt_state == MT_RUN)
+                mt_set(MT_FAIL, "Połączenie z brokerem zerwało się w trakcie testu.");
             break;
+        // beta388: kroki testu publikacji. Potwierdzenie subskrypcji dopasowujemy
+        // po STANIE testu, nie po msg_id: subskrypcje wysyla zadanie HTTP, a SUBACK
+        // obsluguje zadanie MQTT - potrafi przyjsc, zanim zdazymy zapisac jego
+        // msg_id. Modul nie subskrybuje niczego innego, wiec to jednoznaczne.
+        case MQTT_EVENT_SUBSCRIBED: {
+            esp_mqtt_event_handle_t ev = (esp_mqtt_event_handle_t)data;
+            if (s_mt_state != MT_RUN || s_mt_sub_ok) break;
+            if (ev && ev->error_handle &&
+                ev->error_handle->error_type == MQTT_ERROR_TYPE_SUBSCRIBE_FAILED) {
+                mt_finish(MT_FAIL, "Broker odmówił subskrypcji tematu testowego "
+                                   "- najpewniej ACL nie pozwala temu użytkownikowi "
+                                   "czytać z tego tematu.");
+                break;
+            }
+            s_mt_sub_ok = true;
+            // Publikacja z tego samego zadania co obsluga zdarzen, wiec PUBACK nie
+            // moze przyjsc przed zapisaniem msg_id - tu dopasowanie po id jest pewne.
+            int id = esp_mqtt_client_publish(s_client, s_mt_topic, s_mt_payload, 0, 1, 0);
+            if (id < 0) mt_finish(MT_FAIL, "Moduł nie zdołał wysłać wiadomości testowej.");
+            else        s_mt_pub_id = id;
+            break;
+        }
+        case MQTT_EVENT_PUBLISHED: {
+            esp_mqtt_event_handle_t ev = (esp_mqtt_event_handle_t)data;
+            if (s_mt_state == MT_RUN && ev && ev->msg_id == s_mt_pub_id && !s_mt_puback) {
+                s_mt_puback = true;
+                s_mt_ms_puback = mt_now_ms() - s_mt_t0;
+            }
+            break;
+        }
+        case MQTT_EVENT_DATA: {
+            // Powrot wiadomosci dopasowujemy po temacie I tresci - ewentualna
+            // wiadomosc zatrzymana (retain) na tym temacie nie udaje sukcesu.
+            esp_mqtt_event_handle_t ev = (esp_mqtt_event_handle_t)data;
+            if (s_mt_state != MT_RUN || !ev || !ev->topic || !ev->data) break;
+            size_t tl = strlen(s_mt_topic), pl = strlen(s_mt_payload);
+            if ((size_t)ev->topic_len == tl && memcmp(ev->topic, s_mt_topic, tl) == 0 &&
+                (size_t)ev->data_len == pl && memcmp(ev->data, s_mt_payload, pl) == 0) {
+                s_mt_ms_echo = mt_now_ms() - s_mt_t0;
+                if (mt_finish(MT_OK, ""))
+                    ESP_LOGI(TAG, "Test publikacji OK: %s wrocil po %u ms",
+                             s_mt_topic, (unsigned)s_mt_ms_echo);
+            }
+            break;
+        }
         case MQTT_EVENT_ERROR:
             mqtt_roll_day();
             s_failed++; s_failed_day++;
@@ -275,6 +367,9 @@ void mqtt_pub_start(void) {
 }
 
 void mqtt_pub_stop(void) {
+    // beta388: klient zaraz zniknie - trwajacy test konczymy bez unsubscribe.
+    if (s_mt_state == MT_RUN)
+        mt_set(MT_FAIL, "Klient MQTT został zatrzymany w trakcie testu.");
     s_running = false;
     s_connected = false;
     if (s_client) {
@@ -287,6 +382,73 @@ void mqtt_pub_stop(void) {
 }
 
 bool mqtt_pub_connected(void) { return s_connected; }
+
+// beta388: start testu publikacji. Wraca od razu; wynik odczytuje sie przez
+// mqtt_pub_test_status(). Zwraca false, gdy test nie mogl ruszyc.
+bool mqtt_pub_test_start(void) {
+    const sih_config_t *c = nvs_config_ptr();
+
+    // Trwajacy test (np. drugi klik) przerywamy porzadnie - ze zdjeciem subskrypcji.
+    if (s_mt_state == MT_RUN) mt_finish(MT_FAIL, "Przerwany nowym testem.");
+
+    char pref[24]; prefix_of(pref, sizeof(pref));
+    snprintf(s_mt_topic, sizeof(s_mt_topic), "%s/test", pref);
+    // Tresc czytelna w nasluchu Home Assistanta: godzina + krotki znacznik.
+    // Znacznik odroznia ten test od poprzednich, godzina - od wiadomosci z innego dnia.
+    unsigned tok = (unsigned)(esp_timer_get_time() & 0xFFFF);
+    time_t now = time(NULL);
+    if (now > 1700000000) {
+        struct tm tmv; localtime_r(&now, &tmv);
+        snprintf(s_mt_payload, sizeof(s_mt_payload), "SIHOS17 test %02d:%02d:%02d #%04x",
+                 tmv.tm_hour, tmv.tm_min, tmv.tm_sec, tok);
+    } else {
+        snprintf(s_mt_payload, sizeof(s_mt_payload), "SIHOS17 test #%04x", tok);
+    }
+    s_mt_sub_ok = false; s_mt_puback = false; s_mt_pub_id = -1;
+    s_mt_ms_puback = 0;  s_mt_ms_echo = 0;
+    s_mt_t0 = mt_now_ms();
+
+    if (!c->mqtt_enabled) {
+        mt_set(MT_FAIL, "MQTT jest wyłączony - zaznacz \u201eWłącz publikację\u201d i zapisz.");
+        return false;
+    }
+    if (!s_client || !s_connected) {
+        mt_set(MT_FAIL, "Moduł nie jest połączony z brokerem. Po zapisaniu ustawień "
+                        "odczekaj kilka sekund albo sprawdź adres, port i hasło.");
+        return false;
+    }
+    // Stan RUN PRZED wyslaniem subskrypcji - SUBACK moze wrocic natychmiast.
+    mt_set(MT_RUN, "");
+    if (esp_mqtt_client_subscribe_single(s_client, s_mt_topic, 1) < 0) {
+        mt_finish(MT_FAIL, "Moduł nie zdołał wysłać subskrypcji tematu testowego.");
+        return false;
+    }
+    ESP_LOGI(TAG, "Test publikacji: %s", s_mt_topic);
+    return true;
+}
+
+int mqtt_pub_test_status(char *buf, int cap) {
+    // Uplyw czasu oceniamy tu, przy odpytaniu - nie trzeba osobnego timera.
+    // Diagnoza zalezy od tego, na ktorym kroku test utknal.
+    if (s_mt_state == MT_RUN && (uint32_t)(mt_now_ms() - s_mt_t0) > MT_TIMEOUT_MS) {
+        if (!s_mt_sub_ok)
+            mt_finish(MT_FAIL, "Broker nie potwierdził subskrypcji w ciągu 6 s.");
+        else if (!s_mt_puback)
+            mt_finish(MT_FAIL, "Broker nie potwierdził przyjęcia wiadomości w ciągu 6 s.");
+        else
+            // To jest przypadek, ktorego licznik "wyslanych" nie widzi.
+            mt_finish(MT_FAIL, "Broker przyjął wiadomość, ale jej nie rozesłał - najpewniej "
+                               "ACL nie pozwala temu użytkownikowi publikować na tym temacie.");
+    }
+    mt_state_t st = s_mt_state;
+    const char *sst = st == MT_RUN ? "run" : st == MT_OK ? "ok" : st == MT_FAIL ? "fail" : "idle";
+    const char *step = !s_mt_sub_ok ? "sub" : !s_mt_puback ? "pub" : "echo";
+    return snprintf(buf, cap,
+        "{\"state\":\"%s\",\"step\":\"%s\",\"topic\":\"%s\",\"payload\":\"%s\","
+        "\"puback_ms\":%u,\"ms\":%u,\"error\":\"%s\"}",
+        sst, step, s_mt_topic, s_mt_payload,
+        (unsigned)s_mt_ms_puback, (unsigned)s_mt_ms_echo, s_mt_err);
+}
 
 void mqtt_pub_field(const char *id_hex, const char *field,
                     double value, const char *unit, int8_t rssi) {

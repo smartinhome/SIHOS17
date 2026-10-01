@@ -138,6 +138,9 @@ static char s_tracked[MAX_TRACKED][40];
 static int  s_tracked_count = 0;
 static SemaphoreHandle_t s_mutex = NULL;
 static bool s_fs_ok = false;
+// beta390: lista sledzonych pol wczytana z flasha. Wczesniej (Wi-Fi startuje
+// przed historia) kazde pole wyglada na niesledzone.
+static volatile bool s_tracked_ready = false;
 // Po przywroceniu kopii stan licznika zdazyl sie zmienic, a zuzycie z tego
 // okresu NIE zostalo zarejestrowane. Bez tego firmware probowal je dopisac do
 // dzisiejszych godzin (jeden ogromny slupek albo kilka identycznych po rozlozeniu
@@ -1628,6 +1631,7 @@ void history_mark_rebase(void) {
 }
 
 bool history_fs_ok(void) { return s_fs_ok; }
+bool history_tracked_ready(void) { return s_tracked_ready; }
 
 void history_tracked_limits(int *used, int *max) {
     if (used) *used = s_tracked_count;
@@ -1838,6 +1842,7 @@ void history_init(void) {
     }
     remove("/spiffs/arc_mig.tmp");   // pozostalosc po ew. przerwanej migracji
     tracked_load();
+    s_tracked_ready = true;
     ESP_LOGI(TAG, "Sledzonych licznikow: %d", s_tracked_count);
 
     // Wczytaj od razu z flash wszystkie sledzone liczniki (eager load), zeby

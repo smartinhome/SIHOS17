@@ -110,6 +110,9 @@ void history_erase_all(void);
 // Ile pozycji zajetych / ile maksymalnie na liscie sledzonych.
 void history_tracked_limits(int *used, int *max);
 bool history_is_tracked(const char *id_hex);
+// Czy lista sledzonych pol jest juz wczytana z flasha (false tez przy
+// niesprawnym systemie plikow).
+bool history_tracked_ready(void);
 
 // Lista sledzonych kluczy (id:pole) jako JSON tablica stringow.
 int history_tracked_json(char *buf, int buf_cap);

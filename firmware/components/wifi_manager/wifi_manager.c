@@ -1,6 +1,7 @@
 #include "wifi_manager.h"
 #include "nvs_config.h"
 #include "mqtt_pub.h"
+#include "esphome_api.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -94,6 +95,7 @@ static void event_handler(void *arg, esp_event_base_t base,
         s_got_ip_once = true;
         s_state = WIFI_STATE_CONNECTED;
         mqtt_pub_start();   // broker dostepny dopiero z adresem IP
+        esphome_api_start();
         s_last_disc_reason = 0;  // polaczono - wyczysc powod bledu
         xEventGroupSetBits(s_wifi_eg, WIFI_CONNECTED_BIT);
         ESP_LOGI(TAG, "Połączono: %s", s_ip);
@@ -134,6 +136,7 @@ static void start_ap(const sih_config_t *cfg) {
     ESP_ERROR_CHECK(esp_wifi_start());
     s_state = WIFI_STATE_AP_MODE;
     mqtt_pub_stop();   // w trybie AP nie ma dostepu do brokera
+    esphome_api_stop();
     esp_wifi_disconnect();   // STA ma byc bezczynny, tylko do skanowania
     // beta364: sterownik WiFi (tag "wifi", mala litera - nie nasz "WIFI") mimo
     // pustej konfiguracji STA i tak co chwile zglasza "Haven't to connect to a

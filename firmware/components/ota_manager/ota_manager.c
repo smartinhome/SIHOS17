@@ -1,3 +1,4 @@
+#include "esphome_api.h"
 #include "ota_manager.h"
 #include <stdint.h>
 #include "cc1101.h"
@@ -69,6 +70,7 @@ static void ota_url_task(void *arg) {
         snprintf(s_status.error, sizeof(s_status.error),
                  "URL poza whitelist (szczegoly w logach)");
         s_status.state = OTA_STATE_FAILED;
+        esphome_api_start();   // beta390: wolane tez po zatrzymaniu w ota_github_task
         if (url) free(url);
         vTaskDelete(NULL);
         return;
@@ -115,6 +117,9 @@ static void ota_url_task(void *arg) {
         .max_http_request_size = OTA_RANGE_CHUNK,
     };
 
+    // beta390: serwer API ESPHome oddaje ok. 8 KB sterty na czas pobierania.
+    // Po udanej aktualizacji i tak jest restart, po nieudanej wraca.
+    esphome_api_stop();
     // Zwolnij bufory krzywych minutowych - TLS do GitHuba potrzebuje duzego,
     // spojnego kawalka sterty, a kazde sledzone pole chwilowe trzyma 11.2 KB.
     history_free_curves();
@@ -130,6 +135,7 @@ static void ota_url_task(void *arg) {
         snprintf(s_status.error, sizeof(s_status.error),
                  "OTA begin failed: %s", esp_err_to_name(err));
         s_status.state = OTA_STATE_FAILED;
+        esphome_api_start();
         free(url);
         vTaskDelete(NULL);
         return;
@@ -159,6 +165,7 @@ static void ota_url_task(void *arg) {
         esp_https_ota_abort(handle);
         cc1101_start_receive(wmbus_decoder_on_frame);  // wznow radio
         display_eink_resume();                          // wznow e-ink
+        esphome_api_start();
         free(url);
         vTaskDelete(NULL);
         return;
@@ -210,6 +217,7 @@ static void ota_url_task(void *arg) {
         s_status.state = OTA_STATE_FAILED;
     }
 
+    esphome_api_start();     // tu dochodza tylko nieudane - udana restartuje
     free(url);
     vTaskDelete(NULL);
 }
@@ -405,6 +413,7 @@ static void ota_github_task(void *arg) {
     ESP_LOGI(TAG, "OTA: zatrzymuje radio CC1101 na czas aktualizacji");
     cc1101_stop();
     display_eink_pause();  // zwolnij SPI i RAM przed OTA
+    esphome_api_stop();    // beta390: RAM na TLS do GitHuba
     vTaskDelay(pdMS_TO_TICKS(100));
 
     char url[480] = {0};
@@ -414,6 +423,7 @@ static void ota_github_task(void *arg) {
                  "Nie znaleziono firmware (%s) na GitHub",
                  beta_channel ? "beta" : "oficjalny");
         s_status.state = OTA_STATE_FAILED;
+        esphome_api_start();
         vTaskDelete(NULL);
         return;
     }

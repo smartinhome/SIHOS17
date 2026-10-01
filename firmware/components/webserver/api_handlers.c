@@ -8,6 +8,7 @@
 #include "ota_manager.h"
 #include "history.h"
 #include "mqtt_pub.h"
+#include "esphome_api.h"
 #include "led_rx.h"
 #include "led_status.h"
 #include "log_buffer.h"
@@ -1293,6 +1294,25 @@ static esp_err_t handle_mqtt_test(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// beta390: serwer API ESPHome. GET - stan, POST {"enabled":bool}.
+static esp_err_t handle_esphome(httpd_req_t *req) {
+    if (req->method == HTTP_POST) {
+        char body[64];
+        int len = httpd_req_recv(req, body, sizeof(body) - 1);
+        if (len <= 0) { resp_err(req, "brak danych"); return ESP_OK; }
+        body[len] = 0;
+        bool on = (strstr(body, "\"enabled\":true") != NULL);
+        esphome_api_set_enabled(on);
+        esphome_api_stop();
+        if (on && wifi_manager_get_state() == WIFI_STATE_CONNECTED)
+            esphome_api_start();
+    }
+    char buf[512];
+    esphome_api_status_json(buf, sizeof(buf));
+    resp_json(req, buf);
+    return ESP_OK;
+}
+
 static esp_err_t handle_backup_get(httpd_req_t *req) {
     // Kopia wysylana STRUMIENIOWO. Wczesniej budowala sie w buforze 60 kB w RAM,
     // przez co miescily sie w niej tylko biezace pliki historii (168 godzin =
@@ -1607,6 +1627,9 @@ void api_register_handlers(httpd_handle_t server) {
         // beta388: 45 z 48 uchwytow (max_uri_handlers w webserver.c)
         { .uri="/api/mqtt/test",   .method=HTTP_GET,  .handler=handle_mqtt_test,   .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/mqtt/test",   .method=HTTP_POST, .handler=handle_mqtt_test,   .user_ctx=NULL, .is_websocket=false },
+        // beta390: 47 z 48 uchwytow
+        { .uri="/api/esphome",     .method=HTTP_GET,  .handler=handle_esphome,     .user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/esphome",     .method=HTTP_POST, .handler=handle_esphome,     .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/backup",      .method=HTTP_GET,  .handler=handle_backup_get,  .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/backup",      .method=HTTP_POST, .handler=handle_backup_post, .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/logs",        .method=HTTP_GET,  .handler=handle_logs,        .user_ctx=NULL, .is_websocket=false },

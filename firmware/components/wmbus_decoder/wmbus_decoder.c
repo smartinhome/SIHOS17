@@ -2,6 +2,7 @@
 #include "nvs_config.h"
 #include "meter_total.h"
 #include "mqtt_pub.h"
+#include "esphome_api.h"
 #include "history.h"
 #include "led_rx.h"
 #include "esp_log.h"
@@ -471,6 +472,9 @@ static void process_frame(const wmbus_frame_t *frame) {
                 if (mqtt_pub_field(tmp.id_hex, fields[i].field, fields[i].value,
                                    fields[i].unit, frame->rssi))
                     mq_any = true;
+                // beta390: to samo pole dla Home Assistanta przez API ESPHome.
+                esphome_api_field(tmp.id_hex, fields[i].field, fields[i].value,
+                                  fields[i].unit);
             }
             // beta389: RSSI tylko dla licznikow, z ktorych cos publikujemy.
             if (mq_any) mqtt_pub_rssi(tmp.id_hex, frame->rssi);

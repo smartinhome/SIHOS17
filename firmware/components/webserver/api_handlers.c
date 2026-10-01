@@ -569,6 +569,7 @@ static bool valid_meter_id(const char *id) {
 static const char *default_field_for_type(const char *type) {
     if (!type || !type[0]) return NULL;
     if (strcasecmp(type, "amiplus") == 0 ||
+        strcasecmp(type, "gama350") == 0 ||          // beta392
         strcasecmp(type, "electricity") == 0 ||
         strcasecmp(type, "sontex") == 0) {
         return "energia_kwh";

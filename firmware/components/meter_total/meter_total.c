@@ -720,8 +720,12 @@ int meter_total_extract_fields(const uint8_t *data, size_t len,
     uint8_t clean[300];
     int clen = remove_block_crc(data, (int)len, clean, sizeof(clean));
 
-    // Tylko Amiplus prad (APA, medium 0x02) ma wiele pol
-    if (strcmp(mf, "APA") == 0 && medium == 0x02) {
+    // Liczniki energii z wieloma polami: Amiplus (APA) i Elgama GAMA 350 (EGM).
+    // beta392: GAMA 350 nadaje te same rekordy co Amiplus (taryfy, produkcja,
+    // moc, moc bierna, napiecia). Dotad dostawala tylko energie, wiec moc i
+    // napiecia byly w panelu (rozklada je przegladarka), ale nie w historii,
+    // MQTT ani ESPHome.
+    if ((strcmp(mf, "APA") == 0 || strcmp(mf, "EGM") == 0) && medium == 0x02) {
         uint8_t payload[256];
         int plen = tpl_payload(clean, clen, key, have_key, payload, sizeof(payload), NULL);
         if (plen > 0) {
@@ -795,6 +799,7 @@ const char *meter_total_driver_name(const uint8_t *data, size_t len) {
         if (medium == 0x02)                      return "amiplus";
     }
     if (strcmp(mf, "AMX") == 0 && medium == 0x03) return "unismart";
+    if (strcmp(mf, "EGM") == 0 && medium == 0x02) return "gama350";   // beta392
     switch (medium) {
         case 0x02: return "el.?";
         case 0x03: return "gaz?";

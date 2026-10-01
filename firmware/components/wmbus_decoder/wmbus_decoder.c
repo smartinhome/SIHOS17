@@ -470,11 +470,11 @@ static void process_frame(const wmbus_frame_t *frame) {
                                  kind, fields[i].cumulative, ts_unix);
                 // Publikacja przez MQTT - kolejkuje i wraca, nie blokuje odbioru.
                 if (mqtt_pub_field(tmp.id_hex, fields[i].field, fields[i].value,
-                                   fields[i].unit, frame->rssi))
+                                   fields[i].unit, frame->rssi, kind))
                     mq_any = true;
                 // beta390: to samo pole dla Home Assistanta przez API ESPHome.
                 esphome_api_field(tmp.id_hex, fields[i].field, fields[i].value,
-                                  fields[i].unit);
+                                  fields[i].unit, kind);
             }
             // beta389: RSSI tylko dla licznikow, z ktorych cos publikujemy.
             if (mq_any) mqtt_pub_rssi(tmp.id_hex, frame->rssi);

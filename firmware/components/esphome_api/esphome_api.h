@@ -24,8 +24,9 @@ bool esphome_api_enabled(void);
 void esphome_api_set_enabled(bool on);
 
 // Odczyt pola z ramki. Wolane z zadania dekodera - nie blokuje na sieci.
+// kind - rodzaj licznika z dekodera (1 woda, 2 prad, 3 gaz, 4 podzielnik).
 void esphome_api_field(const char *id_hex, const char *field,
-                       double value, const char *unit);
+                       double value, const char *unit, int kind);
 
 // Stan do zakladki System (JSON).
 int  esphome_api_status_json(char *buf, int cap);

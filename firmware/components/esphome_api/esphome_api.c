@@ -72,6 +72,7 @@ typedef struct {
     uint32_t key;
     uint32_t sent_ms;
     uint8_t  flags;
+    uint8_t  kind;                     // beta391: rodzaj licznika (3 = gaz)
 } ent_t;
 
 // Rekord w NVS: lista encji przetrwa restart. HA usuwa z rejestru encje,
@@ -82,9 +83,18 @@ typedef struct {
     char id[12];
     char field[32];
     char unit[8];
+} cache_rec_v1_t;
+
+// beta391: wersja 2 zapamietuje rodzaj licznika - inaczej po restarcie
+// licznik gazu bylby ogloszony jako woda do czasu pierwszej ramki.
+typedef struct {
+    char id[12];
+    char field[32];
+    char unit[8];
+    uint8_t kind;
 } cache_rec_t;
 
-#define CACHE_VER  1
+#define CACHE_VER  2
 // Klucze w przestrzeni konfiguracji - reset fabryczny (nvs_erase_all) kasuje je razem z nia.
 #define NVS_NS     NVS_NAMESPACE
 #define KEY_EN     "esph_en"
@@ -270,7 +280,8 @@ static void ha_class(const ent_t *e, const char **dc, uint32_t *sc, uint32_t *de
     const char *u = e->unit;
     *dc = ""; *sc = STATE_CLASS_NONE; *dec = 2;
     if (strcmp(u, "kWh") == 0)       { *dc = "energy"; *sc = STATE_CLASS_TOTAL_INCREASING; *dec = 3; }
-    else if (strcmp(u, "m3") == 0)   { *dc = "water";  *sc = STATE_CLASS_TOTAL_INCREASING; *dec = 3; }
+    else if (strcmp(u, "m3") == 0)   { *dc = e->kind == 3 ? "gas" : "water";
+                                       *sc = STATE_CLASS_TOTAL_INCREASING; *dec = 3; }
     else if (strcmp(u, "kW") == 0)   { *dc = "power";  *sc = STATE_CLASS_MEASUREMENT; *dec = 3; }
     else if (strcmp(u, "V") == 0)    { *dc = "voltage"; *sc = STATE_CLASS_MEASUREMENT; *dec = 1; }
     else if (strcmp(u, "A") == 0)    { *dc = "current"; *sc = STATE_CLASS_MEASUREMENT; *dec = 2; }
@@ -287,19 +298,28 @@ static void cache_load(void) {
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) return;
     size_t sz = 0;
-    if (nvs_get_blob(h, KEY_ENTS, NULL, &sz) == ESP_OK && sz >= 1 &&
-        (sz - 1) % sizeof(cache_rec_t) == 0) {
+    if (nvs_get_blob(h, KEY_ENTS, NULL, &sz) == ESP_OK && sz >= 1) {
         uint8_t *buf = malloc(sz);
-        if (buf && nvs_get_blob(h, KEY_ENTS, buf, &sz) == ESP_OK && buf[0] == CACHE_VER) {
-            int n = (int)((sz - 1) / sizeof(cache_rec_t));
-            const cache_rec_t *r = (const cache_rec_t *)(buf + 1);
+        // Wersja 1 (beta390) nie ma rodzaju - wczytujemy ja bez niego.
+        size_t rs = 0;
+        if (buf && nvs_get_blob(h, KEY_ENTS, buf, &sz) == ESP_OK) {
+            if (buf[0] == CACHE_VER) rs = sizeof(cache_rec_t);
+            else if (buf[0] == 1)    rs = sizeof(cache_rec_v1_t);
+            if (rs && (sz - 1) % rs != 0) rs = 0;
+        }
+        if (rs) {
+            int n = (int)((sz - 1) / rs);
             xSemaphoreTake(s_lock, portMAX_DELAY);
             for (int i = 0; i < n && s_count < ESPH_MAX_ENT; i++) {
                 ent_t *e = &s_ent[s_count];
+                cache_rec_t r;
+                memset(&r, 0, sizeof(r));
+                memcpy(&r, buf + 1 + (size_t)i * rs, rs);
                 memset(e, 0, sizeof(*e));
-                memcpy(e->id, r[i].id, sizeof(e->id));       e->id[sizeof(e->id) - 1] = 0;
-                memcpy(e->field, r[i].field, sizeof(e->field)); e->field[sizeof(e->field) - 1] = 0;
-                memcpy(e->unit, r[i].unit, sizeof(e->unit));   e->unit[sizeof(e->unit) - 1] = 0;
+                memcpy(e->id, r.id, sizeof(e->id));       e->id[sizeof(e->id) - 1] = 0;
+                memcpy(e->field, r.field, sizeof(e->field)); e->field[sizeof(e->field) - 1] = 0;
+                memcpy(e->unit, r.unit, sizeof(e->unit));   e->unit[sizeof(e->unit) - 1] = 0;
+                e->kind = r.kind;
                 if (!e->id[0] || !e->field[0]) continue;
                 // Pole mogla juz dodac ramka odebrana przed wczytaniem listy.
                 bool dup = false;
@@ -329,6 +349,7 @@ static void cache_save(void) {
         memcpy(r[i].id, s_ent[i].id, sizeof(r[i].id));
         memcpy(r[i].field, s_ent[i].field, sizeof(r[i].field));
         memcpy(r[i].unit, s_ent[i].unit, sizeof(r[i].unit));
+        r[i].kind = s_ent[i].kind;
     }
     s_cache_dirty = false;
     xSemaphoreGive(s_lock);
@@ -795,7 +816,7 @@ void esphome_api_stop(void) {
 }
 
 void esphome_api_field(const char *id_hex, const char *field,
-                       double value, const char *unit) {
+                       double value, const char *unit, int kind) {
     if (!s_ent || !s_lock || !id_hex || !field) return;
     if (!wanted(id_hex, field)) return;
     if (!unit) unit = "";
@@ -813,12 +834,16 @@ void esphome_api_field(const char *id_hex, const char *field,
         snprintf(e->id, sizeof(e->id), "%s", id_hex);
         snprintf(e->field, sizeof(e->field), "%s", field);
         snprintf(e->unit, sizeof(e->unit), "%s", unit);
+        e->kind = (uint8_t)kind;
         s_count++;
         ent_set_key(idx);
         mark_list_dirty();
         mark_cache_dirty();
-    } else if (strcmp(s_ent[idx].unit, unit) != 0) {
+    } else if (strcmp(s_ent[idx].unit, unit) != 0 || (kind && s_ent[idx].kind != kind)) {
+        // Zmiana jednostki albo rodzaju (np. wpis z listy w starym formacie)
+        // zmienia klase encji - HA musi pobrac liste od nowa.
         snprintf(s_ent[idx].unit, sizeof(s_ent[idx].unit), "%s", unit);
+        if (kind) s_ent[idx].kind = (uint8_t)kind;
         mark_list_dirty();
         mark_cache_dirty();
     }

@@ -736,7 +736,7 @@
         <input type="checkbox" id="esph-en" onchange="saveEsph()">
         <span>Udostępnij liczniki dla Home Assistant przez API ESPHome</span>
       </label>
-      <div class="check-desc" style="margin:0 0 10px 0">Home Assistant łączy się z modułem bezpośrednio, bez brokera MQTT. Wysyłane są te same wartości co przez MQTT: przypięte do dashboardu lub śledzone w historii. W Home Assistancie: <b>Ustawienia → Urządzenia i usługi → Dodaj integrację → ESPHome</b>, host <b id="esph-host">adres modułu</b>, port <b>6053</b>. Pole klucza szyfrowania zostaw puste. Jeśli ten sam Home Assistant odbiera też MQTT z modułu, wyłącz jedno z nich — inaczej encje będą podwójne.</div>
+      <div class="check-desc" style="margin:0 0 10px 0">Home Assistant łączy się z modułem bezpośrednio. Wysyłane są te same wartości: przypięte do dashboardu lub śledzone w historii. W Home Assistancie: <b>Ustawienia - Urządzenia i usługi - Dodaj integrację - ESPHome</b>, host <b id="esph-host">adres modułu</b>, port <b>6053</b>. Ustaw w routerze stały adres IP dla modułu (rezerwacja DHCP) - po zmianie adresu Home Assistant straci z nim połączenie. Jeśli ten sam Home Assistant odbiera też MQTT z modułu, wyłącz jedno z nich - inaczej encje będą podwójne.</div>
       <div id="esph-info" class="check-desc" style="margin:0"></div>
       <div id="esph-msg" class="msg"></div>
     </div>

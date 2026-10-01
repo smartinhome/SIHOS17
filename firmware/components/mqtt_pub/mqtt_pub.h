@@ -28,8 +28,9 @@ bool mqtt_pub_connected(void);
 // wrzuca do kolejki i wraca. Gdy MQTT jest wylaczony, nic nie robi.
 // beta389: wysyla tylko pola z dashboardu lub historii; zwraca true,
 // gdy pole do nich nalezy (nawet jesli tym razem pominiete przez odstep).
+// kind - rodzaj licznika z dekodera (1 woda, 2 prad, 3 gaz, 4 podzielnik).
 bool mqtt_pub_field(const char *id_hex, const char *field,
-                    double value, const char *unit, int8_t rssi);
+                    double value, const char *unit, int8_t rssi, int kind);
 
 // Sila sygnalu - raz na odebrana ramke, nie na kazde pole.
 void mqtt_pub_rssi(const char *id_hex, int8_t rssi);

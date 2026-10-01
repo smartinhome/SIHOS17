@@ -36,6 +36,7 @@ typedef struct {
     char     field[24];
     char     unit[8];
     uint32_t last_ms;     // kiedy ostatnio opublikowano to pole
+    uint8_t  kind;        // beta391: rodzaj licznika z dekodera (3 = gaz)
 } ha_item_t;
 
 // beta389: tyle, ile pol moze byc przypietych do dashboardu (MAX_DASH_FIELDS).
@@ -96,10 +97,12 @@ static const char *ha_unit(const char *unit) {
     return unit;
 }
 
-static void ha_class_for(const char *unit, const char **dev_class,
+static void ha_class_for(const char *unit, int kind, const char **dev_class,
                          const char **state_class) {
     if (strcmp(unit, "kWh") == 0)      { *dev_class = "energy";      *state_class = "total_increasing"; }
-    else if (strcmp(unit, "m3") == 0)  { *dev_class = "water";       *state_class = "total_increasing"; }
+    // beta391: licznik gazu tez podaje m3 - bez rodzaju trafial do HA jako woda.
+    else if (strcmp(unit, "m3") == 0)  { *dev_class = kind == 3 ? "gas" : "water";
+                                         *state_class = "total_increasing"; }
     else if (strcmp(unit, "kW") == 0)  { *dev_class = "power";       *state_class = "measurement"; }
     else if (strcmp(unit, "V") == 0)   { *dev_class = "voltage";     *state_class = "measurement"; }
     else if (strcmp(unit, "A") == 0)   { *dev_class = "current";     *state_class = "measurement"; }
@@ -129,7 +132,7 @@ static void ha_announce_one(const ha_item_t *h) {
     if (!c->mqtt_ha_discovery) return;
     char pref[24]; prefix_of(pref, sizeof(pref));
     const char *dc = "", *sc = "";
-    ha_class_for(h->unit, &dc, &sc);
+    ha_class_for(h->unit, h->kind, &dc, &sc);
     // beta375: pola wyliczane nie maja jednostki, wiec klasa musi isc z nazwy.
     // Bez state_class Home Assistant nie prowadzi dla nich statystyk.
     if (strcmp(h->field, "cos_fi") == 0) { dc = "power_factor"; sc = "measurement"; }
@@ -181,10 +184,17 @@ static bool mq_wanted(const char *id_hex, const char *field) {
 
 // Zapamietaj pole i ogloś je raz. Kolejne odczyty tego samego pola nie
 // generuja juz ogloszen.
-static ha_item_t *ha_remember(const char *id_hex, const char *field, const char *unit) {
+static ha_item_t *ha_remember(const char *id_hex, const char *field, const char *unit,
+                              int kind) {
     for (int i = 0; i < s_ha_count; i++)
-        if (strcmp(s_ha[i].id_hex, id_hex) == 0 && strcmp(s_ha[i].field, field) == 0)
+        if (strcmp(s_ha[i].id_hex, id_hex) == 0 && strcmp(s_ha[i].field, field) == 0) {
+            // Rodzaj rozpoznany pozniej niz pole - ogloszenie z poprawna klasa.
+            if (kind && s_ha[i].kind != kind) {
+                s_ha[i].kind = (uint8_t)kind;
+                if (s_connected) ha_announce_one(&s_ha[i]);
+            }
             return &s_ha[i];
+        }
     ha_item_t *h = NULL;
     if (s_ha_count < HA_MAX) {
         h = &s_ha[s_ha_count++];
@@ -198,6 +208,7 @@ static ha_item_t *ha_remember(const char *id_hex, const char *field, const char 
     snprintf(h->id_hex, sizeof(h->id_hex), "%s", id_hex);
     snprintf(h->field,  sizeof(h->field),  "%s", field);
     snprintf(h->unit,   sizeof(h->unit),   "%s", unit ? unit : "");
+    h->kind = (uint8_t)kind;
     if (s_connected) ha_announce_one(h);
     return h;
 }
@@ -471,10 +482,10 @@ int mqtt_pub_test_status(char *buf, int cap) {
 }
 
 bool mqtt_pub_field(const char *id_hex, const char *field,
-                    double value, const char *unit, int8_t rssi) {
+                    double value, const char *unit, int8_t rssi, int kind) {
     if (!s_running || !id_hex || !field) return false;
     if (!mq_wanted(id_hex, field)) return false;
-    ha_item_t *h = ha_remember(id_hex, field, unit);
+    ha_item_t *h = ha_remember(id_hex, field, unit, kind);
     uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
     if (h) {
         if (h->last_ms && (uint32_t)(now_ms - h->last_ms) < MIN_INTERVAL_MS) return true;

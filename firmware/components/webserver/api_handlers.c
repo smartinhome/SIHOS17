@@ -710,10 +710,13 @@ static esp_err_t handle_dashboard(httpd_req_t *req) {
             // beta346: bez tego historia nie ruszala dla licznikow nieszyfrowanych -
             // automat siedzial wylacznie na sciezce zapisu klucza AES.
             track_default_for_id(id, &cfg);
+            display_eink_wake();   // beta393: strona pojawia sie od razu
         } else if (!want && idx >= 0) {
             cfg.pins[idx][0] = 0;
             nvs_config_save(&cfg);
             ESP_LOGI(TAG, "DASH POST: USUNIETO z pozycji %d", idx);
+            // beta393: strona e-inka znika od razu, nie po minucie.
+            display_eink_wake();
         } else {
             ESP_LOGW(TAG, "DASH POST: NIC nie zapisano (want=%d idx=%d freeIdx=%d)", want, idx, freeIdx);
         }

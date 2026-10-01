@@ -835,6 +835,11 @@ static void draw_diag(void) {
         fb_draw_text(&F14, 4, 40, "Brak - oznacz pole w UI");
         fb_draw_text(&F14, 4, 56, "(Liczniki -> + przy wartości)");
     }
+    // beta393: pola sa, ale zaden licznik nie jest przypiety - bez tej linii
+    // ekran wygladal, jakby wszystko bylo ustawione, a stron nie bylo.
+    if (first[0]) {
+        fb_draw_text(&F14, 4, 56, "Brak licznika na dashboardzie");
+    }
 
     // Ile licznikow modul juz uslyszal w eterze (odswiezane co minute razem
     // z cala strona diagnostyczna).
@@ -933,7 +938,19 @@ static void draw_clock_page(int page_no, int total_pages) {
 }
 
 static void rebuild_pages(void) {
-    s_page_count = history_tracked_meter_ids(s_page_ids, MAX_PAGES);
+    // beta393: strona = licznik PRZYPIETY do dashboardu, ktory ma pola w
+    // historii. Dotad liczyla sie sama historia, a przypiecie dokladalo
+    // sledzenie pola domyslnego - wiec "przypnij" dodawalo licznik na ekran,
+    // a "odepnij" go stamtad nie zabieralo. Historia zbiera dane dalej,
+    // znika tylko strona.
+    int n = history_tracked_meter_ids(s_page_ids, MAX_PAGES);
+    s_page_count = 0;
+    for (int i = 0; i < n; i++) {
+        if (!nvs_config_is_pinned(s_page_ids[i])) continue;
+        if (s_page_count != i)
+            memcpy(s_page_ids[s_page_count], s_page_ids[i], sizeof(s_page_ids[0]));
+        s_page_count++;
+    }
     if (s_cur_page >= s_page_count + (nvs_config_eink_clock() ? 1 : 0)) s_cur_page = 0;
 }
 

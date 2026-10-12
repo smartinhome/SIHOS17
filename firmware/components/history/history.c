@@ -956,16 +956,29 @@ static int curve_archive_read_day(const char *id, uint32_t d0, uint32_t d1,
             fread(&r, sizeof(r), 1, f) != 1) { hi = mid; break; }
         if (r.ts < d0) lo = mid + 1; else hi = mid;
     }
-    int n = 0;
-    for (int i = lo; i < h.count && n < cap; i++) {
-        hist_bucket_t r;
-        int phys = (h.head + i) % HIST_CURVE_ARC;
-        if (fseek(f, carc_rec_off(phys), SEEK_SET) != 0 ||
-            fread(&r, sizeof(r), 1, f) != 1) break;
-        if (r.ts >= d1) break;
-        if (r.ts >= d0) out[n++] = r;
+    // beta395: rekordy doby leza w ringu jeden za drugim, wiec czytamy je
+    // jednym fread (dwoma, gdy doba przechodzi przez koniec pliku). Dotad
+    // kazdy rekord to byl osobny fseek+fread - do 288 na plik, a dla mocy
+    // drugie tyle w pliku maksimow. Na SPIFFS kazdy skok w duzym pliku
+    // kosztuje, stad dlugie ladowanie starszych dni mocy i napiec.
+    int want = h.count - lo;
+    if (want > cap) want = cap;
+    int got = 0;
+    while (got < want) {
+        int phys = (h.head + lo + got) % HIST_CURVE_ARC;
+        int run = HIST_CURVE_ARC - phys;           // do konca pliku
+        if (run > want - got) run = want - got;
+        if (fseek(f, carc_rec_off(phys), SEEK_SET) != 0) break;
+        int r = (int)fread(out + got, sizeof(hist_bucket_t), (size_t)run, f);
+        if (r > 0) got += r;
+        if (r != run) break;
     }
     fclose(f);
+    int n = 0;
+    for (int i = 0; i < got; i++) {
+        if (out[i].ts >= d1) break;
+        if (out[i].ts >= d0) out[n++] = out[i];
+    }
     return n;
 }
 
@@ -2089,9 +2102,30 @@ static bool earliest_total_in(meter_hist_t *m, uint32_t period_start,
     return found;
 }
 
+// beta395: archiwum ha_ otwierane RAZ na cale zapytanie o zakres. Dotad
+// total_at_ts otwieral plik i szukal binarnie przy kazdej granicy okresu -
+// widok miesiaca energii to bylo do ~60 otwarc pliku na SPIFFS.
+typedef struct { FILE *f; arc_hdr_t h; bool tried, ok; } arc_ctx_t;
+
+static bool arc_ctx_open(meter_hist_t *m, arc_ctx_t *cx) {
+    if (cx->tried) return cx->ok;
+    cx->tried = true;
+    if (!s_fs_ok) return false;
+    char path[64]; archive_path(m->id, path, sizeof(path));
+    cx->f = fopen(path, "rb");
+    if (!cx->f) return false;
+    cx->ok = arc_read_header2(cx->f, &cx->h) && cx->h.count > 0;
+    return cx->ok;
+}
+
+static void arc_ctx_close(arc_ctx_t *cx) {
+    if (cx->f) fclose(cx->f);
+    cx->f = NULL;
+}
+
 // Stan licznika (total) na moment ts: najswiezszy kubelek godzinowy o ts<=t.
 // Zrodlo: RAM (godziny) i archiwum 2-letnie. Zwraca false gdy brak odniesienia.
-static bool total_at_ts(meter_hist_t *m, uint32_t t, float *out) {
+static bool total_at_ts(meter_hist_t *m, uint32_t t, float *out, arc_ctx_t *cx) {
     bool found = false; uint32_t best_ts = 0; float best = 0;
     for (int i = 0; i < m->n_hours; i++) {
         if (m->hours[i].ts <= t && m->hours[i].ts >= best_ts) {
@@ -2099,30 +2133,26 @@ static bool total_at_ts(meter_hist_t *m, uint32_t t, float *out) {
         }
     }
     if (found && best_ts + 7200 >= t) { *out = best; return true; }
-    if (!s_fs_ok) { if (found) { *out = best; return true; } return false; }
-    char path[64]; archive_path(m->id, path, sizeof(path));
-    FILE *f = fopen(path, "rb");
-    if (!f) { if (found) { *out = best; return true; } return false; }
-    arc_hdr_t h;
-    if (arc_read_header2(f, &h) && h.count > 0) {
-        int lo = 0, hi = h.count;               // pierwszy rekord z ts > t
+    if (arc_ctx_open(m, cx)) {
+        FILE *f = cx->f;
+        const arc_hdr_t *h = &cx->h;
+        int lo = 0, hi = h->count;              // pierwszy rekord z ts > t
         hist_bucket_t rec;
         while (lo < hi) {
             int mid = lo + (hi - lo) / 2;
-            int phys = (h.head + mid) % h.cap;
-            if (fseek(f, arc_rec_off2(h.hdr, phys), SEEK_SET) != 0 ||
+            int phys = (h->head + mid) % h->cap;
+            if (fseek(f, arc_rec_off2(h->hdr, phys), SEEK_SET) != 0 ||
                 fread(&rec, sizeof(rec), 1, f) != 1) { lo = 0; break; }
             if (rec.ts <= t) lo = mid + 1; else hi = mid;
         }
         if (lo > 0) {                            // rekord tuz przed/na t
-            int phys = (h.head + lo - 1) % h.cap;
-            if (fseek(f, arc_rec_off2(h.hdr, phys), SEEK_SET) == 0 &&
+            int phys = (h->head + lo - 1) % h->cap;
+            if (fseek(f, arc_rec_off2(h->hdr, phys), SEEK_SET) == 0 &&
                 fread(&rec, sizeof(rec), 1, f) == 1 && rec.ts <= t) {
                 if (!found || rec.ts >= best_ts) { best = rec.total; found = true; }
             }
         }
     }
-    fclose(f);
     if (found) { *out = best; return true; }
     return false;
 }
@@ -2137,6 +2167,97 @@ static uint32_t next_bucket(uint32_t t, char unit) {
     return (uint32_t)mktime(&tm);
 }
 
+// beta395: pola chwilowe w widoku tygodnia/miesiaca/roku. Srednia z
+// kubelkow godzinowych okresu jak dotad, ale godziny sprzed okna RAM (7 dni)
+// czytamy z archiwum ha_ - wczesniej starsze dni byly po prostu puste.
+#define RANGE_MAX_BUCKETS  400
+#define RANGE_ARC_MAX_RECS 9000    // ok. rok godzin - gorna granica czasu odczytu
+
+// Indeks okresu zawierajacego t (bts ma nb+1 granic) albo -1.
+static int range_bucket_of(const uint32_t *bts, int nb, uint32_t t) {
+    if (nb <= 0 || t < bts[0] || t >= bts[nb]) return -1;
+    int lo = 0, hi = nb - 1;
+    while (lo < hi) {
+        int mid = (lo + hi + 1) / 2;
+        if (bts[mid] <= t) lo = mid; else hi = mid - 1;
+    }
+    return lo;
+}
+
+static int range_instant_points(meter_hist_t *m, uint32_t from, uint32_t to, char unit,
+                                uint32_t now, char *buf, int buf_cap, int n) {
+    uint32_t *bts = malloc((RANGE_MAX_BUCKETS + 1) * sizeof(uint32_t));
+    float *sum = calloc(RANGE_MAX_BUCKETS, sizeof(float));
+    int *cnt = calloc(RANGE_MAX_BUCKETS, sizeof(int));
+    if (!bts || !sum || !cnt) { free(bts); free(sum); free(cnt); return n; }
+    int nb = 0;
+    for (uint32_t b = from; b < to && b <= now && nb < RANGE_MAX_BUCKETS; ) {
+        bts[nb++] = b;
+        b = next_bucket(b, unit);
+        bts[nb] = b;                             // koniec ostatniego okresu
+    }
+    if (nb > 0) {
+        // 1. godziny z RAM (ostatnie 7 dni) - dokladnie jak dotad
+        uint32_t ram_start = (m->n_hours > 0) ? m->hours[0].ts : 0xFFFFFFFFu;
+        for (int i = 0; i < m->n_hours; i++) {
+            int k = range_bucket_of(bts, nb, m->hours[i].ts);
+            if (k >= 0) { sum[k] += m->hours[i].total; cnt[k]++; }
+        }
+        // 2. godziny sprzed okna RAM - z archiwum (tylko odczyt)
+        uint32_t lim = (ram_start < bts[nb]) ? ram_start : bts[nb];
+        arc_ctx_t cx = { 0 };
+        if (bts[0] < lim && arc_ctx_open(m, &cx)) {
+            FILE *f = cx.f;
+            const arc_hdr_t *h = &cx.h;
+            hist_bucket_t rec;
+            int lo = 0, hi = h->count;            // pierwszy rekord z ts >= bts[0]
+            while (lo < hi) {
+                int mid = lo + (hi - lo) / 2;
+                int phys = (h->head + mid) % h->cap;
+                if (fseek(f, arc_rec_off2(h->hdr, phys), SEEK_SET) != 0 ||
+                    fread(&rec, sizeof(rec), 1, f) != 1) { lo = h->count; break; }
+                if (rec.ts < bts[0]) lo = mid + 1; else hi = mid;
+            }
+            hist_bucket_t chunk[64];
+            uint32_t prev_ts = 0; float prev_v = 0; int prev_k = -1;
+            bool stop = false;
+            for (int i = lo, done = 0; i < h->count && !stop && done < RANGE_ARC_MAX_RECS; ) {
+                int phys = (h->head + i) % h->cap;
+                int run = h->cap - phys;
+                if (run > h->count - i) run = h->count - i;
+                if (run > 64) run = 64;
+                if (fseek(f, arc_rec_off2(h->hdr, phys), SEEK_SET) != 0) break;
+                int r = (int)fread(chunk, sizeof(hist_bucket_t), (size_t)run, f);
+                for (int j = 0; j < r; j++) {
+                    if (chunk[j].ts >= lim) { stop = true; break; }
+                    // Powtorzona godzina w archiwum (patrz beta350) - liczymy ja
+                    // raz, z pozniejsza wartoscia.
+                    if (prev_k >= 0 && chunk[j].ts == prev_ts) {
+                        sum[prev_k] += chunk[j].total - prev_v;
+                        prev_v = chunk[j].total;
+                        continue;
+                    }
+                    int k = range_bucket_of(bts, nb, chunk[j].ts);
+                    prev_ts = chunk[j].ts; prev_v = chunk[j].total; prev_k = k;
+                    if (k >= 0) { sum[k] += chunk[j].total; cnt[k]++; }
+                }
+                if (r != run) break;
+                i += run; done += run;
+            }
+        }
+        arc_ctx_close(&cx);
+        bool first = true;
+        for (int k = 0; k < nb && n < buf_cap - 64; k++) {
+            if (!cnt[k]) continue;
+            n += snprintf(buf + n, buf_cap - n, "%s{\"t\":%u,\"v\":%.3f}",
+                          first ? "" : ",", (unsigned)bts[k], sum[k] / cnt[k]);
+            first = false;
+        }
+    }
+    free(bts); free(sum); free(cnt);
+    return n;
+}
+
 int history_range_json(const char *id_hex, uint32_t from, uint32_t to,
                        char unit, char *buf, int buf_cap) {
     if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
@@ -2149,17 +2270,20 @@ int history_range_json(const char *id_hex, uint32_t from, uint32_t to,
     }
     int n = snprintf(buf, buf_cap, "{\"id\":\"%s\",\"kind\":%d,\"cumulative\":%d,\"points\":[",
                      m->id, m->kind, m->cumulative);
-    bool first = true;
     uint32_t now = (uint32_t)time(NULL);
-    for (uint32_t b = from; b < to && n < buf_cap - 64; ) {
-        uint32_t e = next_bucket(b, unit);
-        if (b > now) break;                       // okresy przyszle - pomijamy
-        float v = 0; bool have = false;
-        if (m->cumulative) {
+    if (!m->cumulative) {
+        n = range_instant_points(m, from, to, unit, now, buf, buf_cap, n);
+    } else {
+        bool first = true;
+        arc_ctx_t cx = { 0 };
+        for (uint32_t b = from; b < to && n < buf_cap - 64; ) {
+            uint32_t e = next_bucket(b, unit);
+            if (b > now) break;                       // okresy przyszle - pomijamy
+            float v = 0; bool have = false;
             float t0, t1;
-            uint32_t end = (e > now) ? now : e;   // biezacy okres: stan "na teraz"
-            if (total_at_ts(m, end, &t1)) {
-                if (total_at_ts(m, b, &t0)) {
+            uint32_t end = (e > now) ? now : e;       // biezacy okres: stan "na teraz"
+            if (total_at_ts(m, end, &t1, &cx)) {
+                if (total_at_ts(m, b, &t0, &cx)) {
                     if (t1 >= t0) { v = t1 - t0; have = true; }
                 } else {
                     // Brak stanu na POCZATKU okresu (dane zaczely sie w jego
@@ -2172,20 +2296,14 @@ int history_range_json(const char *id_hex, uint32_t from, uint32_t to,
                     }
                 }
             }
-        } else {
-            // chwilowe: srednia z kubelkow godzinowych okresu (RAM)
-            float sum = 0; int cnt = 0;
-            for (int i = 0; i < m->n_hours; i++) {
-                if (m->hours[i].ts >= b && m->hours[i].ts < e) { sum += m->hours[i].total; cnt++; }
+            if (have) {
+                n += snprintf(buf + n, buf_cap - n, "%s{\"t\":%u,\"v\":%.3f}",
+                              first ? "" : ",", (unsigned)b, v);
+                first = false;
             }
-            if (cnt) { v = sum / cnt; have = true; }
+            b = e;
         }
-        if (have) {
-            n += snprintf(buf + n, buf_cap - n, "%s{\"t\":%u,\"v\":%.3f}",
-                          first ? "" : ",", (unsigned)b, v);
-            first = false;
-        }
-        b = e;
+        arc_ctx_close(&cx);
     }
     n += snprintf(buf + n, buf_cap - n, "]}");
     if (s_mutex) xSemaphoreGive(s_mutex);
@@ -2328,7 +2446,22 @@ int history_debug_day(const char *key, uint32_t day_ts, char *buf, int cap) {
     return n;
 }
 
+// beta395: try_curve_arc=false pomija probe archiwum 5-min. API wola te
+// wersje po history_curve_day(), ktore to archiwum juz przeszukalo - dla
+// doby spoza niego (np. starszej niz 90 dni) plik byl przeszukiwany drugi raz.
+static int day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf_cap,
+                    bool try_curve_arc);
+
 int history_get_day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf_cap) {
+    return day_json(id_hex, day_ts, buf, buf_cap, true);
+}
+
+int history_get_day_json_hours(const char *id_hex, uint32_t day_ts, char *buf, int buf_cap) {
+    return day_json(id_hex, day_ts, buf, buf_cap, false);
+}
+
+static int day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf_cap,
+                    bool try_curve_arc) {
     if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
     // Pobierz metadane (kind, cumulative) z RAM jesli licznik zaladowany.
     meter_hist_t *m = get_or_load(id_hex, false);
@@ -2377,7 +2510,7 @@ int history_get_day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf
     // FAZA 9b: brak krzywej w RAM, ale pole jest chwilowe - sprobuj archiwum
     // 5-min na flashu, zanim spadniemy do slupkow godzinowych.
     static hist_bucket_t s_curve_day_buf[HIST_CURVE];
-    if (!use_curve && m && !cumulative) {
+    if (!use_curve && m && !cumulative && try_curve_arc) {
         int na = curve_archive_read_day(id_hex, d0, d1, s_curve_day_buf, HIST_CURVE, false);
         if (na > 0) {
             curve_src = s_curve_day_buf; curve_src_n = na; use_curve = true;

@@ -81,6 +81,9 @@ int history_range_json(const char *id_hex, uint32_t from, uint32_t to,
 // day_ts: dowolny unix timestamp z wybranego dnia (uzywany jest floor do doby).
 // Format JSON jak history_get_json: {"id":..,"kind":..,"cumulative":..,"points":[{"t":..,"v":..}]}
 int history_get_day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf_cap);
+// beta395: to samo, ale bez proby archiwum 5-min - dla API po history_curve_day(),
+// ktore to archiwum juz przeszukalo (dzien spoza niego idzie wprost do godzin).
+int history_get_day_json_hours(const char *id_hex, uint32_t day_ts, char *buf, int buf_cap);
 
 // Lista licznikow ktore maja historie (dla zakladki). JSON tablica.
 int history_list_json(char *buf, int buf_cap);

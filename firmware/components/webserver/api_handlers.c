@@ -217,12 +217,14 @@ static esp_err_t handle_history_day(httpd_req_t *req) {
 
     // Krzywa dnia 1-min (pola chwilowe): do 1440 punktow (~40KB JSON) -
     // strumieniowanie chunked zamiast jednego wielkiego bufora.
+    bool curve_tried = false;   // beta395: archiwum 5-min juz przeszukane
     hist_bucket_t *pts = malloc(HIST_CURVE * sizeof(hist_bucket_t));
     // beta370: obwiednia maksimow. Brak RAM na te tablice nie jest bledem -
     // wykres narysuje sie wtedy bez tla, jak przed ta wersja.
     float *pmax = pts ? malloc(HIST_CURVE * sizeof(float)) : NULL;
     if (pts) {
         int np = history_curve_day(id, day_ts, pts, pmax, HIST_CURVE);
+        curve_tried = true;
         if (np > 0) {
             httpd_resp_set_type(req, "application/json");
             char chunk[2048];
@@ -255,7 +257,8 @@ static esp_err_t handle_history_day(httpd_req_t *req) {
     // Pola kumulacyjne (slupki godzinowe) - dotychczasowa sciezka buforowana.
     char *buf = malloc(12288);
     if (!buf) { httpd_resp_send_500(req); return ESP_OK; }
-    history_get_day_json(id, day_ts, buf, 12288);
+    if (curve_tried) history_get_day_json_hours(id, day_ts, buf, 12288);
+    else             history_get_day_json(id, day_ts, buf, 12288);
     resp_json(req, buf);
     free(buf);
     return ESP_OK;

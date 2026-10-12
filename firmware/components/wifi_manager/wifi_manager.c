@@ -7,6 +7,9 @@
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_sntp.h"
+#include "esp_timer.h"
+#include "esp_system.h"
+#include "nvs.h"
 #include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
@@ -40,6 +43,123 @@ static int                s_runtime_retry = 0;
 #define RUNTIME_MAX_RETRY 60    // ~5-10 minut ciaglych probowan po utracie STA
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT      BIT1
+
+// ---------------------------------------------------------------------------
+// beta394: staly adres IP w sieci domowej.
+// Osobny blob "netcfg" w przestrzeni konfiguracji - reset fabryczny
+// (nvs_erase_all) kasuje go razem z nia, a uklad sih_config_t zostaje bez zmian.
+//
+// Zly adres (np. spoza podsieci) odcialby modul od sieci na dobre, dlatego nowy
+// adres jest na probe: po zapisaniu modul startuje z flaga "pending" i ma
+// NETCFG_TRIAL_S sekund, zeby ktos otworzyl panel pod nowym adresem (panel sam
+// to potwierdza). Bez potwierdzenia modul wraca do DHCP i restartuje sie.
+// ---------------------------------------------------------------------------
+#define NETCFG_KEY      "netcfg"
+#define NETCFG_VER      1
+#define NETCFG_TRIAL_S  300
+
+typedef struct {
+    uint8_t  ver, on, pending, rsv;
+    uint32_t ip, mask, gw, dns;        // kolejnosc sieciowa, jak esp_ip4_addr_t.addr
+} netcfg_t;
+
+static netcfg_t           s_net;
+static esp_timer_handle_t s_trial_timer = NULL;
+static int64_t            s_trial_end_us = 0;
+
+static void netcfg_load(void) {
+    memset(&s_net, 0, sizeof(s_net));
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) return;
+    netcfg_t n;
+    size_t sz = sizeof(n);
+    if (nvs_get_blob(h, NETCFG_KEY, &n, &sz) == ESP_OK && sz == sizeof(n) && n.ver == NETCFG_VER)
+        s_net = n;
+    nvs_close(h);
+}
+
+static bool netcfg_store(const netcfg_t *n) {
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) return false;
+    bool ok = nvs_set_blob(h, NETCFG_KEY, n, sizeof(*n)) == ESP_OK && nvs_commit(h) == ESP_OK;
+    nvs_close(h);
+    if (ok) s_net = *n;
+    return ok;
+}
+
+static void ip_str(uint32_t a, char *buf, size_t len) {
+    esp_ip4_addr_t x = { .addr = a };
+    snprintf(buf, len, IPSTR, IP2STR(&x));
+}
+
+// NULL = poprawne, inaczej komunikat dla panelu.
+static const char *netcfg_check(uint32_t ip, uint32_t mask, uint32_t gw) {
+    if (!ip || !mask || !gw) return "Uzupełnij adres IP, maskę i bramę.";
+    uint32_t m = __builtin_bswap32(mask);          // maska w kolejnosci hosta
+    uint32_t inv = ~m;
+    if (m == 0xFFFFFFFFu || (inv & (inv + 1)) != 0) return "Nieprawidłowa maska podsieci.";
+    uint8_t first = (uint8_t)(ip & 0xFF);          // pierwszy oktet adresu
+    if (first == 0 || first == 127 || first >= 224) return "Nieprawidłowy adres IP.";
+    if ((ip & mask) != (gw & mask)) return "Brama musi być w tej samej podsieci co adres IP.";
+    uint32_t hip = ip & ~mask, hgw = gw & ~mask;
+    if (hip == 0 || hip == ~mask) return "To adres sieci albo rozgłoszeniowy - wybierz inny adres IP.";
+    if (hgw == 0 || hgw == ~mask) return "Nieprawidłowy adres bramy.";
+    if (ip == gw) return "Adres IP nie może być taki sam jak adres bramy.";
+    return NULL;
+}
+
+// Przed esp_wifi_start: z zatrzymanym klientem DHCP esp_netif sam zglasza
+// IP_EVENT_STA_GOT_IP przy kazdym polaczeniu z siecia (esp_netif_action_connected),
+// takze po zerwaniu i powrocie Wi-Fi - reszta firmware dziala jak przy DHCP.
+static void netcfg_apply(void) {
+    if (!s_net.on || !s_sta_netif) return;
+    esp_err_t e = esp_netif_dhcpc_stop(s_sta_netif);
+    if (e != ESP_OK && e != ESP_ERR_ESP_NETIF_DHCP_ALREADY_STOPPED) {
+        ESP_LOGE(TAG, "Staly IP: nie mozna zatrzymac DHCP (%d) - zostaje DHCP", e);
+        return;
+    }
+    esp_netif_ip_info_t ii = { 0 };
+    ii.ip.addr = s_net.ip;
+    ii.netmask.addr = s_net.mask;
+    ii.gw.addr = s_net.gw;
+    if (esp_netif_set_ip_info(s_sta_netif, &ii) != ESP_OK) {
+        ESP_LOGE(TAG, "Staly IP: nie mozna ustawic adresu - wracam do DHCP");
+        esp_netif_dhcpc_start(s_sta_netif);
+        return;
+    }
+    // set_ip_info czysci serwery DNS, wiec ustawiamy je dopiero teraz. Bez DNS
+    // nie zadziala zegar (pool.ntp.org), OTA z GitHuba ani broker po nazwie.
+    esp_netif_dns_info_t d = { 0 };
+    d.ip.type = ESP_IPADDR_TYPE_V4;
+    d.ip.u_addr.ip4.addr = s_net.dns ? s_net.dns : s_net.gw;
+    esp_netif_set_dns_info(s_sta_netif, ESP_NETIF_DNS_MAIN, &d);
+    if (s_net.dns && s_net.dns != s_net.gw) {
+        d.ip.u_addr.ip4.addr = s_net.gw;
+        esp_netif_set_dns_info(s_sta_netif, ESP_NETIF_DNS_BACKUP, &d);
+    }
+    ESP_LOGI(TAG, "Staly adres IP: " IPSTR "%s", IP2STR(&ii.ip),
+             s_net.pending ? " (na probe - czeka na otwarcie panelu)" : "");
+}
+
+static void trial_expired(void *arg) {
+    (void)arg;
+    if (!s_net.pending) return;
+    ESP_LOGW(TAG, "Nikt nie otworzyl panelu pod nowym adresem w %d s - wracam do DHCP",
+             NETCFG_TRIAL_S);
+    netcfg_t n = s_net;
+    n.on = 0;
+    n.pending = 0;
+    netcfg_store(&n);
+    esp_restart();
+}
+
+static void netcfg_trial_start(void) {
+    if (!s_net.on || !s_net.pending) return;
+    const esp_timer_create_args_t a = { .callback = trial_expired, .name = "ip_trial" };
+    if (esp_timer_create(&a, &s_trial_timer) != ESP_OK) return;
+    esp_timer_start_once(s_trial_timer, (uint64_t)NETCFG_TRIAL_S * 1000000ULL);
+    s_trial_end_us = esp_timer_get_time() + (int64_t)NETCFG_TRIAL_S * 1000000LL;
+}
 
 static void event_handler(void *arg, esp_event_base_t base,
                            int32_t id, void *data) {
@@ -151,6 +271,8 @@ static void start_ap(const sih_config_t *cfg) {
 void wifi_manager_init(void) {
     s_wifi_eg = xEventGroupCreate();
     const sih_config_t *cfg = nvs_config_ptr();
+    netcfg_load();
+    netcfg_trial_start();     // beta394: takze w trybie AP - inaczej zly adres zostalby na zawsze
 
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
                                                &event_handler, NULL));
@@ -169,6 +291,7 @@ void wifi_manager_init(void) {
 
     s_sta_netif = esp_netif_create_default_wifi_sta();
     esp_netif_set_hostname(s_sta_netif, "sih-wmbus");
+    netcfg_apply();           // beta394
     wifi_config_t sta_cfg = {0};
     strlcpy((char *)sta_cfg.sta.ssid,     cfg->wifi_ssid, sizeof(sta_cfg.sta.ssid));
     strlcpy((char *)sta_cfg.sta.password, cfg->wifi_pass,  sizeof(sta_cfg.sta.password));
@@ -309,4 +432,74 @@ int wifi_manager_scan(char *json_buf, int cap) {
 
 int wifi_manager_last_disc_reason(void) {
     return s_last_disc_reason;
+}
+
+// ---------------------------------------------------------------------------
+// beta394: staly adres IP - API dla panelu
+// ---------------------------------------------------------------------------
+int wifi_manager_netcfg_json(char *buf, int cap) {
+    char ip[16], mask[16], gw[16], dns[16];
+    char cip[16] = "0.0.0.0", cmask[16] = "0.0.0.0", cgw[16] = "0.0.0.0", cdns[16] = "0.0.0.0";
+    ip_str(s_net.ip, ip, sizeof(ip));
+    ip_str(s_net.mask, mask, sizeof(mask));
+    ip_str(s_net.gw, gw, sizeof(gw));
+    ip_str(s_net.dns, dns, sizeof(dns));
+    if (s_sta_netif && s_state == WIFI_STATE_CONNECTED) {
+        esp_netif_ip_info_t ii;
+        if (esp_netif_get_ip_info(s_sta_netif, &ii) == ESP_OK) {
+            ip_str(ii.ip.addr, cip, sizeof(cip));
+            ip_str(ii.netmask.addr, cmask, sizeof(cmask));
+            ip_str(ii.gw.addr, cgw, sizeof(cgw));
+        }
+        esp_netif_dns_info_t d;
+        if (esp_netif_get_dns_info(s_sta_netif, ESP_NETIF_DNS_MAIN, &d) == ESP_OK)
+            ip_str(d.ip.u_addr.ip4.addr, cdns, sizeof(cdns));
+    }
+    int left = 0;
+    if (s_net.pending && s_trial_end_us) {
+        int64_t l = (s_trial_end_us - esp_timer_get_time()) / 1000000LL;
+        left = l > 0 ? (int)l : 0;
+    }
+    return snprintf(buf, cap,
+        "{\"static\":%s,\"pending\":%s,\"pending_s\":%d,"
+        "\"ip\":\"%s\",\"mask\":\"%s\",\"gw\":\"%s\",\"dns\":\"%s\","
+        "\"cur_ip\":\"%s\",\"cur_mask\":\"%s\",\"cur_gw\":\"%s\",\"cur_dns\":\"%s\","
+        "\"ap\":%s}",
+        s_net.on ? "true" : "false", s_net.pending ? "true" : "false", left,
+        s_net.on ? ip : "", s_net.on ? mask : "", s_net.on ? gw : "",
+        (s_net.on && s_net.dns) ? dns : "",
+        cip, cmask, cgw, cdns,
+        s_state == WIFI_STATE_AP_MODE ? "true" : "false");
+}
+
+const char *wifi_manager_netcfg_save(bool on, const char *ip, const char *mask,
+                                     const char *gw, const char *dns) {
+    netcfg_t n;
+    memset(&n, 0, sizeof(n));
+    n.ver = NETCFG_VER;
+    if (on) {
+        esp_ip4_addr_t a = { 0 }, m = { 0 }, g = { 0 }, d = { 0 };
+        if (!ip || esp_netif_str_to_ip4(ip, &a) != ESP_OK)     return "Nieprawidłowy adres IP.";
+        if (!mask || esp_netif_str_to_ip4(mask, &m) != ESP_OK) return "Nieprawidłowa maska podsieci.";
+        if (!gw || esp_netif_str_to_ip4(gw, &g) != ESP_OK)     return "Nieprawidłowy adres bramy.";
+        if (dns && dns[0] && esp_netif_str_to_ip4(dns, &d) != ESP_OK) return "Nieprawidłowy adres DNS.";
+        const char *err = netcfg_check(a.addr, m.addr, g.addr);
+        if (err) return err;
+        n.on = 1;
+        n.pending = 1;
+        n.ip = a.addr; n.mask = m.addr; n.gw = g.addr; n.dns = d.addr;
+    }
+    if (!netcfg_store(&n)) return "Nie udało się zapisać ustawień.";
+    ESP_LOGI(TAG, "Zapisano adresacje: %s", on ? "staly adres IP (na probe)" : "DHCP");
+    return NULL;
+}
+
+void wifi_manager_netcfg_confirm(void) {
+    if (!s_net.pending) return;
+    netcfg_t n = s_net;
+    n.pending = 0;
+    if (!netcfg_store(&n)) return;
+    if (s_trial_timer) esp_timer_stop(s_trial_timer);
+    s_trial_end_us = 0;
+    ESP_LOGI(TAG, "Staly adres IP potwierdzony - panel otwarty pod nowym adresem");
 }

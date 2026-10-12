@@ -1317,6 +1317,39 @@ static esp_err_t handle_esphome(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// beta394: staly adres IP. GET - ustawienia i obecny adres; POST
+// {"static":bool,"ip","mask","gw","dns"} zapisuje i restartuje modul,
+// POST {"confirm":true} potwierdza adres (panel otwarty pod nowym IP).
+static esp_err_t handle_netcfg(httpd_req_t *req) {
+    if (req->method == HTTP_POST) {
+        char body[256];
+        int len = httpd_req_recv(req, body, sizeof(body) - 1);
+        if (len <= 0) { resp_err(req, "brak danych"); return ESP_OK; }
+        body[len] = 0;
+        if (strstr(body, "\"confirm\":true")) {
+            wifi_manager_netcfg_confirm();
+        } else {
+            bool on = (strstr(body, "\"static\":true") != NULL);
+            char ip[16] = "", mask[16] = "", gw[16] = "", dns[16] = "";
+            const char *p;
+            if ((p = strstr(body, "\"ip\":\"")))   sscanf(p, "\"ip\":\"%15[^\"]\"", ip);
+            if ((p = strstr(body, "\"mask\":\""))) sscanf(p, "\"mask\":\"%15[^\"]\"", mask);
+            if ((p = strstr(body, "\"gw\":\"")))   sscanf(p, "\"gw\":\"%15[^\"]\"", gw);
+            if ((p = strstr(body, "\"dns\":\"")))  sscanf(p, "\"dns\":\"%15[^\"]\"", dns);
+            const char *err = wifi_manager_netcfg_save(on, ip, mask, gw, dns);
+            if (err) { resp_err(req, err); return ESP_OK; }
+            resp_ok(req);
+            vTaskDelay(pdMS_TO_TICKS(800));   // odpowiedz musi dojsc przed restartem
+            esp_restart();
+            return ESP_OK;
+        }
+    }
+    char buf[512];
+    wifi_manager_netcfg_json(buf, sizeof(buf));
+    resp_json(req, buf);
+    return ESP_OK;
+}
+
 static esp_err_t handle_backup_get(httpd_req_t *req) {
     // Kopia wysylana STRUMIENIOWO. Wczesniej budowala sie w buforze 60 kB w RAM,
     // przez co miescily sie w niej tylko biezace pliki historii (168 godzin =
@@ -1634,6 +1667,9 @@ void api_register_handlers(httpd_handle_t server) {
         // beta390: 47 z 48 uchwytow
         { .uri="/api/esphome",     .method=HTTP_GET,  .handler=handle_esphome,     .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/esphome",     .method=HTTP_POST, .handler=handle_esphome,     .user_ctx=NULL, .is_websocket=false },
+        // beta394: 49 z 52 uchwytow
+        { .uri="/api/netcfg",      .method=HTTP_GET,  .handler=handle_netcfg,      .user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/netcfg",      .method=HTTP_POST, .handler=handle_netcfg,      .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/backup",      .method=HTTP_GET,  .handler=handle_backup_get,  .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/backup",      .method=HTTP_POST, .handler=handle_backup_post, .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/logs",        .method=HTTP_GET,  .handler=handle_logs,        .user_ctx=NULL, .is_websocket=false },

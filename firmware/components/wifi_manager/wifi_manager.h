@@ -30,3 +30,14 @@ int          wifi_manager_scan(char *json_buf, int cap);
 // 15 = AUTH_FAIL (zle haslo), 201 = NO_AP_FOUND. 0 = brak/OK.
 // Pozwala UI wykryc zle haslo po restarcie (podejscie B - sprawdzenie po polaczeniu).
 int          wifi_manager_last_disc_reason(void);
+
+// beta394: staly adres IP w sieci domowej (tryb AP bez zmian).
+// JSON dla panelu: zapisane ustawienia i obecny adres z routera.
+int          wifi_manager_netcfg_json(char *buf, int cap);
+// Zapis ustawien (adresy jako tekst "a.b.c.d", dns moze byc pusty = brama).
+// Zwraca NULL albo komunikat bledu. Zmiana dziala po restarcie - robi go wolajacy.
+// Nowy staly adres jest na probe: bez potwierdzenia w 5 min modul wraca do DHCP.
+const char  *wifi_manager_netcfg_save(bool on, const char *ip, const char *mask,
+                                      const char *gw, const char *dns);
+// Potwierdzenie: panel otwarty pod nowym adresem.
+void         wifi_manager_netcfg_confirm(void);

@@ -44,7 +44,7 @@ static esp_err_t favicon_handler(httpd_req_t *req) {
 
 void webserver_init(void) {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.max_uri_handlers = 48;   // 39 w uzyciu po dodaniu MQTT - zapas na kolejne
+    cfg.max_uri_handlers = 52;   // beta394: 49 w uzyciu (stały adres IP) - zapas na kolejne
     // 12 kB: handlery robia lokalna KOPIE konfiguracji (ponad 3 kB po
     // rozszerzeniu przypiec do 32), bo modyfikuja ja przed zapisem.
     cfg.stack_size       = 12288;

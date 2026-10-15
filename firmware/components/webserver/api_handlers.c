@@ -1353,6 +1353,51 @@ static esp_err_t handle_netcfg(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// beta396: zuzycie na dashboardzie. GET - flaga i wartosci dla sledzonych pol
+// narastajacych (to samo wyliczenie co e-ink: history_display_summary, dane
+// godzinowe z RAM, bez czytania flasha). POST {"enabled":bool} - przelacznik
+// z zakladki System. Przy wylaczonej opcji nic nie liczymy.
+static esp_err_t handle_dash_usage(httpd_req_t *req) {
+    if (req->method == HTTP_POST) {
+        char body[64];
+        int len = httpd_req_recv(req, body, sizeof(body) - 1);
+        if (len <= 0) { resp_err(req, "brak danych"); return ESP_OK; }
+        body[len] = 0;
+        nvs_config_set_dash_usage(strstr(body, "\"enabled\":true") != NULL);
+    }
+    bool en = nvs_config_dash_usage();
+    const int cap = 6144;
+    char *buf = malloc(cap);
+    if (!buf) { httpd_resp_send_500(req); return ESP_OK; }
+    int n = snprintf(buf, cap, "{\"enabled\":%s,\"items\":[", en ? "true" : "false");
+    if (en) {
+        static char ids[24][12];       // statyczne - stos zadania httpd jest wspolny
+        static char keys[8][40];
+        int nid = history_tracked_meter_ids(ids, 24);
+        bool first = true;
+        for (int i = 0; i < nid && n < cap - 256; i++) {
+            int nk = history_keys_for_id(ids[i], keys, 8);
+            for (int k = 0; k < nk && n < cap - 256; k++) {
+                if (!strchr(keys[k], ':')) continue;   // stary klucz bez nazwy pola
+                hist_display_t s;
+                if (!history_display_summary(keys[k], &s) || !s.cumulative || !s.has_value) continue;
+                char d0[24] = "null", d1[24] = "null", d2[24] = "null";
+                if (s.has_today)      snprintf(d0, sizeof(d0), "%.3f", s.today);
+                if (s.has_yesterday)  snprintf(d1, sizeof(d1), "%.3f", s.yesterday);
+                if (s.has_day_before) snprintf(d2, sizeof(d2), "%.3f", s.day_before);
+                n += snprintf(buf + n, cap - n,
+                              "%s{\"k\":\"%s\",\"kind\":%d,\"ts\":%u,\"d0\":%s,\"d1\":%s,\"d2\":%s}",
+                              first ? "" : ",", keys[k], s.kind, (unsigned)s.last_ts, d0, d1, d2);
+                first = false;
+            }
+        }
+    }
+    if (n < cap) snprintf(buf + n, cap - n, "]}");
+    resp_json(req, buf);
+    free(buf);
+    return ESP_OK;
+}
+
 static esp_err_t handle_backup_get(httpd_req_t *req) {
     // Kopia wysylana STRUMIENIOWO. Wczesniej budowala sie w buforze 60 kB w RAM,
     // przez co miescily sie w niej tylko biezace pliki historii (168 godzin =
@@ -1673,6 +1718,9 @@ void api_register_handlers(httpd_handle_t server) {
         // beta394: 49 z 52 uchwytow
         { .uri="/api/netcfg",      .method=HTTP_GET,  .handler=handle_netcfg,      .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/netcfg",      .method=HTTP_POST, .handler=handle_netcfg,      .user_ctx=NULL, .is_websocket=false },
+        // beta396: 51 z 52 uchwytow
+        { .uri="/api/dashboard/usage", .method=HTTP_GET,  .handler=handle_dash_usage, .user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/dashboard/usage", .method=HTTP_POST, .handler=handle_dash_usage, .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/backup",      .method=HTTP_GET,  .handler=handle_backup_get,  .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/backup",      .method=HTTP_POST, .handler=handle_backup_post, .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/logs",        .method=HTTP_GET,  .handler=handle_logs,        .user_ctx=NULL, .is_websocket=false },

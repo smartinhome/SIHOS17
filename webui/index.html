@@ -604,7 +604,7 @@
 /* beta397: karty dashboardu w stylu HeroUI */
 :root{--hc-card:#18181b;--hc-tile:#232326;--hc-track:#27272a;--hc-mut:#a1a1aa;--hc-txt:#fcfcfc;--hc-chip:#27272a;--hc-chiptxt:#e4e4e7;--hc-bd:transparent;--hc-ok:#17c964;--hc-oktxt:#81dc98;--hc-oksoft:rgba(23,201,100,.15);--hc-err:#ff383c;--hc-errtxt:#ff7d74}
 [data-theme='light']{--hc-card:#ffffff;--hc-tile:#f4f4f5;--hc-track:#e4e4e7;--hc-mut:#71717a;--hc-txt:#18181b;--hc-chip:#f4f4f5;--hc-chiptxt:#3f3f46;--hc-bd:#e4e4e7;--hc-ok:#17c964;--hc-oktxt:#15803d;--hc-oksoft:rgba(23,201,100,.14);--hc-err:#e5252a;--hc-errtxt:#c81e1e}
-#dash-meters.hc-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(440px,100%),1fr));gap:16px;align-items:start}
+#dash-meters.hc-grid{display:block}#dash-meters.hc-grid>.hc{margin-bottom:16px;break-inside:avoid;-webkit-column-break-inside:avoid;page-break-inside:avoid}@media(min-width:1180px){#dash-meters.hc-grid{column-count:2;column-gap:16px}#dash-meters.hc-grid>.empty{column-span:all}}
 #dash-meters.hc-grid>.empty{grid-column:1/-1}
 .hc{--c:#0485f7;--ct:#0485f7;--cs:rgba(4,133,247,.15);--cy:rgba(4,133,247,.35);background:var(--hc-card);border:1px solid var(--hc-bd);border-radius:24px;padding:20px;display:flex;flex-direction:column;gap:18px;color:var(--hc-txt);min-width:0}
 .hc.t-elec{--c:#f7b750;--ct:#f7b750;--cs:rgba(247,183,80,.15);--cy:rgba(247,183,80,.35)}
@@ -640,7 +640,7 @@
 .hc-bc{flex:1;min-width:0;display:flex;flex-direction:column;align-items:center;gap:5px}
 .hc-bc span{font-size:11px;color:var(--hc-mut);font-variant-numeric:tabular-nums;white-space:nowrap}
 .hc-bc.d0 span{color:var(--hc-txt);font-weight:600}
-.hc-bw{flex:1;width:100%;position:relative;min-height:0}
+.hc-bw{flex:1;width:100%;position:relative;min-height:0;margin-top:18px}.hc-bw span{position:absolute;left:-4px;right:-4px;text-align:center;line-height:14px}
 .hc-bw i{position:absolute;left:0;right:0;bottom:0;border-radius:6px;background:var(--hc-track)}
 .hc-bc.d1 .hc-bw i{background:var(--cy)}
 .hc-bc.d0 .hc-bw i{background:var(--c)}
@@ -2720,7 +2720,8 @@ window.histIsLive = function(){
     for (var i = 0; i < 7; i++) {
       var x = v[i], pc = (!brak(x) && mx > 0) ? Math.max(x > 0 ? 3 : 0, Math.round(x / mx * 100)) : 0;
       var dz = polnoc(i - 6), cls = i === 6 ? ' d0' : (i === 5 ? ' d1' : '');
-      h += '<div class="hc-bc' + cls + '"><span>' + barLbl(x, u, it) + '</span><div class="hc-bw"><i style="height:' + pc + '%"></i></div><span>'
+      h += '<div class="hc-bc' + cls + '"><div class="hc-bw"><span style="bottom:calc(' + pc + '% + 4px)">' + barLbl(x, u, it)
+        + '</span><i style="height:' + pc + '%"></i></div><span>'
         + (i === 6 ? 'dziś' : DNI[dz.getDay()]) + '</span></div>';
     }
     return h + '</div></div>';

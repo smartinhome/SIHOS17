@@ -105,8 +105,3 @@ int  nvs_config_dash_fields_json(char *buf, int cap);
 // Osobny klucz NVS (u8), nie rusza blobu "config".
 bool nvs_config_eink_clock(void);
 void nvs_config_set_eink_clock(bool on);
-
-// beta396: zuzycie dzis/wczoraj/przedwczoraj w kartach dashboardu
-// (wlaczane w zakladce System, domyslnie wylaczone).
-bool nvs_config_dash_usage(void);
-void nvs_config_set_dash_usage(bool on);

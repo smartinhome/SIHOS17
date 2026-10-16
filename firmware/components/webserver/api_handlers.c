@@ -1353,24 +1353,16 @@ static esp_err_t handle_netcfg(httpd_req_t *req) {
     return ESP_OK;
 }
 
-// beta396: zuzycie na dashboardzie. GET - flaga i wartosci dla sledzonych pol
-// narastajacych (to samo wyliczenie co e-ink: history_display_summary, dane
-// godzinowe z RAM, bez czytania flasha). POST {"enabled":bool} - przelacznik
-// z zakladki System. Przy wylaczonej opcji nic nie liczymy.
+// beta396: zuzycie na dashboardzie - wartosci dla sledzonych pol narastajacych
+// (to samo wyliczenie co e-ink: history_display_summary, dane godzinowe z RAM,
+// bez czytania flasha). beta402: zawsze wlaczone, bez przelacznika w Systemie;
+// "enabled" zostaje w odpowiedzi dla zgodnosci panelu.
 static esp_err_t handle_dash_usage(httpd_req_t *req) {
-    if (req->method == HTTP_POST) {
-        char body[64];
-        int len = httpd_req_recv(req, body, sizeof(body) - 1);
-        if (len <= 0) { resp_err(req, "brak danych"); return ESP_OK; }
-        body[len] = 0;
-        nvs_config_set_dash_usage(strstr(body, "\"enabled\":true") != NULL);
-    }
-    bool en = nvs_config_dash_usage();
     const int cap = 6144;
     char *buf = malloc(cap);
     if (!buf) { httpd_resp_send_500(req); return ESP_OK; }
-    int n = snprintf(buf, cap, "{\"enabled\":%s,\"items\":[", en ? "true" : "false");
-    if (en) {
+    int n = snprintf(buf, cap, "{\"enabled\":true,\"items\":[");
+    {
         static char ids[24][12];       // statyczne - stos zadania httpd jest wspolny
         static char keys[8][40];
         int nid = history_tracked_meter_ids(ids, 24);
@@ -1718,9 +1710,8 @@ void api_register_handlers(httpd_handle_t server) {
         // beta394: 49 z 52 uchwytow
         { .uri="/api/netcfg",      .method=HTTP_GET,  .handler=handle_netcfg,      .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/netcfg",      .method=HTTP_POST, .handler=handle_netcfg,      .user_ctx=NULL, .is_websocket=false },
-        // beta396: 51 z 52 uchwytow
+        // beta402: 50 z 52 uchwytow (bez POST /api/dashboard/usage)
         { .uri="/api/dashboard/usage", .method=HTTP_GET,  .handler=handle_dash_usage, .user_ctx=NULL, .is_websocket=false },
-        { .uri="/api/dashboard/usage", .method=HTTP_POST, .handler=handle_dash_usage, .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/backup",      .method=HTTP_GET,  .handler=handle_backup_get,  .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/backup",      .method=HTTP_POST, .handler=handle_backup_post, .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/logs",        .method=HTTP_GET,  .handler=handle_logs,        .user_ctx=NULL, .is_websocket=false },

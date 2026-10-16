@@ -340,7 +340,6 @@
 #page-system .sec-mqtt { order:3; grid-column:2 }
 #page-system .sec-esph { order:4; grid-column:2 }
 #page-system .sec-led  { grid-column:1 / -1; order:5 }
-#page-system .sec-dash { grid-column:1 / -1; order:5 }   /* beta396: tuz pod diodami */
 /* beta360: Data i czas rozciaga sie na dwa rzedy, a w prawej kolumnie stoja
    nad soba Logi (naturalna wysokosc) i Kopia zapasowa (bierze luz rzedu). */
 #page-system .sec-czas { order:6; grid-column:1; grid-row:span 2 }
@@ -899,23 +898,6 @@
         Filtr „tylko liczniki z dashboardu” wycisza migotanie od sąsiadów w zasięgu, których nie obserwujesz.
       </div>
       <div id="leds-all-msg" class="msg" style="margin-top:12px"></div>
-    </div>
-  </section>
-
-  <!-- 4b. beta396: opcje dashboardu -->
-  <section class="sec sec-dash">
-    <h3 class="sec-title">Dashboard</h3>
-    <div class="card">
-      <div class="card-h">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg>
-        Karty liczników
-      </div>
-      <label class="check" style="margin-bottom:8px">
-        <input type="checkbox" id="dash-usage" onchange="saveDashUsage()">
-        <span>Pokaż zużycie dziś, wczoraj i przedwczoraj</span>
-      </label>
-      <div class="check-desc" style="margin:0">Dla liczników energii (kWh), wody i gazu (m3) oraz podzielników ciepła. Gdy śledzone jest pole produkcji, w karcie pojawi się też produkcja. Wartości liczone są tak samo jak na wyświetlaczu e-ink, z danych historii.</div>
-      <div id="dash-usage-msg" class="msg"></div>
     </div>
   </section>
 
@@ -2562,27 +2544,8 @@ window.histIsLive = function(){
     return fetch('/api/dashboard/usage').then(function(r){ return r.json(); }).then(function(d){
       window.DASH_USAGE = !!d.enabled;
       window.USAGE = d.items || [];
-      var c = g('dash-usage');
-      if (c) c.checked = window.DASH_USAGE;
       if (przerysuj && typeof fetchAll === 'function') fetchAll();
     }).catch(function(){});
-  };
-  window.loadDashUsage = function(){ window.fetchUsage(false); };
-  window.saveDashUsage = async function(){
-    var c = g('dash-usage'), m = g('dash-usage-msg');
-    if (m) { m.className = 'msg info'; m.textContent = 'Zapisywanie...'; }
-    try {
-      var r = await fetch('/api/dashboard/usage', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                                                   body: JSON.stringify({ enabled: c.checked }) });
-      var d = await r.json();
-      if (!r.ok || d.error) throw 0;
-      window.DASH_USAGE = !!d.enabled;
-      window.USAGE = d.items || [];
-      if (typeof fetchAll === 'function') fetchAll();
-      if (m) { m.className = 'msg ok'; m.textContent = c.checked ? 'Włączone' : 'Wyłączone'; if (typeof _msgFade === 'function') _msgFade(m); }
-    } catch (e) {
-      if (m) { m.className = 'msg err'; m.textContent = 'Nie zapisano - brak połączenia z modułem'; }
-    }
   };
   window.fetchUsage(true);
   setInterval(function(){ window.fetchUsage(false); }, 60000);

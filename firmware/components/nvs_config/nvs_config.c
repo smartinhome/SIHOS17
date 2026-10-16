@@ -16,8 +16,6 @@ static void dash_fields_load(void);
 // Zegar na e-ink - pojedyncza flaga, wlasny klucz NVS (patrz koniec pliku).
 static bool g_eink_clock = false;
 static void eink_clock_load(void);
-static bool g_dash_usage = false;     // beta396
-static void dash_usage_load(void);
 
 // Domyślna konfiguracja
 static void set_defaults(sih_config_t *c) {
@@ -44,7 +42,6 @@ static void set_defaults(sih_config_t *c) {
 void nvs_config_init(void) {
     dash_fields_load();   // osobny blob, niezalezny od powodzenia odczytu "config"
     eink_clock_load();
-    dash_usage_load();
     nvs_handle_t h;
     esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &h);
     if (err != ESP_OK) {
@@ -142,7 +139,6 @@ void nvs_config_reset(void) {
     // nvs_erase_all wyczyscil takze blob "dashflds" i flage zegara - zeruj kopie w RAM.
     memset(g_dash_fields, 0, sizeof(g_dash_fields));
     g_eink_clock = false;
-    g_dash_usage = false;
     ESP_LOGW(TAG, "Konfiguracja zresetowana do domyślnej");
 }
 
@@ -312,36 +308,4 @@ void nvs_config_set_eink_clock(bool on) {
     if (nvs_set_u8(h, EINK_CLOCK_KEY, on ? 1 : 0) == ESP_OK) nvs_commit(h);
     nvs_close(h);
     ESP_LOGI(TAG, "Zegar na e-ink: %s", on ? "wlaczony" : "wylaczony");
-}
-
-// ---------------------------------------------------------------------------
-// beta396: zuzycie dzis/wczoraj/przedwczoraj na dashboardzie. Jedna flaga,
-// wlasny klucz NVS "dashuse" - jak zegar e-ink, poza blobem "config".
-// Domyslnie wylaczone. Reset fabryczny (nvs_erase_all) kasuje ja razem z reszta.
-// ---------------------------------------------------------------------------
-#define DASH_USAGE_KEY "dashuse"
-
-static void dash_usage_load(void) {
-    g_dash_usage = false;
-    nvs_handle_t h;
-    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) return;
-    uint8_t v = 0;
-    if (nvs_get_u8(h, DASH_USAGE_KEY, &v) == ESP_OK) g_dash_usage = (v != 0);
-    nvs_close(h);
-}
-
-bool nvs_config_dash_usage(void) {
-    return g_dash_usage;
-}
-
-void nvs_config_set_dash_usage(bool on) {
-    g_dash_usage = on;
-    nvs_handle_t h;
-    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) {
-        ESP_LOGW(TAG, "Nie moge zapisac flagi zuzycia na dashboardzie");
-        return;
-    }
-    if (nvs_set_u8(h, DASH_USAGE_KEY, on ? 1 : 0) == ESP_OK) nvs_commit(h);
-    nvs_close(h);
-    ESP_LOGI(TAG, "Zuzycie na dashboardzie: %s", on ? "wlaczone" : "wylaczone");
 }

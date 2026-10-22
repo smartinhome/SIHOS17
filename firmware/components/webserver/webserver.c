@@ -1,5 +1,7 @@
 #include "webserver.h"
 #include "api_handlers.h"
+#include "auth.h"
+#include "display_eink.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 
@@ -44,12 +46,16 @@ static esp_err_t favicon_handler(httpd_req_t *req) {
 
 void webserver_init(void) {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.max_uri_handlers = 52;   // beta394: 49 w uzyciu (stały adres IP) - zapas na kolejne
+    cfg.max_uri_handlers = 56;   // beta404: 54 w uzyciu (logowanie /api/auth) - zapas na kolejne
     // 12 kB: handlery robia lokalna KOPIE konfiguracji (ponad 3 kB po
     // rozszerzeniu przypiec do 32), bo modyfikuja ja przed zapisem.
     cfg.stack_size       = 12288;
     cfg.lru_purge_enable = true;
     cfg.max_open_sockets = 7;   // limit gniazd httpd; reszta z puli LWIP wolna dla OTA
+    // beta404: logowanie do panelu. Ustawienia z NVS przed pierwszym zapytaniem;
+    // przycisk BOOT trzymany 10 s wylacza logowanie (zapomniane haslo).
+    auth_init();
+    display_eink_set_hold_cb(auth_button_reset);
     ESP_ERROR_CHECK(httpd_start(&s_server, &cfg));
     httpd_uri_t root = {
         .uri          = "/",

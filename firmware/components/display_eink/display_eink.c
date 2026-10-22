@@ -1002,6 +1002,9 @@ void display_eink_first_page(void) {
 // ---------- przycisk BOOT + auto-odswiezanie ----------
 
 static int s_btn_pin = -1;
+static void (*s_hold_cb)(void) = NULL;   // beta404: BOOT trzymany 10 s
+
+void display_eink_set_hold_cb(void (*cb)(void)) { s_hold_cb = cb; }
 
 // Task przycisku: krotkie nacisniecie = nastepna strona, dlugie = pierwsza.
 static TaskHandle_t s_btn_task_h = NULL;
@@ -1011,6 +1014,7 @@ static volatile bool s_eink_paused = false;
 static void button_task(void *arg) {
     (void)arg;
     const int LONG_MS = 1000;   // prog dlugiego nacisniecia
+    const int HOLD_MS = 10000;  // beta404: wylaczenie logowania do panelu
     bool prev_up = true;        // przycisk zwolniony (pullup, stan wysoki)
     while (1) {
         int level = gpio_get_level(s_btn_pin);
@@ -1018,10 +1022,12 @@ static void button_task(void *arg) {
         if (down && prev_up) {
             // poczatek nacisniecia - mierz czas trzymania
             int held = 0;
+            bool fired = false;
             while (gpio_get_level(s_btn_pin) == 0) {
                 vTaskDelay(pdMS_TO_TICKS(20));
                 held += 20;
-                if (held > 5000) break;
+                if (!fired && s_hold_cb && held >= HOLD_MS) { s_hold_cb(); fired = true; }
+                if (held > 15000) break;   // zablokowany przycisk - nie wisimy w petli
             }
             // beta371: przycisk NIE rysuje sam. Rysowanie strony licznika
             // potrzebuje ~2,5 KB stosu (draw_meter_page + odczyt historii z
@@ -1029,7 +1035,8 @@ static void button_task(void *arg) {
             // konczylo sie to przepelnieniem stosu i restartem modulu. Teraz
             // idzie ta sama droga co przyciski w panelu: flaga + obudzenie
             // taska odswiezania, ktory ma wlasne 4 KB.
-            if (held >= LONG_MS) display_eink_request_first_page();
+            if (fired) { /* 10 s: tylko wylaczenie logowania, bez zmiany strony */ }
+            else if (held >= LONG_MS) display_eink_request_first_page();
             else if (held >= 40)  display_eink_request_next_page();  // odfiltruj drgania <40ms
             prev_up = false;
         } else if (!down) {

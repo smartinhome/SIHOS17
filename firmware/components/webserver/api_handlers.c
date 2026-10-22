@@ -1,4 +1,5 @@
 #include "api_handlers.h"
+#include "auth.h"
 #include "display_eink.h"
 #include <time.h>
 #include <sys/time.h>
@@ -1721,7 +1722,19 @@ void api_register_handlers(httpd_handle_t server) {
         { .uri="/api/logs/cfg",    .method=HTTP_POST, .handler=handle_logs_cfg,    .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/logs/clear",  .method=HTTP_POST, .handler=handle_logs_clear,  .user_ctx=NULL, .is_websocket=false },
     };
-    for (int i = 0; i < (int)(sizeof(handlers)/sizeof(handlers[0])); i++)
-        httpd_register_uri_handler(server, &handlers[i]);
-    ESP_LOGI(TAG, "%d endpointow API zarejestrowanych", (int)(sizeof(handlers)/sizeof(handlers[0])));
+    // beta404: kazdy endpoint przechodzi przez bramke logowania. Oryginalny
+    // handler jedzie w user_ctx (wszystkie mialy NULL i go nie czytaja).
+    // Przy wylaczonym logowaniu bramka od razu wola handler - jak dotad.
+    for (int i = 0; i < (int)(sizeof(handlers)/sizeof(handlers[0])); i++) {
+        httpd_uri_t u = handlers[i];
+        u.user_ctx = (void *)handlers[i].handler;
+        u.handler  = auth_gate;
+        httpd_register_uri_handler(server, &u);
+    }
+    // Stan logowania i samo logowanie - bez bramki (ekran logowania).
+    const httpd_uri_t auth_get  = { .uri="/api/auth", .method=HTTP_GET,  .handler=auth_handle, .user_ctx=NULL, .is_websocket=false };
+    const httpd_uri_t auth_post = { .uri="/api/auth", .method=HTTP_POST, .handler=auth_handle, .user_ctx=NULL, .is_websocket=false };
+    httpd_register_uri_handler(server, &auth_get);
+    httpd_register_uri_handler(server, &auth_post);
+    ESP_LOGI(TAG, "%d endpointow API zarejestrowanych (+2 logowanie)", (int)(sizeof(handlers)/sizeof(handlers[0])));
 }

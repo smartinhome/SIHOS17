@@ -39,6 +39,10 @@ void display_eink_first_page(void);
 // pin_button - GPIO przycisku BOOT (aktywny w stanie niskim).
 void display_eink_start_tasks(int pin_button);
 
+// beta404: akcja przy przycisku BOOT trzymanym 10 s (wylaczenie logowania do
+// panelu). Wolana raz, z taska przycisku - nie moze robic nic ciezkiego.
+void display_eink_set_hold_cb(void (*cb)(void));
+
 // Akcje chwilowe wyzwalane z panelu. Obie tylko ZGLASZAJA zadanie i budza
 // task e-ink - samo rysowanie idzie w jego watku, bo SPI jest wspoldzielone
 // z CC1101 i nie wolno go zajmowac z tasku serwera HTTP.

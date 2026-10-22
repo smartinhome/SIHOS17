@@ -570,6 +570,6 @@ void auth_button_reset(void) {
     UNLOCK();
     if (was && xTaskCreate(save_task, "auth_save", 4096, NULL, 3, NULL) != pdPASS)
         ESP_LOGW(TAG, "Brak pamieci na zapis - logowanie wylaczone do restartu");
-    ESP_LOGW(TAG, "Przycisk BOOT 10 s: logowanie do panelu %s",
+    ESP_LOGW(TAG, "Przycisk przewijania stron trzymany 10 s: logowanie do panelu %s",
              was ? "wylaczone" : "bylo juz wylaczone");
 }

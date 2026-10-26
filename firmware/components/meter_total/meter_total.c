@@ -708,6 +708,124 @@ static bool fhkv_decode(const uint8_t *clean, int clen, fhkv_t *out) {
     return true;
 }
 
+// ---------- BMETERS: nakladka RFM-TX1.1 / Hydrodigit (BMT, woda) ----------
+// beta406. Stan licznika idzie zwyklym rekordem DIF/VIF (0C 13 = BCD, litry),
+// data licznika rekordem 04 6D, a reszta siedzi w rekordzie producenta (0F)
+// w ukladzie opisanym przez sterownik "hydrodigit" w wmbusmeters:
+//   bajt zawartosci, potem tylko te sekcje, ktorych bity sa ustawione:
+//   0x01 bateria (1 B), 0x02 sabotaz (typ 1 B + data), 0x80 data wycieku (3 B),
+//   0x04 przeplyw wsteczny (4 B, litry), 0x10 stany na koniec 12 miesiecy
+//   (12 x 3 B, dziesiatki litrow, styczen..grudzien).
+// Roznica wzgledem wmbusmeters: data sabotazu w ramkach RFM-TX1.1 ma 2 bajty,
+// nie 3. Sprawdzone na ramce z terenu (19199688): przy 3 bajtach wmbusmeters
+// pokazuje zwrot 1728053 m3 i miesiace po 67503 m3, przy 2 - zwrot 0 i kazdy
+// miesiac 244,23 m3, czyli dokladnie stan licznika (244,235 m3). Dlatego
+// probujemy obu dlugosci i bierzemy te, przy ktorej liczby maja sens.
+typedef struct {
+    bool   has_batt;      double batt_v;
+    bool   has_fraud;     uint8_t fraud;
+    bool   has_backflow;  double backflow_m3;
+    bool   has_months;    double month_m3[12];   // < 0 = brak (przed montazem)
+} bmt_extra_t;
+
+// Kod baterii -> napiecie (tabela z wmbusmeters, mlodszy polbajt).
+static double bmt_voltage(uint8_t raw) {
+    static const float v[16] = { 3.7f, 1.9f, 2.1f, 2.2f, 2.3f, 2.4f, 2.5f, 2.65f,
+                                 2.8f, 2.9f, 3.05f, 3.2f, 3.35f, 3.5f, 3.7f, 3.7f };
+    return v[raw & 0x0F];
+}
+
+static bool bmt_parse(const uint8_t *m, int n, double total, int date_len,
+                      bmt_extra_t *x) {
+    memset(x, 0, sizeof(*x));
+    if (n < 1) return false;
+    uint8_t c = m[0];
+    int i = 1;
+    if (c & 0x01) {
+        if (i + 1 > n) return false;
+        x->has_batt = true; x->batt_v = bmt_voltage(m[i]); i += 1;
+    }
+    if (c & 0x02) {
+        if (i + 1 + date_len > n) return false;
+        x->has_fraud = true; x->fraud = m[i]; i += 1 + date_len;
+    }
+    if (c & 0x80) {                                   // data wycieku - pomijamy
+        if (i + 3 > n) return false;
+        i += 3;
+    }
+    if (c & 0x04) {
+        if (i + 4 > n) return false;
+        uint32_t raw = m[i] | (m[i+1] << 8) | (m[i+2] << 16) | ((uint32_t)m[i+3] << 24);
+        x->has_backflow = true; x->backflow_m3 = raw / 1000.0; i += 4;
+    }
+    if (c & 0x10) {
+        if (i + 36 > n) return false;
+        for (int k = 0; k < 12; k++, i += 3) {
+            uint32_t raw = m[i] | (m[i+1] << 8) | (m[i+2] << 16);
+            x->month_m3[k] = (raw == 0xFFFFFF) ? -1.0 : raw / 100.0;
+        }
+        x->has_months = true;
+    }
+    // Sprawdzenie sensu: licznik narasta, wiec ani zwrot, ani zaden stan
+    // miesieczny nie moze byc wiekszy od biezacego stanu (+10 L zaokraglenia).
+    if (total > 0) {
+        if (x->has_backflow && x->backflow_m3 > total) return false;
+        if (x->has_months)
+            for (int k = 0; k < 12; k++)
+                if (x->month_m3[k] > total + 0.011) return false;
+    }
+    return true;
+}
+
+static void bmt_extra_fields(const uint8_t *p, int len, double total,
+                             mtf_field_t *out, int *nf, int max) {
+    if (len >= 2 && p[0] == 0x2F && p[1] == 0x2F) { p += 2; len -= 2; }
+    int i = 0, month_now = 0;
+    const uint8_t *mf = NULL; int mlen = 0;
+    while (i < len) {
+        uint8_t dif = p[i];
+        if (dif == 0x2F) { i++; continue; }
+        if (dif == 0x0F || dif == 0x1F) { mf = p + i + 1; mlen = len - i - 1; break; }
+        int dl = dif_data_len(dif);
+        i++;
+        if (dif & 0x80) { while (i < len && (p[i++] & 0x80)) ; }     // DIFE
+        if (i >= len) return;
+        uint8_t vif = p[i++];
+        if (vif & 0x80) { while (i < len && (p[i++] & 0x80)) ; }     // VIFE
+        if (dl < 0) { if (i >= len) return; dl = lvar_data_len(p[i]); i++; if (dl < 0) return; }
+        if (i + dl > len) return;
+        // Data licznika (typ F) - potrzebna tylko do wskazania poprzedniego miesiaca.
+        if ((dif & 0x0F) == 0x04 && (vif & 0x7F) == 0x6D && dl == 4)
+            month_now = p[i + 3] & 0x0F;
+        i += dl;
+    }
+    if (!mf || mlen < 1) return;
+
+    bmt_extra_t x;
+    if (!bmt_parse(mf, mlen, total, 3, &x) && !bmt_parse(mf, mlen, total, 2, &x)) {
+        ESP_LOGW(TAG, "BMETERS: dane producenta w nieznanym ukladzie - pominiete");
+        return;
+    }
+    if (x.has_batt)
+        mtf_put(out, nf, max, "bateria_v", x.batt_v, "V", 0);
+    if (x.has_months && month_now >= 1 && month_now <= 12) {
+        double prev = x.month_m3[(month_now + 10) % 12];    // miesiac poprzedni
+        if (prev >= 0) mtf_put(out, nf, max, "poprzedni_miesiac_m3", prev, "m3", 0);
+    }
+    if (x.has_backflow)
+        mtf_put(out, nf, max, "wsteczny_m3", x.backflow_m3, "m3", 0);
+    if (x.has_fraud) {
+        mtf_put(out, nf, max, "alarm_magnes",   (x.fraud & 0x80) ? 1 : 0, "", 0);
+        mtf_put(out, nf, max, "alarm_czujnik",  (x.fraud & 0x40) ? 1 : 0, "", 0);
+        mtf_put(out, nf, max, "alarm_demontaz", (x.fraud & 0x20) ? 1 : 0, "", 0);
+    }
+}
+
+static bool bmt_water(const char *mf, uint8_t medium) {
+    return strcmp(mf, "BMT") == 0 &&
+           (medium == 0x06 || medium == 0x07 || medium == 0x16);
+}
+
 int meter_total_extract_fields(const uint8_t *data, size_t len,
                                const char *key_hex,
                                mtf_field_t *out, int max_fields, int *out_kind) {
@@ -751,6 +869,21 @@ int meter_total_extract_fields(const uint8_t *data, size_t len,
         mtf_put(out, &nf, max_fields, "temp_grzejnik_c", h.t_rad  / 100.0, "\u00b0" "C", 0);
         *out_kind = 4;   // 4 = podzielnik ogrzewania
         return nf;
+    }
+
+    // beta406: BMETERS - stan jak dotad (sciezka ogolna), plus dane producenta.
+    if (bmt_water(mf, medium)) {
+        double total = 0; int kind = 0;
+        if (meter_total_extract(data, len, key_hex, &total, &kind) && kind != 2) {
+            int nf = 0;
+            mtf_put(out, &nf, max_fields, "total_m3", total, "m3", 1);
+            *out_kind = 1;
+            uint8_t payload[256];
+            int plen = tpl_payload(clean, clen, key, have_key, payload, sizeof(payload), NULL);
+            if (plen > 0) bmt_extra_fields(payload, plen, total, out, &nf, max_fields);
+            return nf;
+        }
+        // Gdyby cos poszlo nie tak - nizej ta sama sciezka co przed beta406.
     }
 
     // Pozostale liczniki: jedno pole total (uzyj istniejacej funkcji)
@@ -800,6 +933,7 @@ const char *meter_total_driver_name(const uint8_t *data, size_t len) {
     }
     if (strcmp(mf, "AMX") == 0 && medium == 0x03) return "unismart";
     if (strcmp(mf, "EGM") == 0 && medium == 0x02) return "gama350";   // beta392
+    if (bmt_water(mf, medium))                    return "bmeters";   // beta406
     switch (medium) {
         case 0x02: return "el.?";
         case 0x03: return "gaz?";

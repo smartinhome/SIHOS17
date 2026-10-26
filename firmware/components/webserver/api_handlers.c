@@ -589,6 +589,7 @@ static const char *default_field_for_type(const char *type) {
         strcasecmp(type, "mkradio4") == 0 ||
         strcasecmp(type, "water") == 0 ||
         strcasecmp(type, "unismart") == 0 ||
+        strcasecmp(type, "bmeters") == 0 ||          // beta406
         strcasecmp(type, "gas") == 0) {
         return "total_m3";
     }

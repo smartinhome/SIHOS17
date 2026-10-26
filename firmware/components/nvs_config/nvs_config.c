@@ -16,6 +16,8 @@ static void dash_fields_load(void);
 // Zegar na e-ink - pojedyncza flaga, wlasny klucz NVS (patrz koniec pliku).
 static bool g_eink_clock = false;
 static void eink_clock_load(void);
+static char g_hot_water[MAX_HOT_WATER][12];   // beta407: ID wodomierzy cieplej wody
+static void hot_water_load(void);
 
 // Domyślna konfiguracja
 static void set_defaults(sih_config_t *c) {
@@ -41,6 +43,7 @@ static void set_defaults(sih_config_t *c) {
 
 void nvs_config_init(void) {
     dash_fields_load();   // osobny blob, niezalezny od powodzenia odczytu "config"
+    hot_water_load();     // beta407
     eink_clock_load();
     nvs_handle_t h;
     esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &h);
@@ -138,6 +141,7 @@ void nvs_config_reset(void) {
     set_defaults(&g_cfg);
     // nvs_erase_all wyczyscil takze blob "dashflds" i flage zegara - zeruj kopie w RAM.
     memset(g_dash_fields, 0, sizeof(g_dash_fields));
+    memset(g_hot_water, 0, sizeof(g_hot_water));   // beta407
     g_eink_clock = false;
     ESP_LOGW(TAG, "Konfiguracja zresetowana do domyślnej");
 }
@@ -194,6 +198,68 @@ bool nvs_config_is_pinned(const char *id_hex) {
 
 bool nvs_config_led_only_pinned(void) {
     return g_cfg.led_only_pinned;
+}
+
+// ---------------------------------------------------------------------------
+// beta407: wodomierze cieplej wody - lista ID w kluczu NVS "hotwtr".
+// Osobno od blobu "config" z tego samego powodu co "dashflds".
+// ---------------------------------------------------------------------------
+#define HOT_WATER_KEY "hotwtr"
+
+static void hot_water_load(void) {
+    memset(g_hot_water, 0, sizeof(g_hot_water));
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) return;
+    size_t sz = sizeof(g_hot_water);
+    if (nvs_get_blob(h, HOT_WATER_KEY, g_hot_water, &sz) != ESP_OK)
+        memset(g_hot_water, 0, sizeof(g_hot_water));
+    nvs_close(h);
+    for (int i = 0; i < MAX_HOT_WATER; i++) g_hot_water[i][11] = 0;
+}
+
+bool nvs_config_hot_water_is_set(const char *id_hex) {
+    if (!id_hex || !id_hex[0]) return false;
+    for (int i = 0; i < MAX_HOT_WATER; i++)
+        if (g_hot_water[i][0] && strcasecmp(g_hot_water[i], id_hex) == 0) return true;
+    return false;
+}
+
+bool nvs_config_hot_water_set(const char *id_hex, bool on) {
+    if (!id_hex || !id_hex[0]) return false;
+    int idx = -1, free_idx = -1;
+    for (int i = 0; i < MAX_HOT_WATER; i++) {
+        if (!g_hot_water[i][0]) { if (free_idx < 0) free_idx = i; }
+        else if (strcasecmp(g_hot_water[i], id_hex) == 0) idx = i;
+    }
+    if (on) {
+        if (idx >= 0) return true;
+        if (free_idx < 0) return false;
+        strlcpy(g_hot_water[free_idx], id_hex, sizeof(g_hot_water[0]));
+    } else {
+        if (idx < 0) return true;
+        memset(g_hot_water[idx], 0, sizeof(g_hot_water[0]));
+    }
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) return false;
+    if (nvs_set_blob(h, HOT_WATER_KEY, g_hot_water, sizeof(g_hot_water)) == ESP_OK)
+        nvs_commit(h);
+    nvs_close(h);
+    return true;
+}
+
+int nvs_config_hot_water_json(char *buf, int cap) {
+    if (!buf || cap < 3) return 0;
+    int n = snprintf(buf, cap, "[");
+    bool first = true;
+    for (int i = 0; i < MAX_HOT_WATER && n < cap - 2; i++) {
+        if (!g_hot_water[i][0]) continue;
+        int w = snprintf(buf + n, cap - n, "%s\"%s\"", first ? "" : ",", g_hot_water[i]);
+        if (w < 0 || w >= cap - n) break;
+        n += w;
+        first = false;
+    }
+    n += snprintf(buf + n, cap - n, "]");
+    return n;
 }
 
 // ---------------------------------------------------------------------------

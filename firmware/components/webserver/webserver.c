@@ -46,7 +46,7 @@ static esp_err_t favicon_handler(httpd_req_t *req) {
 
 void webserver_init(void) {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.max_uri_handlers = 56;   // beta404: 54 w uzyciu (logowanie /api/auth) - zapas na kolejne
+    cfg.max_uri_handlers = 60;   // beta407: 55 w uzyciu (/api/meter/hot) - zapas na kolejne
     // 12 kB: handlery robia lokalna KOPIE konfiguracji (ponad 3 kB po
     // rozszerzeniu przypiec do 32), bo modyfikuja ja przed zapisem.
     cfg.stack_size       = 12288;

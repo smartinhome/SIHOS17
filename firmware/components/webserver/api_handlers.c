@@ -748,6 +748,9 @@ static esp_err_t handle_dashboard(httpd_req_t *req) {
     }
     if (pos < cap - 2) pos += snprintf(buf + pos, cap - pos, "],\"fields\":");
     if (pos < cap - 2) pos += nvs_config_dash_fields_json(buf + pos, cap - pos);
+    // beta407: wodomierze cieplej wody - panel barwi im kropelke na czerwono.
+    if (pos < cap - 2) pos += snprintf(buf + pos, cap - pos, ",\"hot\":");
+    if (pos < cap - 2) pos += nvs_config_hot_water_json(buf + pos, cap - pos);
     if (pos < cap - 1) snprintf(buf + pos, cap - pos, "}");
     buf[cap - 1] = 0;
     resp_json(req, buf);
@@ -785,6 +788,28 @@ static esp_err_t handle_dashboard_field(httpd_req_t *req) {
         resp_err(req, "lista pol dashboardu jest pelna");
         return ESP_OK;
     }
+    resp_ok(req);
+    return ESP_OK;
+}
+
+// POST /api/meter/hot  body: {"id":"19199688","hot":true|false}
+// beta407: rodzaj wody dla wodomierza (zimna/ciepla). Odczyt idzie razem
+// z GET /api/dashboard jako "hot":[...], wiec wystarcza jeden nowy URI.
+static esp_err_t handle_meter_hot(httpd_req_t *req) {
+    char body[96];
+    read_body(req, body, sizeof(body));
+    char id[12] = {0};
+    char *p = strstr(body, "\"id\":\"");
+    if (p) {
+        p += 6;
+        int n = 0;
+        while (*p && *p != '"' && n < 11) id[n++] = *p++;
+        id[n] = 0;
+    }
+    if (!valid_meter_id(id)) { resp_err(req, "zle id"); return ESP_OK; }
+    bool hot = (strstr(body, "\"hot\":true") != NULL);
+    if (!nvs_config_hot_water_set(id, hot)) { resp_err(req, "lista jest pelna"); return ESP_OK; }
+    ESP_LOGI(TAG, "Wodomierz %s: %s woda", id, hot ? "ciepla" : "zimna");
     resp_ok(req);
     return ESP_OK;
 }
@@ -1676,6 +1701,7 @@ void api_register_handlers(httpd_handle_t server) {
         { .uri="/api/dashboard",   .method=HTTP_GET,  .handler=handle_dashboard,   .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/dashboard",   .method=HTTP_POST, .handler=handle_dashboard,   .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/dashboard/field", .method=HTTP_POST, .handler=handle_dashboard_field, .user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/meter/hot",   .method=HTTP_POST, .handler=handle_meter_hot,   .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/eink",        .method=HTTP_GET,  .handler=handle_eink,        .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/eink",        .method=HTTP_POST, .handler=handle_eink,        .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/meter/names", .method=HTTP_GET,  .handler=handle_meter_name,  .user_ctx=NULL, .is_websocket=false },

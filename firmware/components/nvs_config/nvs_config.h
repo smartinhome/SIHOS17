@@ -101,6 +101,15 @@ bool nvs_config_dash_fields_set(const char *key, bool on);
 // Lista przypietych pol jako tablica JSON. Zwraca dlugosc zapisana do buf.
 int  nvs_config_dash_fields_json(char *buf, int cap);
 
+// --- Wodomierze ciepłej wody (beta407) ---
+// Ta sama nakladka (np. BMETERS RFM-TX1.1) siedzi na wodomierzu zimnej albo
+// cieplej wody i w obu przypadkach nadaje medium "woda", wiec rodzaj wybiera
+// uzytkownik. Lista ID w osobnym kluczu NVS "hotwtr", poza blobem "config".
+#define MAX_HOT_WATER 16
+bool nvs_config_hot_water_is_set(const char *id_hex);
+bool nvs_config_hot_water_set(const char *id_hex, bool on);   // false = brak miejsca
+int  nvs_config_hot_water_json(char *buf, int cap);
+
 // --- Zegar na wyswietlaczu e-ink ---
 // Osobny klucz NVS (u8), nie rusza blobu "config".
 bool nvs_config_eink_clock(void);

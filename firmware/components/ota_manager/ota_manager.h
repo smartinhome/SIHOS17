@@ -26,6 +26,12 @@ ota_status_t  ota_get_status(void);
 const char   *ota_get_running_version(void);
 const char   *ota_get_partition_label(void);
 
+// beta411: sprawdzanie nowej wersji oficjalnej (bety pomijane)
+void          ota_update_check_now(void);           // od razu, w tle
+void          ota_update_set_auto(bool on);         // po zmianie przelacznika
+int           ota_update_json(char *buf, size_t cap);   // "upd":{...} do /api/status
+int           ota_version_cmp(const char *a, const char *b);  // >0: a nowsza
+
 // Whitelist source-of-truth dla OTA. Zwraca true tylko dla https:// URL-i
 // zaczynajacych sie od dozwolonego prefiksu (github.com, objects.githubusercontent.com,
 // api.github.com, www.smartinhome.pl). Wolane rowniez z api_handlers.c

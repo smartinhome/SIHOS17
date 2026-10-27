@@ -432,7 +432,7 @@ static esp_err_t handle_status(httpd_req_t *req) {
     wifi_state_t ws = wifi_manager_get_state();
     const char *wifi_str[] = {"disconnected","connecting","connected","ap_mode"};
     sih_config_t scfg = nvs_config_get();
-    char buf[512];
+    char buf[768];
     snprintf(buf, sizeof(buf),
         "{\"version\":\"%s\",\"uptime_ms\":%" PRId64 ","
         "\"wifi_state\":\"%s\",\"wifi_rssi\":%d,"
@@ -462,6 +462,16 @@ static esp_err_t handle_status(httpd_req_t *req) {
                      mc2->mqtt_enabled ? "true" : "false",
                      mqtt_pub_connected() ? "true" : "false",
                      (uint32_t)(now2 > 1700000000 ? now2 : 0));
+    }
+    // beta411: wynik sprawdzania wersji oficjalnej - plakietka przy "System"
+    {
+        size_t l3 = strlen(buf);
+        if (l3 > 1 && buf[l3 - 1] == '}' && sizeof(buf) - l3 > 140) {
+            buf[l3 - 1] = ',';
+            int n = ota_update_json(buf + l3, sizeof(buf) - l3 - 1);
+            if (n > 0 && (size_t)n < sizeof(buf) - l3 - 1) strcat(buf, "}");
+            else { buf[l3 - 1] = '}'; buf[l3] = 0; }
+        }
     }
     resp_json(req, buf);
     return ESP_OK;
@@ -1215,6 +1225,26 @@ static esp_err_t handle_ota_github(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// beta411: {"auto":true|false} - przelacznik, {"action":"check"} - sprawdz teraz
+static esp_err_t handle_update(httpd_req_t *req) {
+    char body[64];
+    read_body(req, body, sizeof(body));
+    if (strstr(body, "\"action\":\"check\"")) {
+        ota_update_check_now();
+        resp_ok(req);
+        return ESP_OK;
+    }
+    if (strstr(body, "\"auto\":")) {
+        bool on = (strstr(body, "\"auto\":true") != NULL);
+        nvs_config_set_upd_check(on);
+        ota_update_set_auto(on);
+        resp_ok(req);
+        return ESP_OK;
+    }
+    resp_err(req, "nieznane polecenie");
+    return ESP_OK;
+}
+
 static esp_err_t handle_ota_status(httpd_req_t *req) {
     ota_status_t st = ota_get_status();
     const char *states[] = {"idle","downloading","writing","success","failed","uptodate"};
@@ -1730,6 +1760,7 @@ void api_register_handlers(httpd_handle_t server) {
         { .uri="/api/ota/github",  .method=HTTP_POST, .handler=handle_ota_github,  .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/ota/upload",  .method=HTTP_POST, .handler=handle_ota_upload,  .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/ota/status",  .method=HTTP_GET,  .handler=handle_ota_status,  .user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/update",      .method=HTTP_POST, .handler=handle_update,      .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/restart",     .method=HTTP_POST, .handler=handle_restart,     .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/factory-reset",.method=HTTP_POST,.handler=handle_factory_reset,.user_ctx=NULL, .is_websocket=false },
         { .uri="/api/mqtt",        .method=HTTP_GET,  .handler=handle_mqtt_cfg,    .user_ctx=NULL, .is_websocket=false },

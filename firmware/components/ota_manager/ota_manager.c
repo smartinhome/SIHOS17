@@ -19,6 +19,10 @@
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_timer.h"
+#include "nvs_config.h"
+#include "wifi_manager.h"
+#include <limits.h>
 #include <string.h>
 
 static const char *TAG = "OTA";
@@ -672,6 +676,193 @@ void ota_start_from_github(bool beta_channel, const char *tag) {
     xTaskCreate(ota_github_task, "ota_github", 16384, NULL, 6, NULL);
 }
 
+// ── beta411: sprawdzanie nowej wersji oficjalnej ──
+// Modul pyta github.com o adres /releases/latest: 5 min po starcie, potem co
+// 12 h i na przycisk w panelu. GitHub odpowiada przekierowaniem na
+// .../releases/tag/vX.Y.Z najnowszego wydania bez flagi pre-release (bety ja
+// maja, wiec nigdy tu nie trafia), a gdy wydania oficjalnego nie ma - na sama
+// liste .../releases. To zwykla strona, nie API, wiec nie zuzywa limitu
+// zapytan. Niczego nie instaluje: panel pokazuje plakietke przy "System".
+#define UPD_URL       "https://github.com/smartinhome/SIHOS17/releases/latest"
+#define UPD_FIRST_S   (5 * 60)
+#define UPD_PERIOD_S  (12 * 60 * 60)
+#define UPD_RETRY_S   (30 * 60)
+
+typedef enum { UPD_UNKNOWN, UPD_OK, UPD_NONE } upd_state_t;
+static upd_state_t        s_upd_state;
+static bool               s_upd_err;        // ostatnia proba sie nie udala
+static char               s_upd_latest[32];
+static volatile bool      s_upd_busy;
+static esp_timer_handle_t s_upd_timer;
+
+// "v1.0.1" -> {1,0,1,INT_MAX}, "v1.0.1-beta3" -> {1,0,1,3}: wydanie oficjalne
+// jest nowsze od kazdej swojej bety, a beta nastepnej wersji od poprzedniej
+// oficjalnej (v1.0.0-beta410 < v1.0.0 < v1.0.1-beta1 < v1.0.1).
+static bool ver_parse(const char *s, int v[4]) {
+    if (!s) return false;
+    if (*s == 'v' || *s == 'V') s++;
+    if (sscanf(s, "%d.%d.%d", &v[0], &v[1], &v[2]) != 3) return false;
+    const char *bp = strstr(s, "-beta");
+    v[3] = bp ? atoi(bp + 5) : INT_MAX;
+    return true;
+}
+
+// >0 gdy a nowsza od b, 0 gdy rowne, <0 gdy starsza. Nierozpoznana = najstarsza.
+int ota_version_cmp(const char *a, const char *b) {
+    int va[4], vb[4];
+    bool oa = ver_parse(a, va), ob = ver_parse(b, vb);
+    if (!oa || !ob) return (int)oa - (int)ob;
+    for (int i = 0; i < 4; i++)
+        if (va[i] != vb[i]) return va[i] < vb[i] ? -1 : 1;
+    return 0;
+}
+
+// Adres po przekierowaniu -> tag. 1 = wydanie oficjalne (tag w out),
+// 0 = brak wydania oficjalnego, -1 = nierozpoznany adres.
+static int upd_tag_from_url(const char *loc, char *out, size_t cap) {
+    const char *t = strstr(loc, "/releases/tag/");
+    if (t) {
+        t += strlen("/releases/tag/");
+        size_t n = 0;
+        while (t[n] && t[n] != '/' && t[n] != '?' && t[n] != '#') {
+            char ch = t[n];
+            if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+                  (ch >= '0' && ch <= '9') || ch == '.' || ch == '-' || ch == '_'))
+                return -1;
+            n++;
+        }
+        if (n == 0 || n >= cap) return -1;
+        memcpy(out, t, n);
+        out[n] = 0;
+        return strstr(out, "beta") ? -1 : 1;   // beta nie moze byc "latest"
+    }
+    size_t l = strlen(loc);
+    if (l >= 9 && strcmp(loc + l - 9, "/releases") == 0) return 0;
+    return -1;
+}
+
+static void upd_schedule(int sec) {
+    if (!s_upd_timer) return;
+    esp_timer_stop(s_upd_timer);   // gdy nieuzbrojony - zwraca blad, bez znaczenia
+    esp_timer_start_once(s_upd_timer, (uint64_t)sec * 1000000ULL);
+}
+
+static bool upd_fetch(void) {
+    // TLS do GitHuba potrzebuje spojnego bloku sterty. Gdy go nie ma, nie
+    // probujemy - sprobujemy za 30 min, zamiast dusic modul w trakcie pracy.
+    size_t big = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    size_t fr  = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+    if (big < 24 * 1024 || fr < 48 * 1024) {
+        ESP_LOGW(TAG, "Wersja: za malo pamieci na TLS (wolne %u B, blok %u B) - pozniej",
+                 (unsigned)fr, (unsigned)big);
+        return false;
+    }
+    esp_http_client_config_t cfg = {
+        .url                         = UPD_URL,
+        .timeout_ms                  = 15000,
+        .crt_bundle_attach           = esp_crt_bundle_attach,
+        .skip_cert_common_name_check = false,
+        .buffer_size                 = 4096,
+        .buffer_size_tx              = 1024,
+        .user_agent                  = "SIH-wMbus-Reader",
+    };
+    esp_http_client_handle_t c = esp_http_client_init(&cfg);
+    if (!c) return false;
+    bool ok = false;
+    if (esp_http_client_open(c, 0) == ESP_OK && esp_http_client_fetch_headers(c) >= 0) {
+        int st = esp_http_client_get_status_code(c);
+        char loc[160];
+        if ((st == 301 || st == 302 || st == 303 || st == 307 || st == 308) &&
+            esp_http_client_set_redirection(c) == ESP_OK &&
+            esp_http_client_get_url(c, loc, sizeof(loc)) == ESP_OK) {
+            char tag[sizeof(s_upd_latest)];
+            int r = upd_tag_from_url(loc, tag, sizeof(tag));
+            if (r == 1) {
+                strlcpy(s_upd_latest, tag, sizeof(s_upd_latest));
+                s_upd_state = UPD_OK;
+                ok = true;
+            } else if (r == 0) {
+                s_upd_latest[0] = 0;
+                s_upd_state = UPD_NONE;
+                ok = true;
+            } else {
+                ESP_LOGW(TAG, "Wersja: nieznany adres %s", loc);
+            }
+        } else {
+            ESP_LOGW(TAG, "Wersja: GitHub odpowiedzial HTTP %d", st);
+        }
+    }
+    esp_http_client_cleanup(c);
+    return ok;
+}
+
+static void upd_task(void *arg) {
+    (void)arg;
+    bool ok = false;
+    if (wifi_manager_get_state() == WIFI_STATE_CONNECTED &&
+        s_status.state != OTA_STATE_DOWNLOADING && s_status.state != OTA_STATE_WRITING) {
+        esp_log_level_set("esp-x509-crt-bundle", ESP_LOG_WARN);
+        ok = upd_fetch();
+        if (ok && s_upd_state == UPD_OK)
+            ESP_LOGI(TAG, "Wersja: najnowsza oficjalna %s, zainstalowana %s%s", s_upd_latest,
+                     ota_get_running_version(),
+                     ota_version_cmp(s_upd_latest, ota_get_running_version()) > 0 ? " - dostepna aktualizacja" : "");
+        else if (ok)
+            ESP_LOGI(TAG, "Wersja: brak wydania oficjalnego na GitHub");
+    }
+    s_upd_err  = !ok;
+    s_upd_busy = false;
+    upd_schedule(ok ? UPD_PERIOD_S : UPD_RETRY_S);
+    vTaskDelete(NULL);
+}
+
+static void upd_start_task(void) {
+    if (s_upd_busy) return;
+    s_upd_busy = true;
+    // Task tylko na czas sprawdzenia - stos na handshake TLS nie wisi caly czas
+    if (xTaskCreate(upd_task, "upd_chk", 10240, NULL, 3, NULL) != pdPASS) {
+        s_upd_busy = false;
+        upd_schedule(UPD_RETRY_S);
+    }
+}
+
+static void upd_timer_cb(void *arg) {
+    (void)arg;
+    if (!nvs_config_upd_check()) { upd_schedule(UPD_PERIOD_S); return; }
+    upd_start_task();
+}
+
+void ota_update_check_now(void) {
+    upd_start_task();
+}
+
+void ota_update_set_auto(bool on) {
+    if (on) {
+        upd_schedule(10);
+    } else {
+        // Wylaczone - plakietka znika; "Sprawdz teraz" nadal dziala
+        s_upd_state = UPD_UNKNOWN;
+        s_upd_err   = false;
+        s_upd_latest[0] = 0;
+    }
+}
+
+int ota_update_json(char *buf, size_t cap) {
+    const char *st = s_upd_state == UPD_OK ? "ok" : (s_upd_state == UPD_NONE ? "none" : "unknown");
+    char latest[sizeof(s_upd_latest)];
+    strlcpy(latest, s_upd_latest, sizeof(latest));
+    bool nw = s_upd_state == UPD_OK && ota_version_cmp(latest, ota_get_running_version()) > 0;
+    return snprintf(buf, cap,
+        "\"upd\":{\"auto\":%s,\"busy\":%s,\"state\":\"%s\",\"err\":%s,\"latest\":\"%s\",\"new\":%s}",
+        nvs_config_upd_check() ? "true" : "false", s_upd_busy ? "true" : "false", st,
+        s_upd_err ? "true" : "false", latest, nw ? "true" : "false");
+}
+
+static void upd_init(void) {
+    const esp_timer_create_args_t ta = { .callback = upd_timer_cb, .name = "upd_chk" };
+    if (esp_timer_create(&ta, &s_upd_timer) == ESP_OK) upd_schedule(UPD_FIRST_S);
+}
+
 void ota_manager_init(void) {
     const esp_partition_t *running = esp_ota_get_running_partition();
     ESP_LOGI(TAG, "Biezaca partycja: %s", running->label);
@@ -691,6 +882,7 @@ void ota_manager_init(void) {
             ESP_LOGI(TAG, "OTA: stan partycji = %d (juz potwierdzony)", state);
         }
     }
+    upd_init();   // beta411: sprawdzanie wersji oficjalnej (pierwsze za 5 min)
 }
 
 void ota_start_from_url(const char *url) {

@@ -16,6 +16,7 @@ static void dash_fields_load(void);
 // Zegar na e-ink - pojedyncza flaga, wlasny klucz NVS (patrz koniec pliku).
 static bool g_eink_clock = false;
 static void eink_clock_load(void);
+static bool g_upd_check = true;        // beta411
 static char g_hot_water[MAX_HOT_WATER][12];   // beta407: ID wodomierzy cieplej wody
 static void hot_water_load(void);
 
@@ -143,6 +144,7 @@ void nvs_config_reset(void) {
     memset(g_dash_fields, 0, sizeof(g_dash_fields));
     memset(g_hot_water, 0, sizeof(g_hot_water));   // beta407
     g_eink_clock = false;
+    g_upd_check = true;
     ESP_LOGW(TAG, "Konfiguracja zresetowana do domyślnej");
 }
 
@@ -350,13 +352,17 @@ int nvs_config_dash_fields_json(char *buf, int cap) {
 // nie miala jak przesunac zadnego istniejacego pola konfiguracji.
 // ---------------------------------------------------------------------------
 #define EINK_CLOCK_KEY "einkclk"
+#define UPD_CHECK_KEY  "updchk"
 
 static void eink_clock_load(void) {
     g_eink_clock = false;
+    g_upd_check = true;
     nvs_handle_t h;
     if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) return;
     uint8_t v = 0;
     if (nvs_get_u8(h, EINK_CLOCK_KEY, &v) == ESP_OK) g_eink_clock = (v != 0);
+    // beta411: brak klucza = wlaczone (tak samo po aktualizacji ze starszej wersji)
+    if (nvs_get_u8(h, UPD_CHECK_KEY, &v) == ESP_OK) g_upd_check = (v != 0);
     nvs_close(h);
 }
 
@@ -374,4 +380,20 @@ void nvs_config_set_eink_clock(bool on) {
     if (nvs_set_u8(h, EINK_CLOCK_KEY, on ? 1 : 0) == ESP_OK) nvs_commit(h);
     nvs_close(h);
     ESP_LOGI(TAG, "Zegar na e-ink: %s", on ? "wlaczony" : "wylaczony");
+}
+
+bool nvs_config_upd_check(void) {
+    return g_upd_check;
+}
+
+void nvs_config_set_upd_check(bool on) {
+    g_upd_check = on;
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) {
+        ESP_LOGW(TAG, "Nie moge zapisac flagi sprawdzania wersji");
+        return;
+    }
+    if (nvs_set_u8(h, UPD_CHECK_KEY, on ? 1 : 0) == ESP_OK) nvs_commit(h);
+    nvs_close(h);
+    ESP_LOGI(TAG, "Sprawdzanie wersji oficjalnej: %s", on ? "wlaczone" : "wylaczone");
 }

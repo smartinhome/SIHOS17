@@ -12,17 +12,14 @@
 #include "esp_heap_caps.h"
 #include "history.h"
 #include "esp_app_desc.h"
+#include "esp_app_format.h"
+#include "sdkconfig.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <string.h>
-
-// Szerokosc pojedynczego zakresu Range przy pobieraniu firmware z sieci.
-// Im wiekszy, tym mniej handshake'ow TLS - patrz komentarz przy
-// max_http_request_size ponizej.
-#define OTA_RANGE_CHUNK (256 * 1024)
 
 static const char *TAG = "OTA";
 static ota_status_t s_status = { .state = OTA_STATE_IDLE };
@@ -52,6 +49,311 @@ bool ota_url_allowed(const char *url) {
     return false;
 }
 
+// beta410: radio, e-ink i API ESPHome zatrzymujemy na czas pobierania. Po
+// nieudanej probie trzeba je wznowic - wczesniej wracalo tylko API ESPHome,
+// a modul do restartu nie odbieral licznikow (radio stalo). Flaga, bo
+// cc1101_start_receive nie jest idempotentne (drugi task odbioru).
+static bool s_svc_stopped;
+
+static void ota_stop_services(void) {
+    cc1101_stop();
+    display_eink_pause();  // zwolnij SPI i RAM przed OTA
+    esphome_api_stop();    // beta390: ok. 8 KB sterty na TLS do GitHuba
+    s_svc_stopped = true;
+}
+
+static void ota_resume_services(void) {
+    if (!s_svc_stopped) return;
+    s_svc_stopped = false;
+    cc1101_start_receive(wmbus_decoder_on_frame);
+    display_eink_resume();
+    esphome_api_start();
+}
+
+// beta410: kanal GitHub nie instaluje obrazu zbudowanego wczesniej niz
+// zainstalowany. Numery wersji tego nie rozstrzygna - bety maja "1.0.0-betaN"
+// takze po v1.0.4, wiec porownujemy date i godzine kompilacji z opisu obrazu.
+static bool s_no_downgrade;
+
+// Parametry biezacego zlecenia z panelu (jedno OTA naraz)
+static bool s_gh_beta;
+static char s_gh_tag[48];
+
+// "Oct 27 2026" + "11:29:00" -> liczba rosnaca z czasem (0 = nie rozpoznano)
+static int64_t ota_build_stamp(const char *date, const char *time) {
+    static const char M[] = "JanFebMarAprMayJunJulAugSepOctNovDec";
+    char mon[4] = {0};
+    int d = 0, y = 0, hh = 0, mm = 0, ss = 0;
+    if (sscanf(date, "%3s %d %d", mon, &d, &y) != 3) return 0;
+    const char *p = strstr(M, mon);
+    if (strlen(mon) != 3 || !p || (p - M) % 3) return 0;
+    sscanf(time, "%d:%d:%d", &hh, &mm, &ss);
+    int mi = (int)(p - M) / 3 + 1;
+    return ((((int64_t)y * 100 + mi) * 100 + d) * 100 + hh) * 10000 + mm * 100 + ss;
+}
+
+// ── Pobieranie obrazu z wznawianiem ──
+// beta410: wlasna petla zamiast esp_https_ota. Z partial_http_download
+// esp_https_ota co 256 KB laczyl sie od nowa pod adres PO przekierowaniu -
+// podpisany link GitHuba z krotka waznoscia. Przy wolnym lub rwacym sie
+// laczu kolejny zakres dostawal 403 albo zerwanie i cala aktualizacja konczyla
+// sie "OTA perform: ESP_FAIL" w 30-50%. Teraz jedno ciagle pobieranie, a po
+// zerwaniu ponowne polaczenie od oryginalnego URL (swiezy link) z naglowkiem
+// Range od ostatniego zapisanego bajtu. Poprawnosc i tak sprawdza esp_ota_end
+// (suma SHA-256 obrazu), wiec sklejony obraz nie ma szans przejsc z bledem.
+#define OTA_DL_BUF       4096
+#define OTA_HDR_NEED     ((int)(sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t) + sizeof(esp_app_desc_t)))
+#define OTA_MAX_NOPROG   6     // kolejne proby bez zadnego postepu
+#define OTA_MAX_TRIES    30    // twardy limit polaczen na jedna aktualizacje
+#define OTA_MAX_STALL    2     // ile razy z rzedu read moze zwrocic timeout
+
+// Otworz URL (z przekierowaniami) od bajtu "from". Zwraca klienta po
+// odebraniu naglowkow ostatecznej odpowiedzi; *status = kod HTTP albo -1.
+static esp_http_client_handle_t ota_dl_open(const char *url, int64_t from,
+                                            int *status, int64_t *clen) {
+    *status = -1;
+    *clen   = -1;
+    esp_http_client_config_t cfg = {
+        .url                         = url,
+        .timeout_ms                  = 20000,
+        .crt_bundle_attach           = esp_crt_bundle_attach,
+        // skip_cert_common_name_check = false: wymuszamy walidacje CN certyfikatu
+        // wzgledem hosta URL. Wczesniej true pozwalalo kazdemu certowi z bundle
+        // CA na podszycie sie za dowolna domene - MITM przez uzyskanie ANY cert
+        // od zaufanego CA (Let's Encrypt, DigiCert...) mogl podac wlasny firmware.
+        .skip_cert_common_name_check = false,
+        .buffer_size                 = 8192,
+        .buffer_size_tx              = 4096,
+        .user_agent                  = "SIH-wMbus-Reader",
+    };
+    esp_http_client_handle_t c = esp_http_client_init(&cfg);
+    if (!c) return NULL;
+    if (from > 0) {
+        char rng[32];
+        snprintf(rng, sizeof(rng), "bytes=%lld-", (long long)from);
+        esp_http_client_set_header(c, "Range", rng);   // zostaje po przekierowaniu
+    }
+    for (int hop = 0; hop < 8; hop++) {
+        esp_err_t e = esp_http_client_open(c, 0);
+        if (e != ESP_OK) {
+            ESP_LOGW(TAG, "OTA: polaczenie nieudane: %s", esp_err_to_name(e));
+            break;
+        }
+        int64_t cl = esp_http_client_fetch_headers(c);
+        int st = esp_http_client_get_status_code(c);
+        if (cl < 0 || st <= 0) {
+            ESP_LOGW(TAG, "OTA: brak naglowkow odpowiedzi");
+            break;
+        }
+        if (st == 301 || st == 302 || st == 303 || st == 307 || st == 308) {
+            char tmp[128];   // oproznij tresc przekierowania przed kolejnym zadaniem
+            while (esp_http_client_read(c, tmp, sizeof(tmp)) > 0) {}
+            if (esp_http_client_set_redirection(c) != ESP_OK) break;
+            esp_http_client_close(c);
+            continue;
+        }
+        *status = st;
+        *clen   = esp_http_client_get_content_length(c);
+        return c;
+    }
+    esp_http_client_cleanup(c);
+    return NULL;
+}
+
+typedef enum { DL_OK, DL_UPTODATE, DL_FAIL } dl_result_t;
+
+// Pobierz obraz spod URL i zapisz do nastepnej partycji OTA.
+// DL_OK = obraz zapisany, sprawdzony i ustawiony do startu.
+static dl_result_t ota_download(const char *url) {
+    const esp_partition_t *part = esp_ota_get_next_update_partition(NULL);
+    if (!part) {
+        snprintf(s_status.error, sizeof(s_status.error), "Brak partycji OTA");
+        return DL_FAIL;
+    }
+    char *buf = malloc(OTA_DL_BUF);
+    if (!buf) {
+        snprintf(s_status.error, sizeof(s_status.error), "Brak pamieci na bufor OTA");
+        return DL_FAIL;
+    }
+
+    esp_ota_handle_t oh = 0;
+    bool    ota_open = false, complete = false, fatal = false;
+    int64_t total = -1, done = 0;     // done = bajty juz zapisane na flash
+    int     noprog = 0, tries = 0, last_decile = -1;
+    s_status.error[0] = 0;
+
+    while (!complete && !fatal && tries < OTA_MAX_TRIES && noprog < OTA_MAX_NOPROG) {
+        if (tries > 0) {
+            int wait_s = 2 * noprog + 1;
+            if (wait_s > 10) wait_s = 10;
+            ESP_LOGW(TAG, "OTA: wznawiam od %lld B za %d s (proba %d)",
+                     (long long)done, wait_s, tries + 1);
+            vTaskDelay(pdMS_TO_TICKS(wait_s * 1000));
+        }
+        tries++;
+        int64_t done_before = done;
+        int st; int64_t cl;
+        esp_http_client_handle_t c = ota_dl_open(url, done, &st, &cl);
+        if (!c) { noprog++; continue; }
+
+        if (st == 404) {
+            // kanal oficjalny (latest/download) daje 404, gdy nie ma zadnego wydania bez bety
+            if (s_no_downgrade && !s_gh_beta)
+                snprintf(s_status.error, sizeof(s_status.error), "Brak oficjalnego wydania na GitHub");
+            else
+                snprintf(s_status.error, sizeof(s_status.error), "Brak pliku firmware na GitHub (404)");
+            fatal = true;
+        } else if (st != 200 && st != 206) {
+            ESP_LOGW(TAG, "OTA: HTTP %d", st);
+            snprintf(s_status.error, sizeof(s_status.error), "Serwer odpowiedzial HTTP %d", st);
+        } else {
+            // 200 przy wznowieniu = serwer zignorowal Range: pomin to, co juz jest
+            int64_t skip = (st == 200) ? done : 0;
+            if (cl > 0) {
+                int64_t t = (st == 206) ? done + cl : cl;
+                if (total < 0) total = t;
+                else if (t != total) {
+                    // inny rozmiar = inny plik pod tym samym adresem (nowe wydanie)
+                    snprintf(s_status.error, sizeof(s_status.error), "Plik zmienil sie w trakcie pobierania");
+                    fatal = true;
+                }
+            }
+            if (!fatal && total > (int64_t)part->size) {
+                snprintf(s_status.error, sizeof(s_status.error), "Obraz wiekszy od partycji OTA");
+                fatal = true;
+            }
+            int fill = 0, stall = 0;
+            while (!fatal) {
+                int r = esp_http_client_read(c, buf + fill, OTA_DL_BUF - fill);
+                if (r == -ESP_ERR_HTTP_EAGAIN) {
+                    if (++stall > OTA_MAX_STALL) break;   // lacze stoi - polacz od nowa
+                    continue;
+                }
+                if (r < 0) break;                          // zerwane
+                if (r == 0) {
+                    if (esp_http_client_is_complete_data_received(c) && ota_open)
+                        complete = true;
+                    break;
+                }
+                stall = 0;
+                if (skip > 0) {
+                    int k = (r > skip) ? (int)skip : r;
+                    skip -= k;
+                    if (k < r) memmove(buf + fill, buf + fill + k, r - k);
+                    r -= k;
+                    if (r == 0) continue;
+                }
+                fill += r;
+
+                if (!ota_open) {
+                    if (fill < OTA_HDR_NEED) continue;     // naglowek jeszcze niepelny
+                    const esp_image_header_t *ih = (const esp_image_header_t *)buf;
+                    const esp_app_desc_t *nd = (const esp_app_desc_t *)
+                        (buf + sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t));
+                    if (ih->magic != ESP_IMAGE_HEADER_MAGIC || nd->magic_word != ESP_APP_DESC_MAGIC_WORD) {
+                        snprintf(s_status.error, sizeof(s_status.error), "Pobrany plik nie jest firmware");
+                        fatal = true;
+                        break;
+                    }
+                    if (ih->chip_id != CONFIG_IDF_FIRMWARE_CHIP_ID) {
+                        snprintf(s_status.error, sizeof(s_status.error), "Firmware dla innego ukladu ESP32");
+                        fatal = true;
+                        break;
+                    }
+                    char ver[sizeof(nd->version) + 1];
+                    memcpy(ver, nd->version, sizeof(nd->version));
+                    ver[sizeof(nd->version)] = 0;
+                    ESP_LOGI(TAG, "Aktualizacja do wersji: %s (build %.16s %.16s)", ver, nd->date, nd->time);
+                    const esp_app_desc_t *cur = esp_app_get_description();
+                    // Ta sama wersja - nie pobieraj, poinformuj ze aktualne.
+                    // Mamy dopiero naglowek, wiec przerywamy zanim sciagniemy calosc.
+                    if (strncmp(cur->version, nd->version, sizeof(nd->version)) == 0) {
+                        ESP_LOGI(TAG, "OTA: zainstalowana wersja (%s) jest aktualna - pomijam pobieranie", ver);
+                        snprintf(s_status.error, sizeof(s_status.error), "Wersja %s jest aktualna", ver);
+                        esp_http_client_cleanup(c);
+                        free(buf);
+                        return DL_UPTODATE;
+                    }
+                    if (s_no_downgrade) {
+                        int64_t sn = ota_build_stamp(nd->date, nd->time);
+                        int64_t sc = ota_build_stamp(cur->date, cur->time);
+                        if (sn && sc && sn < sc) {
+                            ESP_LOGW(TAG, "OTA: %s zbudowana wczesniej niz zainstalowana %s - pomijam",
+                                     ver, cur->version);
+                            snprintf(s_status.error, sizeof(s_status.error),
+                                     "Zainstalowana jest nowsza niz %s", ver);
+                            esp_http_client_cleanup(c);
+                            free(buf);
+                            return DL_UPTODATE;
+                        }
+                    }
+                    const esp_partition_t *run_p = esp_ota_get_running_partition();
+                    ESP_LOGI(TAG, "OTA: biezaca partycja=%s, zapis do=%s @0x%lx, rozmiar obrazu=%lld B",
+                             run_p ? run_p->label : "?", part->label,
+                             (unsigned long)part->address, (long long)total);
+                    esp_err_t e = esp_ota_begin(part, OTA_WITH_SEQUENTIAL_WRITES, &oh);
+                    if (e != ESP_OK) {
+                        snprintf(s_status.error, sizeof(s_status.error), "esp_ota_begin: %s", esp_err_to_name(e));
+                        fatal = true;
+                        break;
+                    }
+                    ota_open = true;
+                    s_status.state = OTA_STATE_WRITING;
+                }
+
+                esp_err_t e = esp_ota_write(oh, buf, fill);
+                if (e != ESP_OK) {
+                    snprintf(s_status.error, sizeof(s_status.error), "Zapis flash: %s", esp_err_to_name(e));
+                    fatal = true;
+                    break;
+                }
+                done += fill;
+                fill = 0;
+                if (total > 0) {
+                    s_status.progress_pct = (int)(done * 100 / total);
+                    if (s_status.progress_pct / 10 != last_decile) {
+                        last_decile = s_status.progress_pct / 10;
+                        ESP_LOGI(TAG, "OTA: postep %d%% (%lld/%lld B)", s_status.progress_pct,
+                                 (long long)done, (long long)total);
+                    }
+                    if (done >= total) { complete = true; break; }
+                }
+            }
+            // bajty naglowka sprzed esp_ota_begin przepadaja - nastepna proba
+            // i tak zaczyna od "done", czyli od zera
+        }
+        esp_http_client_cleanup(c);
+        if (done > done_before) noprog = 0;
+        else if (!complete) noprog++;
+    }
+    free(buf);
+
+    if (!complete) {
+        if (ota_open) esp_ota_abort(oh);
+        if (!fatal && (noprog >= OTA_MAX_NOPROG || tries >= OTA_MAX_TRIES)) {
+            if (total > 0)
+                snprintf(s_status.error, sizeof(s_status.error), "Pobieranie przerwane przy %d%% - slabe lacze?",
+                         s_status.progress_pct);
+            else if (!s_status.error[0])
+                snprintf(s_status.error, sizeof(s_status.error), "Brak polaczenia z serwerem firmware");
+        }
+        ESP_LOGE(TAG, "OTA: niepowodzenie po %d polaczeniach: %s", tries, s_status.error);
+        return DL_FAIL;
+    }
+    ESP_LOGI(TAG, "OTA: pobrano %lld B w %d polaczeniach, sprawdzam obraz", (long long)done, tries);
+    esp_err_t e = esp_ota_end(oh);
+    if (e != ESP_OK) {
+        snprintf(s_status.error, sizeof(s_status.error), "Obraz niepoprawny: %s", esp_err_to_name(e));
+        return DL_FAIL;
+    }
+    e = esp_ota_set_boot_partition(part);
+    if (e != ESP_OK) {
+        snprintf(s_status.error, sizeof(s_status.error), "Ustawienie partycji: %s", esp_err_to_name(e));
+        return DL_FAIL;
+    }
+    return DL_OK;
+}
+
 // Task OTA z URL (GitHub Releases)
 static void ota_url_task(void *arg) {
     char *url = (char *)arg;
@@ -63,63 +365,24 @@ static void ota_url_task(void *arg) {
     // odpowiedz API teoretycznie moze zostac zmanipulowana MITM. Ponowna
     // walidacja tutaj gwarantuje ze zaden nieznany host nie zostanie odpytany.
     if (!ota_url_allowed(url)) {
-        // Pelna lista dozwolonych w logu (ma miejsce), s_status.error ma tylko 64 B
+        // Pelna lista dozwolonych w logu (ma miejsce), s_status.error jest krotki
         // wiec krotki komunikat dla UI (uzytkownik zajrzy do logow po szczegoly).
         ESP_LOGE(TAG, "OTA: URL '%s' nie na whitelist (dozwolone: github.com, "
                       "objects.githubusercontent.com, api.github.com, www.smartinhome.pl)", url);
         snprintf(s_status.error, sizeof(s_status.error),
                  "URL poza whitelist (szczegoly w logach)");
         s_status.state = OTA_STATE_FAILED;
-        esphome_api_start();   // beta390: wolane tez po zatrzymaniu w ota_github_task
+        ota_resume_services();   // wolane tez po zatrzymaniu w ota_github_task
         if (url) free(url);
         vTaskDelete(NULL);
         return;
     }
 
     // Zatrzymaj radio jesli jeszcze dziala (gdy wolane bezposrednio z URL)
-    cc1101_stop();
-    display_eink_pause();  // zwolnij SPI i RAM przed OTA
+    if (!s_svc_stopped) ota_stop_services();
 
-    esp_http_client_config_t http_cfg = {
-        .url                         = url,
-        .timeout_ms                  = 60000,
-        .crt_bundle_attach           = esp_crt_bundle_attach,
-        // skip_cert_common_name_check = false: wymuszamy walidacje CN certyfikatu
-        // wzgledem hosta URL. Wczesniej true pozwalalo kazdemu certowi z bundle
-        // CA na podszycie sie za dowolna domene - MITM przez uzyskanie ANY cert
-        // od zaufanego CA (Let's Encrypt, DigiCert...) mogl podac wlasny firmware.
-        .skip_cert_common_name_check = false,
-        .max_redirection_count       = 10,
-        .buffer_size                 = 8192,
-        .buffer_size_tx              = 4096,
-        .user_agent                  = "SIH-wMbus-Reader",
-        .keep_alive_enable           = true,
-    };
-
-    // Wylacz logi walidacji certyfikatu przy kazdym chunku (zasmiecaja logi)
+    // Wylacz logi walidacji certyfikatu przy kazdym polaczeniu (zasmiecaja logi)
     esp_log_level_set("esp-x509-crt-bundle", ESP_LOG_WARN);
-    esp_https_ota_config_t ota_cfg = {
-        .http_config           = &http_cfg,
-        .bulk_flash_erase      = false,
-        // FAZA 5a: partial_http_download=true - esp_https_ota pobiera firmware
-        // w mniejszych chunk'ach zamiast trzymac calosc w buforach TLS. Mniejsze
-        // spójne alokacje w heap podczas OTA = mniejsze ryzyko OOM przy TLS
-        // handshake i wieksze prawdopodobienstwo powodzenia auto-OTA z GitHub
-        // (wczesniej user musial recznie wgrywac bin przez /api/ota/upload).
-        .partial_http_download = true,
-        // beta338: bylo 8192. esp_https_ota dla KAZDEGO zakresu robi
-        // esp_http_client_close() + open(), czyli pelny handshake TLS i
-        // ponowna walidacje lancucha certyfikatow. Przy 8 KB i obrazie
-        // ~1,19 MB dawalo to 153 handshake'i (~0,9-1,2 s kazdy) = ok. 3 minut.
-        // 256 KB daje 5 zadan zamiast 153. RAM bez zmian - dane i tak plyna
-        // przez bufor esp_http_client (buffer_size wyzej), a ta wartosc
-        // steruje wylacznie szerokoscia naglowka Range.
-        .max_http_request_size = OTA_RANGE_CHUNK,
-    };
-
-    // beta390: serwer API ESPHome oddaje ok. 8 KB sterty na czas pobierania.
-    // Po udanej aktualizacji i tak jest restart, po nieudanej wraca.
-    esphome_api_stop();
     // Zwolnij bufory krzywych minutowych - TLS do GitHuba potrzebuje duzego,
     // spojnego kawalka sterty, a kazde sledzone pole chwilowe trzyma 11.2 KB.
     history_free_curves();
@@ -129,95 +392,16 @@ static void ota_url_task(void *arg) {
     ESP_LOGI(TAG, "OTA: rozpoczynam pobieranie firmware z URL");
     ESP_LOGI(TAG, "OTA: %s", url);
 
-    esp_https_ota_handle_t handle = NULL;
-    esp_err_t err = esp_https_ota_begin(&ota_cfg, &handle);
-    if (err != ESP_OK) {
-        snprintf(s_status.error, sizeof(s_status.error),
-                 "OTA begin failed: %s", esp_err_to_name(err));
-        s_status.state = OTA_STATE_FAILED;
-        esphome_api_start();
-        free(url);
-        vTaskDelete(NULL);
-        return;
+    dl_result_t r = ota_download(url);
+    if (r == DL_OK) {
+        s_status.state        = OTA_STATE_SUCCESS;
+        s_status.progress_pct = 100;
+        ESP_LOGI(TAG, "OTA OK — restart za 3s");
+        vTaskDelay(pdMS_TO_TICKS(3000));
+        esp_restart();
     }
-
-    esp_app_desc_t desc;
-    esp_https_ota_get_img_desc(handle, &desc);
-    ESP_LOGI(TAG, "Aktualizacja do wersji: %s", desc.version);
-
-    // Diagnostyka partycji: z ktorej bootujemy, do ktorej zapiszemy
-    const esp_partition_t *run_p = esp_ota_get_running_partition();
-    const esp_partition_t *next_p = esp_ota_get_next_update_partition(NULL);
-    ESP_LOGI(TAG, "OTA: biezaca partycja=%s @0x%lx, zapis do=%s @0x%lx",
-             run_p ? run_p->label : "?", (unsigned long)(run_p ? run_p->address : 0),
-             next_p ? next_p->label : "?", (unsigned long)(next_p ? next_p->address : 0));
-
-    // Gdy pobierana wersja == zainstalowana - nie pobieraj, poinformuj ze aktualne.
-    // esp_https_ota_begin pobiera tylko naglowek z wersja, wiec przerywamy zanim
-    // sciagniemy caly firmware.
-    const esp_app_desc_t *cur = esp_app_get_description();
-    if (cur && strcmp(cur->version, desc.version) == 0) {
-        ESP_LOGI(TAG, "OTA: zainstalowana wersja (%s) jest aktualna - pomijam pobieranie",
-                 desc.version);
-        snprintf(s_status.error, sizeof(s_status.error),
-                 "Wersja %s jest aktualna", desc.version);
-        s_status.state = OTA_STATE_UPTODATE;
-        esp_https_ota_abort(handle);
-        cc1101_start_receive(wmbus_decoder_on_frame);  // wznow radio
-        display_eink_resume();                          // wznow e-ink
-        esphome_api_start();
-        free(url);
-        vTaskDelete(NULL);
-        return;
-    }
-
-    s_status.state = OTA_STATE_WRITING;
-    int image_size = esp_https_ota_get_image_size(handle);
-    ESP_LOGI(TAG, "OTA: rozmiar obrazu = %d B (%.1f KB)", image_size, image_size/1024.0);
-    if (image_size > 0) {
-        int ranges = (image_size + OTA_RANGE_CHUNK - 1) / OTA_RANGE_CHUNK;
-        ESP_LOGI(TAG, "OTA: zakres Range = %d KB -> %d zadan HTTPS",
-                 OTA_RANGE_CHUNK / 1024, ranges);
-    }
-
-    int last_logged = -1;
-    while (1) {
-        err = esp_https_ota_perform(handle);
-        if (err != ESP_ERR_HTTPS_OTA_IN_PROGRESS) break;
-        int written = esp_https_ota_get_image_len_read(handle);
-        if (image_size > 0) {
-            s_status.progress_pct = (written * 100) / image_size;
-            int decile = s_status.progress_pct / 10;
-            if (decile != last_logged) {
-                last_logged = decile;
-                ESP_LOGI(TAG, "OTA: postep %d%% (%d/%d B)",
-                         s_status.progress_pct, written, image_size);
-            }
-        }
-    }
-    ESP_LOGI(TAG, "OTA: petla zakonczona, err=%s", esp_err_to_name(err));
-
-    if (err == ESP_OK && esp_https_ota_is_complete_data_received(handle)) {
-        esp_err_t finish = esp_https_ota_finish(handle);
-        if (finish == ESP_OK) {
-            s_status.state        = OTA_STATE_SUCCESS;
-            s_status.progress_pct = 100;
-            ESP_LOGI(TAG, "OTA OK — restart za 3s");
-            vTaskDelay(pdMS_TO_TICKS(3000));
-            esp_restart();
-        } else {
-            snprintf(s_status.error, sizeof(s_status.error),
-                     "OTA finish: %s", esp_err_to_name(finish));
-            s_status.state = OTA_STATE_FAILED;
-        }
-    } else {
-        esp_https_ota_abort(handle);
-        snprintf(s_status.error, sizeof(s_status.error),
-                 "OTA perform: %s", esp_err_to_name(err));
-        s_status.state = OTA_STATE_FAILED;
-    }
-
-    esphome_api_start();     // tu dochodza tylko nieudane - udana restartuje
+    s_status.state = (r == DL_UPTODATE) ? OTA_STATE_UPTODATE : OTA_STATE_FAILED;
+    ota_resume_services();   // tu dochodza tylko nieudane - udana restartuje
     free(url);
     vTaskDelete(NULL);
 }
@@ -228,8 +412,15 @@ static void ota_url_task(void *arg) {
 
 // ── Pobierz URL najnowszego firmware z GitHub API (na module) ──
 // Odpytuje api.github.com, parsuje JSON, znajduje browser_download_url
-// dla sih-wmbus-reader.bin. Zwraca true + wypelnia out_url.
+// dla sih-wmbus-reader.bin. Zwraca GH_OK + wypelnia out_url.
+// beta410: tylko kanal beta i tylko gdy panel nie podal tagu. Kanal oficjalny
+// idzie przez /releases/latest/download - lista 15 ostatnich wydan od dawna
+// zawierala same bety, wiec wersji oficjalnej nie dalo sie znalezc.
 #define GITHUB_API_URL "https://api.github.com/repos/smartinhome/SIHOS17/releases?per_page=15"
+#define GITHUB_DL_BASE "https://github.com/smartinhome/SIHOS17/releases/"
+#define GITHUB_BIN     "sih-wmbus-reader.bin"
+
+typedef enum { GH_OK, GH_NOT_FOUND, GH_RATE_LIMIT, GH_NO_CONN, GH_HTTP, GH_NO_MEM } gh_result_t;
 
 // Stan wyboru najlepszego assetu - parser ogląda teraz kolejne fragmenty
 // odpowiedzi, wiec wynik musi przezyc miedzy nimi.
@@ -272,7 +463,7 @@ static void github_consider_asset(const char *url, bool beta_channel,
     }
 }
 
-static bool github_get_latest_bin_url(char *out_url, size_t out_max, bool beta_channel) {
+static gh_result_t github_get_latest_bin_url(char *out_url, size_t out_max, bool beta_channel) {
     ESP_LOGI(TAG, "GitHub: wolny heap = %lu B, najwiekszy blok = %lu B",
              (unsigned long)esp_get_free_heap_size(),
              (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
@@ -286,7 +477,7 @@ static bool github_get_latest_bin_url(char *out_url, size_t out_max, bool beta_c
     char *buf = malloc(CAP);
     if (!buf) {
         ESP_LOGE(TAG, "GitHub: brak pamieci na bufor %d B", (int)CAP);
-        return false;
+        return GH_NO_MEM;
     }
 
     ESP_LOGI(TAG, "GitHub: laczenie z %s", GITHUB_API_URL);
@@ -307,7 +498,7 @@ static bool github_get_latest_bin_url(char *out_url, size_t out_max, bool beta_c
     if (!client) {
         ESP_LOGE(TAG, "GitHub: esp_http_client_init zwrocil NULL");
         free(buf);
-        return false;
+        return GH_NO_MEM;
     }
 
     // Naglowek Accept dla GitHub API
@@ -328,7 +519,7 @@ static bool github_get_latest_bin_url(char *out_url, size_t out_max, bool beta_c
         ESP_LOGE(TAG, "GitHub: open failed po 3 probach: %s", esp_err_to_name(err));
         esp_http_client_cleanup(client);
         free(buf);
-        return false;
+        return GH_NO_CONN;
     }
 
     ESP_LOGI(TAG, "GitHub: pobieranie naglowkow...");
@@ -341,7 +532,7 @@ static bool github_get_latest_bin_url(char *out_url, size_t out_max, bool beta_c
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
         free(buf);
-        return false;
+        return (status == 403 || status == 429) ? GH_RATE_LIMIT : GH_HTTP;
     }
 
     // Skanujemy odpowiedz w locie: czytamy blok, wyciagamy z niego komplety
@@ -388,7 +579,7 @@ static bool github_get_latest_bin_url(char *out_url, size_t out_max, bool beta_c
     ESP_LOGI(TAG, "GitHub: przeskanowano %d B JSON", total);
     if (total <= 0) {
         ESP_LOGE(TAG, "GitHub: pusta odpowiedz");
-        return false;
+        return GH_HTTP;
     }
 
     bool result     = st.found;
@@ -400,7 +591,7 @@ static bool github_get_latest_bin_url(char *out_url, size_t out_max, bool beta_c
 
     ESP_LOGI(TAG, "GitHub: znaleziono %d assetow, firmware %s",
              found_count, result ? "OK" : "NIE ZNALEZIONO");
-    return result;
+    return result ? GH_OK : GH_NOT_FOUND;
 }
 
 static void ota_github_task(void *arg) {
@@ -411,30 +602,57 @@ static void ota_github_task(void *arg) {
 
     // Zatrzymaj radio — task RX glodzi siec (wyzszy priorytet, ciagly SPI)
     ESP_LOGI(TAG, "OTA: zatrzymuje radio CC1101 na czas aktualizacji");
-    cc1101_stop();
-    display_eink_pause();  // zwolnij SPI i RAM przed OTA
-    esphome_api_stop();    // beta390: RAM na TLS do GitHuba
+    ota_stop_services();
     vTaskDelay(pdMS_TO_TICKS(100));
 
     char url[480] = {0};
-    bool beta_channel = (bool)(intptr_t)arg;   // kanal przekazany przez arg taska
-    if (!github_get_latest_bin_url(url, sizeof(url), beta_channel)) {
-        snprintf(s_status.error, sizeof(s_status.error),
-                 "Nie znaleziono firmware (%s) na GitHub",
-                 beta_channel ? "beta" : "oficjalny");
-        s_status.state = OTA_STATE_FAILED;
-        esphome_api_start();
-        vTaskDelete(NULL);
-        return;
+    bool beta_channel = s_gh_beta;
+    if (!beta_channel) {
+        // GitHub sam przekierowuje na plik z najnowszego wydania nie-beta
+        // (bety maja flage prerelease) - bez API i jego limitu zapytan.
+        strlcpy(url, GITHUB_DL_BASE "latest/download/" GITHUB_BIN, sizeof(url));
+    } else if (s_gh_tag[0]) {
+        // Panel zna juz najnowszy tag bety - pobieramy wprost, bez API
+        snprintf(url, sizeof(url), GITHUB_DL_BASE "download/%s/" GITHUB_BIN, s_gh_tag);
+    } else {
+        gh_result_t g = github_get_latest_bin_url(url, sizeof(url), true);
+        if (g != GH_OK) {
+            const char *m =
+                g == GH_RATE_LIMIT ? "GitHub: limit zapytan, sprobuj za godzine" :
+                g == GH_NO_CONN    ? "Brak polaczenia z GitHub (internet/DNS)" :
+                g == GH_HTTP       ? "GitHub odpowiedzial bledem, sprobuj pozniej" :
+                g == GH_NO_MEM     ? "Za malo pamieci na polaczenie z GitHub" :
+                                     "Nie znaleziono firmware (beta) na GitHub";
+            strlcpy(s_status.error, m, sizeof(s_status.error));
+            s_status.state = OTA_STATE_FAILED;
+            ota_resume_services();
+            vTaskDelete(NULL);
+            return;
+        }
     }
+    ESP_LOGI(TAG, "OTA: kanal %s -> %s", beta_channel ? "beta" : "oficjalny", url);
 
     // Mamy URL — uruchom standardowy OTA z URL
+    s_no_downgrade = true;
     char *url_copy = strdup(url);
     ota_url_task(url_copy);  // wykona sie w tym samym tasku
     vTaskDelete(NULL);
 }
 
-void ota_start_from_github(bool beta_channel) {
+// Tag z panelu trafia do URL - tylko bezpieczne znaki nazwy tagu
+static bool gh_tag_ok(const char *t) {
+    size_t n = strlen(t);
+    if (n == 0 || n >= sizeof(s_gh_tag)) return false;
+    for (size_t i = 0; i < n; i++) {
+        char ch = t[i];
+        if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+              (ch >= '0' && ch <= '9') || ch == '.' || ch == '-' || ch == '_'))
+            return false;
+    }
+    return strstr(t, "beta") != NULL;   // kanaly sie nie mieszaja
+}
+
+void ota_start_from_github(bool beta_channel, const char *tag) {
     if (s_status.state == OTA_STATE_DOWNLOADING ||
         s_status.state == OTA_STATE_WRITING) {
         ESP_LOGW(TAG, "OTA juz w toku");
@@ -442,11 +660,16 @@ void ota_start_from_github(bool beta_channel) {
     }
     s_status.state    = OTA_STATE_IDLE;
     s_status.error[0] = 0;
-    // beta380: 16 KB jak ota_url - to ta sama sciezka (esp_https_ota z bundlem
+    s_gh_beta = beta_channel;
+    s_gh_tag[0] = 0;
+    if (beta_channel && tag && tag[0]) {
+        if (gh_tag_ok(tag)) strlcpy(s_gh_tag, tag, sizeof(s_gh_tag));
+        else ESP_LOGW(TAG, "OTA: odrzucony tag '%s' - szukam przez API", tag);
+    }
+    // beta380: 16 KB jak ota_url - to ta sama sciezka (pobieranie z bundlem
     // CA), tylko poprzedzona krotkim zapytaniem do API. 24 KB to bylo 8 KB
     // zamrozone dokladnie wtedy, gdy pamieci jest najmniej.
-    xTaskCreate(ota_github_task, "ota_github", 16384,
-                (void *)(intptr_t)beta_channel, 6, NULL);
+    xTaskCreate(ota_github_task, "ota_github", 16384, NULL, 6, NULL);
 }
 
 void ota_manager_init(void) {
@@ -479,6 +702,7 @@ void ota_start_from_url(const char *url) {
     char *url_copy = strdup(url);
     s_status.state = OTA_STATE_IDLE;
     s_status.error[0] = 0;
+    s_no_downgrade = false;   // wlasny URL: uzytkownik wie, co wgrywa
     xTaskCreate(ota_url_task, "ota_url", 16384, url_copy, 5, NULL);
 }
 

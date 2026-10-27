@@ -637,13 +637,28 @@ static bool field_is_fresh(const hist_display_t *s) {
     return (now - s->last_ts) <= EINK_FIELD_MAX_AGE;
 }
 
+// beta409: ktore pole kumulacyjne jest "glowne" (duze zuzycie dzis). Najpierw
+// cale zuzycie licznika, potem inne kumulacyjne, na koncu liczydla taryf (T1/T2),
+// produkcja, poprzedni okres i energia bierna. Wczesniej wygrywalo pierwsze
+// sledzone pole kumulacyjne - po wlaczeniu T1 przed energia_kwh e-ink pokazywal
+// zuzycie samej taryfy T1.
+static int main_rank(const char *f) {
+    if (!strcmp(f, "energia_kwh") || !strcmp(f, "total_m3") || !strcmp(f, "jednostki_hca")) return 0;
+    if (strstr(f, "produkcja") || strstr(f, "poprz") || strstr(f, "bierna")) return 2;
+    for (const char *p = f; (p = strstr(p, "_t")) != NULL; p++)
+        if (p[2] >= '0' && p[2] <= '9' && p[3] == '_') return 2;
+    return 1;
+}
+
 // Narysuj jedna strone licznika (pola tego ID wybrane przez uzytkownika).
 static void draw_meter_page(const char *id, int page_no, int total_pages) {
     fb_clear_white();
 
-    // Zbierz wszystkie sledzone klucze tego licznika.
-    char keys[8][40];
-    int nkeys = history_keys_for_id(id, keys, 8);
+    // Zbierz wszystkie sledzone klucze tego licznika. beta409: do 16 pol
+    // (licznik energii z mocami, napieciami i taryfami ma ich ponad 8);
+    // statycznie, bo stos taska odswiezania jest maly, a rysuje tylko on.
+    static char keys[16][40];
+    int nkeys = history_keys_for_id(id, keys, 16);
 
     // beta372: o zawartosci ekranu decyduje WYLACZNIE sledzenie w historii.
     // Wczesniej (beta366) rzadzil wybor pol dashboardu, wiec zaznaczenie mocy
@@ -653,12 +668,13 @@ static void draw_meter_page(const char *id, int page_no, int total_pages) {
     sort_keys_by_field(keys, nkeys);
 
     // Wybierz glowne pole kumulacyjne (energia/woda/gaz) - do duzego widoku.
-    int main_idx = -1;
+    int main_idx = -1, main_r = 99;
     hist_display_t main_s; bool main_ok = false;
     for (int i = 0; i < nkeys; i++) {
         hist_display_t s;
         if (history_display_summary(keys[i], &s) && s.cumulative && s.has_value) {
-            main_idx = i; main_s = s; main_ok = true; break;
+            int r = main_rank(key_field(keys[i]));
+            if (r < main_r) { main_idx = i; main_s = s; main_ok = true; main_r = r; }
         }
     }
     // Tytul i numer strony. Wlasna nazwa uzytkownika ma pierwszenstwo przed

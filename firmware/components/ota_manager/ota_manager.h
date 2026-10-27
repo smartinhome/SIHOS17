@@ -20,7 +20,8 @@ typedef struct {
 
 void          ota_manager_init(void);
 void          ota_start_from_url(const char *url);
-void          ota_start_from_github(bool beta_channel);
+// tag: najnowszy tag bety znany panelowi (NULL/"" = znajdz przez API GitHub)
+void          ota_start_from_github(bool beta_channel, const char *tag);
 ota_status_t  ota_get_status(void);
 const char   *ota_get_running_version(void);
 const char   *ota_get_partition_label(void);

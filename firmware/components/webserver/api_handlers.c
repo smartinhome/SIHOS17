@@ -1199,16 +1199,19 @@ static esp_err_t handle_ota_upload(httpd_req_t *req) {
 
 static esp_err_t handle_ota_github(httpd_req_t *req) {
     // ?channel=beta -> kanal beta; domyslnie (lub channel=stable) -> oficjalny
+    // beta410: &tag= - najnowszy tag bety znany panelowi, modul nie pyta API
     bool beta = false;
-    char query[64];
+    char query[128];
+    char tag[48] = {0};
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
         char val[16];
         if (httpd_query_key_value(query, "channel", val, sizeof(val)) == ESP_OK)
             beta = (strcmp(val, "beta") == 0);
+        if (httpd_query_key_value(query, "tag", tag, sizeof(tag)) != ESP_OK) tag[0] = 0;
     }
     resp_ok(req);
     history_flush();   // nie trac krzywej dnia przy aktualizacji
-    ota_start_from_github(beta);
+    ota_start_from_github(beta, tag);
     return ESP_OK;
 }
 

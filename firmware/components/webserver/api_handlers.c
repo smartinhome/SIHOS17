@@ -1391,11 +1391,13 @@ static esp_err_t handle_dash_usage(httpd_req_t *req) {
     int n = snprintf(buf, cap, "{\"enabled\":true,\"items\":[");
     {
         static char ids[24][12];       // statyczne - stos zadania httpd jest wspolny
-        static char keys[8][40];
+        // beta408: do 24 pol na licznik (tyle, ile miejsc na liste sledzonych) -
+        // przy 8 licznik energii z taryfami T1/T2 tracil czesc pol.
+        static char keys[24][40];
         int nid = history_tracked_meter_ids(ids, 24);
         bool first = true;
         for (int i = 0; i < nid && n < cap - 256; i++) {
-            int nk = history_keys_for_id(ids[i], keys, 8);
+            int nk = history_keys_for_id(ids[i], keys, 24);
             for (int k = 0; k < nk && n < cap - 256; k++) {
                 if (!strchr(keys[k], ':')) continue;   // stary klucz bez nazwy pola
                 hist_display_t s;

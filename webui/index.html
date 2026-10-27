@@ -836,6 +836,31 @@ html.nav-zw .nu-t{display:none}
 .au-rows>div>span:first-child{color:var(--mut)}
 .au-warn{display:flex;gap:10px;margin-top:14px;padding:10px 12px;border-radius:12px;background:rgba(247,183,80,.10);color:#f7b750;font-size:.75rem;line-height:1.5}
 [data-theme='light'] .au-warn{color:#b45309}
+/* beta408: taryfy T1/T2 na karcie licznika energii */
+.hc{--t2:#9b87f5}
+[data-theme='light'] .hc{--t2:#7c5ce0}
+.hc-split{display:flex;gap:2px;height:6px;border-radius:3px;overflow:hidden}
+.hc-split.big{height:8px;border-radius:4px}
+.hc-split i{background:var(--c)}
+.hc-split i+i{flex:1;background:var(--t2)}
+.hc-dot{display:inline-block;width:8px;height:8px;border-radius:3px;background:var(--c);margin-right:6px;vertical-align:0}
+.hc-dot.t2{background:var(--t2)}
+.hc-lgh{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.hc-lg{display:inline-flex;align-items:center;gap:10px;font-size:11px}
+.hc-lg span{display:inline-flex;align-items:center}
+.hc-lg .hc-dot{margin-right:4px}
+.hc .hc-st .hc-bw i.s1{background:var(--c);border-radius:2px 2px 6px 6px}
+.hc .hc-st .hc-bw i.s2{background:var(--t2);border-radius:6px 6px 2px 2px}
+.hc .hc-st:not(.d0) .hc-bw i{opacity:.55}
+.hc .hc-st .hc-bw i b{position:absolute;left:0;right:0;top:50%;transform:translateY(-50%);text-align:center;font-size:10px;font-weight:600;line-height:12px;color:#2b1d05}
+.hc .hc-st .hc-bw i.s2 b{color:#1b1630}
+.hc-tm{display:flex;flex-direction:column;gap:6px}
+.hc-tmh{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:2px 8px}
+.hc-mini .hc-tmh b{display:inline;overflow:visible}
+.hc-tmv{flex-wrap:wrap}
+.hc-tmv{display:flex;justify-content:space-between;gap:8px;font-size:12px;color:var(--hc-mut);font-variant-numeric:tabular-nums}
+.hc-ftt{display:flex;flex-wrap:wrap;gap:4px 16px;margin-top:-10px;font-size:12px;color:var(--hc-mut);font-variant-numeric:tabular-nums}
+@media(max-width:560px){.hc .hc-st .hc-bw i b{display:none}.hc-tmv{font-size:11px}.hc-tmh{flex-direction:column;align-items:flex-start}}
 </style></head><body><script>try{if(/(^|; )sih_nav=zw/.test(document.cookie))document.documentElement.classList.add("nav-zw")}catch(e){}</script><script>
 /* beta404: przy wlaczonym logowaniu odpowiedz 401 z API pokazuje ekran
    logowania; potem kolejne zapytania nie ida juz do modulu, az do zalogowania. */
@@ -2900,7 +2925,9 @@ window.histIsLive = function(){
       zuz: z(function(f){ return f === 'energia_kwh'; }) || z(function(f){ return f === 'total_m3'; })
         || z(function(f){ return f === 'jednostki_hca'; })
         || z(function(f){ return f.indexOf('produkcja') < 0 && !/_t\d_/.test(f) && f.indexOf('poprz') < 0 && f.indexOf('bierna') < 0; }),
-      prod: z(function(f){ return f === 'produkcja_kwh'; })
+      prod: z(function(f){ return f === 'produkcja_kwh'; }),
+      t1: z(function(f){ return f === 'energia_t1_kwh'; }),
+      t2: z(function(f){ return f === 'energia_t2_kwh'; })
     };
   }
   /* ---- ostatnie 7 dni: 6 poprzednich dob z /api/history/range (to samo co
@@ -2990,6 +3017,63 @@ window.histIsLive = function(){
       + '<div class="hc-2">' + mini('Wczoraj', it.d1, u, it) + mini('Przedwczoraj', it.d2, u, it) + '</div></div>'
       + bars(it, u, prod ? 'Energia oddana do sieci' : 'Zużycie', prod) + '</div>';
   }
+  /* ---- beta408: taryfy T1/T2 (G12, G12W...) ----
+     Licznik sam przelacza liczydla T1 i T2 wedlug swojej taryfy, wiec modul
+     nie musi znac godzin stref. Widok wlacza sie, gdy w historii sa sledzone
+     oba pola energia_t1_kwh i energia_t2_kwh. */
+  function proc(a, b){ var s = (a || 0) + (b || 0); return s > 0 ? Math.round((a || 0) / s * 100) : 0; }
+  function split(a, b, big){
+    return '<div class="hc-split' + (big ? ' big' : '') + '" aria-hidden="true"><i style="width:' + proc(a, b) + '%"></i><i></i></div>';
+  }
+  function tydz(it){
+    var e = WK[it.k], v = e ? e.v.slice() : [null, null, null, null, null, null];
+    if (!brak(it.d1)) v[5] = it.d1;
+    if (!brak(it.d2)) v[4] = it.d2;
+    v.push(it.d0);
+    return v;
+  }
+  function suma(a, b){ return (brak(a) && brak(b)) ? null : (a || 0) + (b || 0); }
+  function tarBars(t1, t2){
+    var v1 = tydz(t1), v2 = tydz(t2), mx = 0, i;
+    for (i = 0; i < 7; i++) { var sm = suma(v1[i], v2[i]); if (sm !== null && sm > mx) mx = sm; }
+    var h = '<div><div class="hc-k hc-lgh"><span>Ostatnie 7 dni · kWh</span><span class="hc-lg"><span><i class="hc-dot"></i>T1</span><span><i class="hc-dot t2"></i>T2</span></span></div>'
+      + '<div class="hc-bars" role="img" aria-label="Zużycie w taryfach T1 i T2 w ostatnich 7 dniach">';
+    for (i = 0; i < 7; i++) {
+      var a = v1[i], b = v2[i], sm2 = suma(a, b);
+      var p1 = (!brak(a) && mx > 0) ? Math.round(a / mx * 100) : 0, p2 = (!brak(b) && mx > 0) ? Math.round(b / mx * 100) : 0;
+      if (a > 0 && p1 < 2) p1 = 2;
+      if (b > 0 && p2 < 2) p2 = 2;
+      var dz = polnoc(i - 6), cls = i === 6 ? ' d0' : (i === 5 ? ' d1' : '');
+      var opis = (i === 6 ? 'dziś' : DNI[dz.getDay()]) + ': T1 ' + (brak(a) ? '–' : pl(a, 3)) + ' kWh, T2 ' + (brak(b) ? '–' : pl(b, 3)) + ' kWh';
+      h += '<div class="hc-bc hc-st' + cls + '" title="' + opis + '"><div class="hc-bw"><span style="bottom:calc(' + (p1 + p2) + '% + 6px)">'
+        + (sm2 === null ? '–' : barLbl(sm2, 'kWh', {})) + '</span>'
+        + '<i class="s1" style="height:' + p1 + '%">' + (p1 >= 20 ? '<b>' + pl(a, 1) + '</b>' : '') + '</i>'
+        + '<i class="s2" style="bottom:calc(' + p1 + '% + 2px);height:' + p2 + '%">' + (p2 >= 20 ? '<b>' + pl(b, 1) + '</b>' : '') + '</i>'
+        + '</div><span>' + (i === 6 ? 'dziś' : DNI[dz.getDay()]) + '</span></div>';
+    }
+    return h + '</div></div>';
+  }
+  function tarTile(lbl, dot, v, p){
+    return '<div class="hc-mini"><div class="hc-k"><i class="hc-dot' + dot + '"></i>' + lbl + (brak(v) ? '' : ' · ' + p + '%') + '</div><b>'
+      + (brak(v) ? '–' : pl(v, 3) + ' <small>kWh</small>') + '</b></div>';
+  }
+  function tarDay(lbl, a, b){
+    var sm = suma(a, b);
+    return '<div class="hc-mini hc-tm"><div class="hc-tmh"><span class="hc-k">' + lbl + '</span><b>'
+      + (sm === null ? '–' : pl(sm, 3) + ' <small>kWh</small>') + '</b></div>' + split(a, b, false)
+      + '<div class="hc-tmv"><span>T1 ' + (brak(a) ? '–' : pl(a, 3)) + '</span><span>T2 ' + (brak(b) ? '–' : pl(b, 3)) + '</span></div></div>';
+  }
+  function heroTar(zuz, t1, t2){
+    var ts = (zuz && zuz.ts) || t1.ts || t2.ts;
+    var dzis = (zuz && !brak(zuz.d0)) ? zuz.d0 : suma(t1.d0, t2.d0);
+    var p1 = proc(t1.d0, t2.d0);
+    return '<div class="hc-hero"><div class="hc-hl"><div><div class="hc-k">Zużycie dziś' + (ts ? ' do ' + hhmm(ts) : '') + '</div>'
+      + '<div class="hc-big">' + big(dzis, 'kWh', { kind: 2 }) + '</div></div>'
+      + split(t1.d0, t2.d0, true)
+      + '<div class="hc-2">' + tarTile('Taryfa T1', '', t1.d0, p1) + tarTile('Taryfa T2', ' t2', t2.d0, (brak(t1.d0) && brak(t2.d0)) ? 0 : 100 - p1) + '</div></div>'
+      + tarBars(t1, t2) + '</div>'
+      + '<div class="hc-2">' + tarDay('Wczoraj', t1.d1, t2.d1) + tarDay('Przedwczoraj', t1.d2, t2.d2) + '</div>';
+  }
   function tile(m, x){
     var key = m.id + ':' + x.field, on = trackable(x) && tracked(key);
     var vcol = '';
@@ -3066,13 +3150,16 @@ window.histIsLive = function(){
     var name = (window.NAMES && window.NAMES[(m.id || '').toLowerCase()]) || m.id;
     var h = '<article class="hc t-' + cls + hotCls(m.id, cls) + '">' + top(m.id, name, m.type, chipCzas(m._tsUnix, false) + chipRssi(m.rssi));
     var us = usagePick(m.id), wk = [];
-    if (us.zuz) { h += hero(us.zuz, false, cls); wk.push(us.zuz.k); }
+    var tar = !!(us.t1 && us.t2 && (!us.zuz || /_kwh$/.test(us.zuz.k)));
+    if (tar) { h += heroTar(us.zuz, us.t1, us.t2); wk.push(us.t1.k, us.t2.k); if (!us.zuz) us.zuz = us.t1; }
+    else if (us.zuz) { h += hero(us.zuz, false, cls); wk.push(us.zuz.k); }
     if (us.prod) { h += '<div class="hc-sep"></div>' + hero(us.prod, true, cls); wk.push(us.prod.k); }
     if (wk.length) wkLoad(wk);
     var gl = glowne(fs);
     var moc = fs.filter(function(x){ return x.unit === 'kW' || x.unit === 'VAR' || x.unit === 'W'; });
     var nap = fs.filter(function(x){ return x.unit === 'V'; });
-    var reszta = fs.filter(function(x){ return x !== gl && x.unit !== 'kW' && x.unit !== 'VAR' && x.unit !== 'W' && x.unit !== 'V'; });
+    var reszta = fs.filter(function(x){ return x !== gl && x.unit !== 'kW' && x.unit !== 'VAR' && x.unit !== 'W' && x.unit !== 'V'
+                                                 && !(tar && (x.field === 'energia_t1_kwh' || x.field === 'energia_t2_kwh')); });
     var t = (moc.length ? '<div class="hc-tiles">' + moc.map(function(x){ return tile(m, x); }).join('') + '</div>' : '')
           + (nap.length ? napiecia(m, nap) : '')
           + (reszta.length ? '<div class="hc-tiles">' + reszta.map(function(x){ return tile(m, x); }).join('') + '</div>' : '');
@@ -3082,6 +3169,13 @@ window.histIsLive = function(){
       h += '<div class="hc-sep"></div><div class="hc-ft"><div>Stan licznika<b>' + fval(gl) + ' ' + esc2(uTxt(gl.unit)) + '</b></div>'
         + (tracked(gk) ? '<a href="#" class="hist-ic hc-btn" data-hkey="' + esc2(gk) + '">Historia zużycia<svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a>' : '')
         + '</div>';
+    }
+    if (tar) {
+      // stany liczydel T1 i T2 pod stanem licznika (zamiast osobnych kafelkow)
+      var lt = (m.fields || []).filter(function(x){ return x.field === 'energia_t1_kwh' || x.field === 'energia_t2_kwh'; })
+        .sort(function(a, b){ return a.field < b.field ? -1 : 1; });
+      if (lt.length) h += (gl ? '' : '<div class="hc-sep"></div>') + '<div class="hc-ftt"' + (gl ? '' : ' style="margin-top:0"') + '>'
+        + lt.map(function(x){ return '<span>' + (x.field === 'energia_t1_kwh' ? 'T1 ' : 'T2 ') + fval(x) + ' kWh</span>'; }).join('') + '</div>';
     }
     if (!fs.length && !us.zuz && !us.prod) {
       if (m.fields && m.fields.length) h += '<div class="hc-msg">Brak śledzonych wartości. Dodaj je przyciskiem + w zakładce Liczniki.</div>';

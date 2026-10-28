@@ -494,14 +494,17 @@ void display_eink_show_splash(void) {
     eink_lock();
     fb_clear_white();
 
-    // Lewa strefa: 0..qr_x, prawa: QR. Napis www.smartinhome.pl ma ~144px
-    // w foncie F14 - wysrodkowany wzgledem srodka strefy lewej (nie srodka logo).
+    // Lewa strefa: logo + napis www.smartinhome.pl (144 px w F14), prawa: QR.
+    // beta417: QR prowadzi do strony produktu - dluzszy adres to wersja 4
+    // (33x33 moduly, 99 px) zamiast 3 (29x29, 87 px). Zeby napis dalej sie
+    // miescil, QR stoi 4 px od prawej krawedzi, a napis zaczyna sie od x=0;
+    // logo stoi nad srodkiem napisu. Odstep napis-QR zostaje ~13 px jak dotad.
     int qr_scale = 3;
-    int qr_px = QR_SIZE * qr_scale;            // 87
-    int qr_x = LCD_W - qr_px - 10;             // ~153
-    int qr_y = (LCD_H - qr_px) / 2;            // ~17
-    int left_w = qr_x - 6;                     // szerokosc strefy lewej (~147)
-    int left_cx = left_w / 2;                  // srodek strefy lewej
+    int qr_px = QR_SIZE * qr_scale;            // 99
+    int qr_x = LCD_W - qr_px - 4;              // 147
+    int qr_y = (LCD_H - qr_px) / 2;            // 11
+    int left_cx = fb_text_width(&F14, "www.smartinhome.pl") / 2;   // 72
+    if (left_cx < (qr_x - 6) / 2) left_cx = (qr_x - 6) / 2;
 
     // Logo wysrodkowane poziomo w strefie lewej, u gory.
     int logo_x = left_cx - LOGO_SIZE / 2;

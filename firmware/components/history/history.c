@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include <math.h>       // round() - przyrosty jak w JSON doby
 #include <unistd.h>       // fsync, unlink, fileno
 #include <sys/stat.h>     // stat() dla recovery sierotek .tmp
 #include "freertos/FreeRTOS.h"
@@ -327,6 +328,13 @@ static uint32_t floor_day(uint32_t t) {
     tm.tm_hour = 0; tm.tm_min = 0; tm.tm_sec = 0;
     tm.tm_isdst = -1;
     return (uint32_t)mktime(&tm);
+}
+// beta419: poczatek NASTEPNEJ doby. Doba ma 23, 24 albo 25 godzin (zmiana
+// czasu), wiec d0 + 86400 w dobie przestawienia zegara na zimowy gubilo
+// godzine 23:00 (a w marcu dokladalo 00:00 kolejnego dnia). d0 + 26 h zawsze
+// wypada w nastepnej dobie, przed jej 03:00.
+static uint32_t day_end(uint32_t d0) {
+    return floor_day(d0 + 26 * 3600);
 }
 static uint32_t floor_month(uint32_t t) {
     time_t tt = t; struct tm tm; localtime_r(&tt, &tm);
@@ -996,7 +1004,7 @@ static void curve_max_seed_today(meter_hist_t *m) {
     uint32_t now = (uint32_t)time(NULL);
     if (now < ARC_TS_MIN) return;                 // czas niezsynchronizowany
     uint32_t d0 = floor_day(now);
-    int n = curve_archive_read_day(m->id, d0, d0 + 86400,
+    int n = curve_archive_read_day(m->id, d0, day_end(d0),
                                    s_curve_max_buf, HIST_CURVE, true);
     if (n <= 0) return;
     // Obie listy sa posortowane rosnaco po ts - jedno przejscie scalajace.
@@ -2055,16 +2063,20 @@ void history_on_field(const char *id_hex, const char *field, double value,
 // Najwczesniejszy znany stan licznika w danym okresie (lub tuz przed nim) - baza
 // do policzenia przyrostu pierwszego/biezacego okresu, ktory nie ma poprzednika.
 // Szuka w buforach od najdrobniejszego (godziny->dni->miesiace) pierwszego punktu
-// o ts >= period_start. Zwraca true gdy znaleziono.
+// o ts w [period_start, period_end). Zwraca true gdy znaleziono.
+// beta419: gorna granica okresu. Dotad brane byly tez kubelki PO jego koncu -
+// licznik, ktory pozniej sie cofnal (np. woda 244,241 -> 244,205 m3), dawal
+// za niska baze i zawyzony pierwszy okres (36 l zamiast 6 l).
 static bool earliest_total_in(meter_hist_t *m, uint32_t period_start,
-                              float cur_total, float *out) {
-    // 1. Najmniejszy (najwczesniejszy) stan licznika w okresie [period_start, teraz].
+                              uint32_t period_end, float cur_total, float *out) {
+    // 1. Najmniejszy (najwczesniejszy) stan licznika w okresie [period_start, period_end).
     float best = 1e30f; bool found = false;
     hist_bucket_t *series[4] = { m->hours, m->days, m->months, m->years };
     int counts[4] = { m->n_hours, m->n_days, m->n_months, m->n_years };
     for (int s = 0; s < 3; s++) {
         for (int i = 0; i < counts[s]; i++) {
-            if (series[s][i].ts >= period_start && series[s][i].total < best) {
+            if (series[s][i].ts >= period_start && series[s][i].ts < period_end &&
+                series[s][i].total < best) {
                 best = series[s][i].total; found = true;
             }
         }
@@ -2076,7 +2088,8 @@ static bool earliest_total_in(meter_hist_t *m, uint32_t period_start,
         float gmin = cur_total;
         for (int s = 0; s < 4; s++)
             for (int i = 0; i < counts[s]; i++)
-                if (series[s][i].total < gmin) gmin = series[s][i].total;
+                if (series[s][i].ts < period_end && series[s][i].total < gmin)
+                    gmin = series[s][i].total;
         best = gmin; found = true;
     }
     // beta348: bufory hours/days/months trzymaja OSTATNIA wartosc swojego okresu,
@@ -2121,40 +2134,6 @@ static bool arc_ctx_open(meter_hist_t *m, arc_ctx_t *cx) {
 static void arc_ctx_close(arc_ctx_t *cx) {
     if (cx->f) fclose(cx->f);
     cx->f = NULL;
-}
-
-// Stan licznika (total) na moment ts: najswiezszy kubelek godzinowy o ts<=t.
-// Zrodlo: RAM (godziny) i archiwum 2-letnie. Zwraca false gdy brak odniesienia.
-static bool total_at_ts(meter_hist_t *m, uint32_t t, float *out, arc_ctx_t *cx) {
-    bool found = false; uint32_t best_ts = 0; float best = 0;
-    for (int i = 0; i < m->n_hours; i++) {
-        if (m->hours[i].ts <= t && m->hours[i].ts >= best_ts) {
-            best_ts = m->hours[i].ts; best = m->hours[i].total; found = true;
-        }
-    }
-    if (found && best_ts + 7200 >= t) { *out = best; return true; }
-    if (arc_ctx_open(m, cx)) {
-        FILE *f = cx->f;
-        const arc_hdr_t *h = &cx->h;
-        int lo = 0, hi = h->count;              // pierwszy rekord z ts > t
-        hist_bucket_t rec;
-        while (lo < hi) {
-            int mid = lo + (hi - lo) / 2;
-            int phys = (h->head + mid) % h->cap;
-            if (fseek(f, arc_rec_off2(h->hdr, phys), SEEK_SET) != 0 ||
-                fread(&rec, sizeof(rec), 1, f) != 1) { lo = 0; break; }
-            if (rec.ts <= t) lo = mid + 1; else hi = mid;
-        }
-        if (lo > 0) {                            // rekord tuz przed/na t
-            int phys = (h->head + lo - 1) % h->cap;
-            if (fseek(f, arc_rec_off2(h->hdr, phys), SEEK_SET) == 0 &&
-                fread(&rec, sizeof(rec), 1, f) == 1 && rec.ts <= t) {
-                if (!found || rec.ts >= best_ts) { best = rec.total; found = true; }
-            }
-        }
-    }
-    if (found) { *out = best; return true; }
-    return false;
 }
 
 // Kolejna granica kubelka: doba (+1 dzien) lub miesiac (+1 miesiac), lokalnie.
@@ -2258,6 +2237,121 @@ static int range_instant_points(meter_hist_t *m, uint32_t from, uint32_t to, cha
     return n;
 }
 
+// beta419: pola kumulacyjne w widoku tygodnia/miesiaca/roku (i na wykresie
+// 7 dni na dashboardzie) liczone TAK SAMO jak slupki doby w day_json: suma
+// przyrostow kolejnych kubelkow godzinowych, ujemny przyrost jako zero,
+// pierwszy kubelek bez poprzednika jako zero (albo od punktu odniesienia
+// doby). Dotad okres byl roznica stanu licznika na jego granicach i dawal
+// inne liczby niz widok doby:
+//  - kubelek 00:00 trzyma stan z konca tej godziny, wiec doba liczyla sie
+//    od 01:00 do 01:00 (prad: 13,87 zamiast 13,67 kWh),
+//  - licznik, ktory sie cofnal, zerowal caly okres albo go zawyzal,
+//  - pierwsza doba danych brala baze sprzed jej konca (36 l zamiast 6 l).
+// Czytanie jak w range_instant_points: archiwum ha_ do poczatku okna RAM,
+// dalej godziny z RAM.
+typedef struct {
+    hist_bucket_t ref, cur;          // ostatni zamkniety kubelek i biezacy
+    bool has_ref, has_cur;
+} range_cum_t;
+
+static void range_cum_close(meter_hist_t *m, range_cum_t *st, const uint32_t *bts,
+                            int nb, double *sum, int *cnt) {
+    if (!st->has_cur) return;
+    hist_bucket_t *b = &st->cur;
+    int k = range_bucket_of(bts, nb, b->ts);
+    if (k >= 0) {
+        float d = 0;
+        if (st->has_ref) d = b->total - st->ref.total;
+        else if (m->day_base_ts != 0 && m->day_base_ts == floor_day(b->ts))
+            d = b->total - m->day_base_total;   // jak pierwszy slupek w day_json
+        if (d < 0) d = 0;
+        // Zaokraglenie kazdej godziny do 0,001 jak w JSON doby - suma okresu
+        // ma byc co do litra/Wh rowna sumie slupkow widoku doby.
+        sum[k] += round((double)d * 1000.0) / 1000.0; cnt[k]++;
+    }
+    st->ref = *b; st->has_ref = true;
+    st->has_cur = false;
+}
+
+// Ta sama godzina tylko raz (pozniejszy rekord wygrywa), cofniety ts pomijamy.
+static void range_cum_feed(meter_hist_t *m, range_cum_t *st, const hist_bucket_t *r,
+                           const uint32_t *bts, int nb, double *sum, int *cnt) {
+    if (st->has_cur && r->ts == st->cur.ts) { st->cur = *r; return; }
+    if (st->has_cur && r->ts < st->cur.ts) return;
+    if (!st->has_cur && st->has_ref && r->ts <= st->ref.ts) return;
+    range_cum_close(m, st, bts, nb, sum, cnt);
+    st->cur = *r; st->has_cur = true;
+}
+
+static int range_cumulative_points(meter_hist_t *m, uint32_t from, uint32_t to, char unit,
+                                   uint32_t now, char *buf, int buf_cap, int n) {
+    uint32_t *bts = malloc((RANGE_MAX_BUCKETS + 1) * sizeof(uint32_t));
+    double *sum = calloc(RANGE_MAX_BUCKETS, sizeof(double));
+    int *cnt = calloc(RANGE_MAX_BUCKETS, sizeof(int));
+    if (!bts || !sum || !cnt) { free(bts); free(sum); free(cnt); return n; }
+    int nb = 0;
+    for (uint32_t b = from; b < to && b <= now && nb < RANGE_MAX_BUCKETS; ) {
+        bts[nb++] = b;
+        b = next_bucket(b, unit);
+        bts[nb] = b;
+    }
+    if (nb > 0) {
+        range_cum_t st;
+        memset(&st, 0, sizeof(st));
+        uint32_t ram_start = (m->n_hours > 0) ? m->hours[0].ts : 0xFFFFFFFFu;
+        // 1. archiwum: od rekordu tuz przed poczatkiem zakresu (baza pierwszej
+        //    godziny, jak "prev" w day_json) do poczatku okna RAM
+        uint32_t lim = (ram_start < bts[nb]) ? ram_start : bts[nb];
+        arc_ctx_t cx = { 0 };
+        if (bts[0] < lim && arc_ctx_open(m, &cx)) {
+            FILE *f = cx.f;
+            const arc_hdr_t *h = &cx.h;
+            hist_bucket_t rec;
+            int lo = 0, hi = h->count;            // pierwszy rekord z ts >= bts[0]
+            while (lo < hi) {
+                int mid = lo + (hi - lo) / 2;
+                int phys = (h->head + mid) % h->cap;
+                if (fseek(f, arc_rec_off2(h->hdr, phys), SEEK_SET) != 0 ||
+                    fread(&rec, sizeof(rec), 1, f) != 1) { lo = h->count; break; }
+                if (rec.ts < bts[0]) lo = mid + 1; else hi = mid;
+            }
+            if (lo > 0) lo--;                     // rekord sprzed zakresu = baza
+            hist_bucket_t chunk[64];
+            bool stop = false;
+            for (int i = lo, done = 0; i < h->count && !stop && done < RANGE_ARC_MAX_RECS; ) {
+                int phys = (h->head + i) % h->cap;
+                int run = h->cap - phys;
+                if (run > h->count - i) run = h->count - i;
+                if (run > 64) run = 64;
+                if (fseek(f, arc_rec_off2(h->hdr, phys), SEEK_SET) != 0) break;
+                int r = (int)fread(chunk, sizeof(hist_bucket_t), (size_t)run, f);
+                for (int j = 0; j < r; j++) {
+                    if (chunk[j].ts >= lim) { stop = true; break; }
+                    range_cum_feed(m, &st, &chunk[j], bts, nb, sum, cnt);
+                }
+                if (r != run) break;
+                i += run; done += run;
+            }
+        }
+        arc_ctx_close(&cx);
+        // 2. godziny z RAM (ostatnie 7 dni) - swiezsze od archiwum
+        for (int i = 0; i < m->n_hours; i++) {
+            if (m->hours[i].ts >= bts[nb]) break;
+            range_cum_feed(m, &st, &m->hours[i], bts, nb, sum, cnt);
+        }
+        range_cum_close(m, &st, bts, nb, sum, cnt);
+        bool first = true;
+        for (int k = 0; k < nb && n < buf_cap - 64; k++) {
+            if (!cnt[k]) continue;
+            n += snprintf(buf + n, buf_cap - n, "%s{\"t\":%u,\"v\":%.3f}",
+                          first ? "" : ",", (unsigned)bts[k], sum[k]);
+            first = false;
+        }
+    }
+    free(bts); free(sum); free(cnt);
+    return n;
+}
+
 int history_range_json(const char *id_hex, uint32_t from, uint32_t to,
                        char unit, char *buf, int buf_cap) {
     if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
@@ -2274,36 +2368,7 @@ int history_range_json(const char *id_hex, uint32_t from, uint32_t to,
     if (!m->cumulative) {
         n = range_instant_points(m, from, to, unit, now, buf, buf_cap, n);
     } else {
-        bool first = true;
-        arc_ctx_t cx = { 0 };
-        for (uint32_t b = from; b < to && n < buf_cap - 64; ) {
-            uint32_t e = next_bucket(b, unit);
-            if (b > now) break;                       // okresy przyszle - pomijamy
-            float v = 0; bool have = false;
-            float t0, t1;
-            uint32_t end = (e > now) ? now : e;       // biezacy okres: stan "na teraz"
-            if (total_at_ts(m, end, &t1, &cx)) {
-                if (total_at_ts(m, b, &t0, &cx)) {
-                    if (t1 >= t0) { v = t1 - t0; have = true; }
-                } else {
-                    // Brak stanu na POCZATKU okresu (dane zaczely sie w jego
-                    // trakcie - np. pierwszy miesiac zbierania): licz przyrost
-                    // od najwczesniejszego znanego stanu wewnatrz okresu,
-                    // zamiast pomijac caly slupek.
-                    float base;
-                    if (earliest_total_in(m, b, t1, &base) && t1 >= base) {
-                        v = t1 - base; have = true;
-                    }
-                }
-            }
-            if (have) {
-                n += snprintf(buf + n, buf_cap - n, "%s{\"t\":%u,\"v\":%.3f}",
-                              first ? "" : ",", (unsigned)b, v);
-                first = false;
-            }
-            b = e;
-        }
-        arc_ctx_close(&cx);
+        n = range_cumulative_points(m, from, to, unit, now, buf, buf_cap, n);
     }
     n += snprintf(buf + n, buf_cap - n, "]}");
     if (s_mutex) xSemaphoreGive(s_mutex);
@@ -2346,7 +2411,11 @@ int history_get_json(const char *id_hex, const char *res, char *buf, int buf_cap
                     // najwczesniejszego znanego stanu w tym okresie (czesciowe naliczenie).
                     float base;
                     uint32_t pstart = arr[i].ts;
-                    if (earliest_total_in(m, pstart, arr[i].total, &base) && arr[i].total >= base) {
+                    uint32_t pend = (i + 1 < cnt) ? arr[i + 1].ts : 0xFFFFFFFFu;
+                    if (arr == m->hours) pend = pstart + 3600;
+                    else if (arr == m->days) pend = next_bucket(pstart, 'd');
+                    else if (arr == m->months) pend = next_bucket(pstart, 'm');
+                    if (earliest_total_in(m, pstart, pend, arr[i].total, &base) && arr[i].total >= base) {
                         v = arr[i].total - base;
                     } else {
                         continue;  // brak odniesienia - pomin
@@ -2372,7 +2441,7 @@ int history_get_json(const char *id_hex, const char *res, char *buf, int buf_cap
 int history_debug_day(const char *key, uint32_t day_ts, char *buf, int cap) {
     if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
     meter_hist_t *m = get_or_load(key, false);
-    uint32_t d0 = floor_day(day_ts), d1 = d0 + 86400;
+    uint32_t d0 = floor_day(day_ts), d1 = day_end(d0);
     int n = snprintf(buf, cap, "{\"key\":\"%s\",\"d0\":%u,\"d1\":%u", key ? key : "", (unsigned)d0, (unsigned)d1);
     if (!m) {
         n += snprintf(buf + n, cap - n, ",\"slot\":\"BRAK - licznik nie zaladowany\"}");
@@ -2469,7 +2538,7 @@ static int day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf_cap,
     int cumulative = m ? m->cumulative : 1;
 
     uint32_t d0 = floor_day(day_ts);          // poczatek wybranej doby
-    uint32_t d1 = d0 + 86400;                  // poczatek nastepnej doby
+    uint32_t d1 = day_end(d0);                 // poczatek nastepnej doby (23-25 h)
 
     // Pola CHWILOWE (moc, napiecie): krzywa 1-min TYLKO gdy dla zadanej doby
     // faktycznie mamy punkty krzywej (biezaca doba). Dla starszych dni
@@ -2798,7 +2867,7 @@ static bool day_sum_from_hours_ex(const meter_hist_t *m, uint32_t d0,
                                   float *out_sum, bool need_cover) {
     if (!m || m->n_hours == 0) return false;
     if (need_cover && m->hours[0].ts > d0) return false;
-    uint32_t d1 = d0 + 86400;
+    uint32_t d1 = day_end(d0);
     float sum = 0;
     int counted = 0;
     const hist_bucket_t *ref = NULL;
@@ -2880,7 +2949,7 @@ bool history_display_summary(const char *key, hist_display_t *out) {
                 out->today = m->last_total - m->day_base_total;
             } else {
                 float base = 0;
-                if (earliest_total_in(m, day0, m->last_total, &base) &&
+                if (earliest_total_in(m, day0, 0xFFFFFFFFu, m->last_total, &base) &&
                     m->last_total > base) {
                     out->today = m->last_total - base;
                 } else {
@@ -2942,12 +3011,16 @@ bool history_display_summary(const char *key, hist_display_t *out) {
         } else {
             out->today = 0; out->has_today = out->has_value;
         }
-        if (history_day_sum(key, now_ts - 86400, &v)) {
+        // Poludnie poprzednich dob, a nie "teraz - 24 h": tuz po polnocy w dobie
+        // 23-godzinnej (marzec) teraz - 24 h wypadalo jeszcze w przedwczoraj.
+        uint32_t d0_now = floor_day(now_ts);
+        uint32_t d1_ago = floor_day(d0_now - 1);
+        if (history_day_sum(key, d1_ago + 43200, &v)) {
             out->yesterday = v; out->has_yesterday = true;
         } else {
             out->has_yesterday = false;
         }
-        if (history_day_sum(key, now_ts - 2 * 86400, &v)) {
+        if (history_day_sum(key, floor_day(d1_ago - 1) + 43200, &v)) {
             out->day_before = v; out->has_day_before = true;
         } else {
             out->has_day_before = false;
@@ -3036,7 +3109,7 @@ int history_curve_day(const char *key, uint32_t day_ts, hist_bucket_t *out,
     if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
     meter_hist_t *m = get_or_load(key, false);
     if (m && !m->cumulative) {
-        uint32_t d0 = floor_day(day_ts), d1 = d0 + 86400;
+        uint32_t d0 = floor_day(day_ts), d1 = day_end(d0);
 
         // Krzywa dnia biezacego (gdy szukana doba to "dzisiaj" wg last_ts
         // albo ring w calosci ja pokrywa). Wczoraj i starsze - z hc_/hm_ nizej.

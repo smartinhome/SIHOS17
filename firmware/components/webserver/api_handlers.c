@@ -691,11 +691,68 @@ static void track_default_for_id(const char *id, const sih_config_t *cfg) {
         ESP_LOGW(TAG, "Brak wolnego slotu historii dla %s", key);
 }
 
+// beta423: kolejnosc kart dashboardu (i stron e-inka) to kolejnosc w cfg.pins.
+// Zbija wpisy do poczatku tablicy, zachowujac ich kolejnosc - dziura po
+// odpietym liczniku nie moze przyjac nowego przypiecia w srodku listy.
+static void pins_compact(sih_config_t *cfg) {
+    int k = 0;
+    for (int i = 0; i < MAX_PINS; i++) {
+        if (!valid_meter_id(cfg->pins[i])) continue;
+        if (k != i) memcpy(cfg->pins[k], cfg->pins[i], sizeof(cfg->pins[0]));
+        k++;
+    }
+    for (int i = k; i < MAX_PINS; i++) cfg->pins[i][0] = 0;
+}
+
 static esp_err_t handle_dashboard(httpd_req_t *req) {
     sih_config_t cfg = nvs_config_get();
     if (req->method == HTTP_POST) {
-        char body[96];
+        // 512 B: {"order":[...]} z 32 identyfikatorami to ok. 400 B.
+        char body[512];
         read_body(req, body, sizeof(body));
+        // POST {"order":["id1","id2",...]} - nowa kolejnosc przypietych.
+        // Bierzemy tylko ID, ktore SA przypiete (z zapisu, nie z zapytania);
+        // przypiete, ktorych zapytanie nie wymienia, ida na koniec w dotychczasowej
+        // kolejnosci. Dzieki temu zapytanie nie moze niczego przypiac ani zgubic.
+        char *op = strstr(body, "\"order\":[");
+        if (op) {
+            char out[MAX_PINS][12];
+            memset(out, 0, sizeof(out));
+            int k = 0;
+            pins_compact(&cfg);
+            op += 9;
+            while (*op && *op != ']' && k < MAX_PINS) {
+                char *q = strchr(op, '"');
+                if (!q) break;
+                char *e = strchr(q + 1, '"');
+                if (!e) break;
+                char id[12] = {0};
+                int n = (int)(e - q - 1);
+                if (n > 0 && n < (int)sizeof(id)) {
+                    memcpy(id, q + 1, n);
+                    for (int i = 0; i < MAX_PINS; i++) {
+                        if (!valid_meter_id(cfg.pins[i]) || strcasecmp(cfg.pins[i], id) != 0) continue;
+                        bool dup = false;
+                        for (int j = 0; j < k; j++) if (strcasecmp(out[j], cfg.pins[i]) == 0) dup = true;
+                        if (!dup) strlcpy(out[k++], cfg.pins[i], sizeof(out[0]));
+                        break;
+                    }
+                }
+                op = e + 1;
+            }
+            for (int i = 0; i < MAX_PINS && k < MAX_PINS; i++) {
+                if (!valid_meter_id(cfg.pins[i])) continue;
+                bool have = false;
+                for (int j = 0; j < k; j++) if (strcasecmp(out[j], cfg.pins[i]) == 0) have = true;
+                if (!have) strlcpy(out[k++], cfg.pins[i], sizeof(out[0]));
+            }
+            memcpy(cfg.pins, out, sizeof(out));
+            nvs_config_save(&cfg);
+            ESP_LOGI(TAG, "DASH POST: nowa kolejnosc (%d przypietych)", k);
+            display_eink_wake();   // strony e-inka w nowej kolejnosci od razu
+            resp_ok(req);
+            return ESP_OK;
+        }
         char id[12] = {0};
         char *p = strstr(body, "\"id\":\"");
         if (p) {
@@ -719,6 +776,11 @@ static esp_err_t handle_dashboard(httpd_req_t *req) {
         }
         ESP_LOGI(TAG, "DASH POST: idx=%d freeIdx=%d", idx, freeIdx);
         if (want && idx < 0 && freeIdx >= 0) {
+            // beta423: nowo przypiety licznik zawsze na KONIEC listy (kolejnosc kart)
+            pins_compact(&cfg);
+            freeIdx = -1;
+            for (int i = 0; i < MAX_PINS; i++) if (!cfg.pins[i][0]) { freeIdx = i; break; }
+            if (freeIdx < 0) { resp_err(req, "brak miejsca"); return ESP_OK; }
             strlcpy(cfg.pins[freeIdx], id, sizeof(cfg.pins[freeIdx]));
             nvs_config_save(&cfg);
             ESP_LOGI(TAG, "DASH POST: ZAPISANO '%s' na pozycji %d", id, freeIdx);

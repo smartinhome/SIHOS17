@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <time.h>
 #include <string.h>
+#include <strings.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -962,13 +963,19 @@ static void rebuild_pages(void) {
     // sledzenie pola domyslnego - wiec "przypnij" dodawalo licznik na ekran,
     // a "odepnij" go stamtad nie zabieralo. Historia zbiera dane dalej,
     // znika tylko strona.
-    int n = history_tracked_meter_ids(s_page_ids, MAX_PAGES);
+    // beta423: strony w KOLEJNOSCI KART DASHBOARDU (cfg.pins), a nie w kolejnosci
+    // sledzenia w historii - uzytkownik ustawia ja w panelu przyciskiem "Uloz karty".
+    static char tr[24][12];
+    int n = history_tracked_meter_ids(tr, 24);
+    const sih_config_t *c = nvs_config_ptr();
     s_page_count = 0;
-    for (int i = 0; i < n; i++) {
-        if (!nvs_config_is_pinned(s_page_ids[i])) continue;
-        if (s_page_count != i)
-            memcpy(s_page_ids[s_page_count], s_page_ids[i], sizeof(s_page_ids[0]));
-        s_page_count++;
+    for (int p = 0; p < MAX_PINS && s_page_count < MAX_PAGES; p++) {
+        if (!c->pins[p][0]) continue;
+        for (int i = 0; i < n; i++) {
+            if (strcasecmp(c->pins[p], tr[i]) != 0) continue;
+            strlcpy(s_page_ids[s_page_count++], tr[i], sizeof(s_page_ids[0]));
+            break;
+        }
     }
     if (s_cur_page >= s_page_count + (nvs_config_eink_clock() ? 1 : 0)) s_cur_page = 0;
 }

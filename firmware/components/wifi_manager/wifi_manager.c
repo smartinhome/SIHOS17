@@ -2,6 +2,7 @@
 #include "nvs_config.h"
 #include "mqtt_pub.h"
 #include "esphome_api.h"
+#include "history.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -40,7 +41,20 @@ static int                s_retry = 0;
 static bool               s_got_ip_once = false;
 static int                s_runtime_retry = 0;
 #define MAX_RETRY 5
-#define RUNTIME_MAX_RETRY 60    // ~5-10 minut ciaglych probowan po utracie STA
+// beta424: proby po utracie sieci ida z ODSTEPAMI (runtime_delay_ms). Dotad
+// kolejna proba szla natychmiast, a przy wylaczonym routerze kazda konczy sie
+// po 1-3 s - 60 prob mijalo w 2-3 minuty, czyli zanim router zdazyl wstac.
+// 5 x 2 s + 15 x 10 s + 20 x 30 s = ok. 13 minut (plus czas samych prob).
+#define RUNTIME_MAX_RETRY 40
+static esp_timer_handle_t s_reconn_timer = NULL;
+// beta424: tryb AP po nieudanym starcie (np. router wstaje dluzej niz modul po
+// zaniku pradu) nie moze byc stanem na zawsze. Co minute sprawdzamy, czy
+// domowa siec wrocila; gdy tak - zapis historii i restart do pracy w STA.
+#define AP_RETRY_S 60
+static esp_timer_handle_t s_ap_retry_timer = NULL;
+static volatile bool      s_ap_try = false;   // trwa proba STA z trybu AP
+static int                s_ap_tick = 0;
+static int                s_ap_try_ticks = 0;  // ile minut trwa biezaca proba
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT      BIT1
 
@@ -161,6 +175,60 @@ static void netcfg_trial_start(void) {
     s_trial_end_us = esp_timer_get_time() + (int64_t)NETCFG_TRIAL_S * 1000000LL;
 }
 
+static uint32_t runtime_delay_ms(int n) {
+    if (n <= 5)  return 2000;
+    if (n <= 20) return 10000;
+    return 30000;
+}
+
+static void reconn_fire(void *arg) {
+    (void)arg;
+    if (s_sta_autoconnect && s_state != WIFI_STATE_CONNECTED) esp_wifi_connect();
+}
+
+// Proba polaczenia z siecia domowa z trybu AP. Interfejs STA w AP ma pusta
+// konfiguracje (patrz start_ap), wiec na czas proby wpisujemy prawdziwa, a po
+// nieudanej wracamy do pustej. Przy podlaczonym kliencie AP (ktos konfiguruje
+// modul) probujemy rzadziej - proba przestraja kanal i na chwile go rozlacza.
+static void ap_retry_fire(void *arg) {
+    (void)arg;
+    if (s_state != WIFI_STATE_AP_MODE) return;
+    if (s_ap_try) {
+        // Polaczono z routerem, ale bez adresu IP (np. DHCP nie odpowiada) -
+        // po 3 minutach przerywamy, zeby proby szly dalej co minute.
+        if (++s_ap_try_ticks >= 3) {
+            s_ap_try = false;
+            esp_wifi_disconnect();
+            wifi_config_t idle = {0};
+            esp_wifi_set_config(WIFI_IF_STA, &idle);
+        }
+        return;
+    }
+    const sih_config_t *cfg = nvs_config_ptr();
+    if (!cfg->wifi_ssid[0]) return;
+    s_ap_tick++;
+    if (s_ap_clients > 0 && (s_ap_tick % 5) != 0) return;
+    wifi_config_t sta_cfg = {0};
+    strlcpy((char *)sta_cfg.sta.ssid,     cfg->wifi_ssid, sizeof(sta_cfg.sta.ssid));
+    strlcpy((char *)sta_cfg.sta.password, cfg->wifi_pass, sizeof(sta_cfg.sta.password));
+    if (esp_wifi_set_config(WIFI_IF_STA, &sta_cfg) != ESP_OK) return;
+    s_ap_try = true;
+    s_ap_try_ticks = 0;
+    if (esp_wifi_connect() != ESP_OK) {
+        s_ap_try = false;
+        wifi_config_t idle = {0};
+        esp_wifi_set_config(WIFI_IF_STA, &idle);
+        return;
+    }
+    ESP_LOGI(TAG, "Tryb AP: sprawdzam, czy siec \"%s\" wrocila", cfg->wifi_ssid);
+}
+
+static void restart_clean(const char *why) {
+    ESP_LOGW(TAG, "%s - zapis historii i restart", why);
+    history_flush();   // nie trac biezacej godziny i krzywej 5-min
+    esp_restart();
+}
+
 static void event_handler(void *arg, esp_event_base_t base,
                            int32_t id, void *data) {
     if (base == WIFI_EVENT && id == WIFI_EVENT_AP_STACONNECTED) {
@@ -180,22 +248,40 @@ static void event_handler(void *arg, esp_event_base_t base,
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         wifi_event_sta_disconnected_t *dis = (wifi_event_sta_disconnected_t *)data;
         if (dis) { ESP_LOGW(TAG, "Rozlaczono z WiFi, powod = %d", dis->reason); s_last_disc_reason = dis->reason; }
+        if (s_ap_try) {
+            // beta424: nieudana proba z trybu AP - STA znow bezczynny, AP dziala dalej
+            s_ap_try = false;
+            wifi_config_t idle = {0};
+            esp_wifi_set_config(WIFI_IF_STA, &idle);
+            ESP_LOGI(TAG, "Tryb AP: sieci domowej nadal brak - kolejna proba za %d s", AP_RETRY_S);
+            return;
+        }
         if (!s_sta_autoconnect) return;   // tryb AP - nie ponawiaj polaczen STA
         if (s_got_ip_once) {
             // Runtime-loss: bylismy juz raz podlaczeni, wiec probujemy w kolko.
             // Po RUNTIME_MAX_RETRY nieudanych probach robimy restart, zeby
             // wifi_manager_init mogl zrobic czysty start-up (i ewentualnie
             // przejsc do trybu AP po 15 s czekania na WIFI_CONNECTED_BIT).
-            esp_wifi_connect();
             s_runtime_retry++;
             s_state = WIFI_STATE_CONNECTING;
             if (s_runtime_retry <= RUNTIME_MAX_RETRY) {
-                ESP_LOGW(TAG, "Runtime retry %d/%d - probuje odzyskac STA",
-                         s_runtime_retry, RUNTIME_MAX_RETRY);
+                uint32_t ms = runtime_delay_ms(s_runtime_retry);
+                ESP_LOGW(TAG, "Runtime retry %d/%d za %u s - probuje odzyskac STA",
+                         s_runtime_retry, RUNTIME_MAX_RETRY, (unsigned)(ms / 1000));
+                if (!s_reconn_timer) {
+                    const esp_timer_create_args_t a = { .callback = reconn_fire, .name = "sta_retry" };
+                    esp_timer_create(&a, &s_reconn_timer);
+                }
+                if (s_reconn_timer) {
+                    esp_timer_stop(s_reconn_timer);
+                    esp_timer_start_once(s_reconn_timer, (uint64_t)ms * 1000ULL);
+                } else {
+                    esp_wifi_connect();
+                }
             } else {
-                ESP_LOGE(TAG, "Runtime retry przekroczony - restart modulu "
-                              "(przy braku STA wifi_manager_init przejdzie do AP)");
-                esp_restart();   // deferred, bezpieczne z event_handler
+                // Restart = czysty start STA; przy dalszym braku sieci modul
+                // przejdzie do AP, ale z AP sam wraca, gdy siec sie pojawi.
+                restart_clean("Brak sieci od ok. 13 minut");
             }
         } else if (s_retry < MAX_RETRY) {
             // Boot-time retry: krotszy limit, po nim fallback do AP przez WIFI_FAIL_BIT.
@@ -208,6 +294,14 @@ static void event_handler(void *arg, esp_event_base_t base,
             ESP_LOGE(TAG, "Nie można połączyć — przełączam na AP");
         }
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+        if (s_state == WIFI_STATE_AP_MODE) {
+            // beta424: siec domowa wrocila w czasie pracy w AP. Restart daje czysty
+            // start STA (nazwa hosta, staly adres IP, MQTT, ESPHome) bez AP obok.
+            s_ap_try = false;
+            restart_clean("Siec domowa wrocila - powrot z trybu AP");
+            return;
+        }
+        if (s_reconn_timer) esp_timer_stop(s_reconn_timer);   // nie rozlaczaj odzyskanej sieci
         ip_event_got_ip_t *ev = (ip_event_got_ip_t *)data;
         snprintf(s_ip, sizeof(s_ip), IPSTR, IP2STR(&ev->ip_info.ip));
         s_retry = 0;
@@ -266,6 +360,18 @@ static void start_ap(const sih_config_t *cfg) {
     // Logi w trybie AP byla bezuzyteczna. Bledy sterownika nadal widac.
     esp_log_level_set("wifi", ESP_LOG_ERROR);
     ESP_LOGI(TAG, "Tryb AP: %s", cfg->ap_ssid);
+    // beta424: z zapisana siecia domowa AP jest tylko stanem przejsciowym
+    if (cfg->wifi_ssid[0]) {
+        if (!s_ap_retry_timer) {
+            const esp_timer_create_args_t a = { .callback = ap_retry_fire, .name = "ap_retry" };
+            esp_timer_create(&a, &s_ap_retry_timer);
+        }
+        if (s_ap_retry_timer) {
+            esp_timer_stop(s_ap_retry_timer);
+            esp_timer_start_periodic(s_ap_retry_timer, (uint64_t)AP_RETRY_S * 1000000ULL);
+            ESP_LOGI(TAG, "Tryb AP: co %d s sprawdzam siec \"%s\"", AP_RETRY_S, cfg->wifi_ssid);
+        }
+    }
 }
 
 void wifi_manager_init(void) {

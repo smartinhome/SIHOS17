@@ -900,13 +900,17 @@ html.nav-zw .nu-t{display:none}
 .hc .hc-st:not(.d0) .hc-bw i{opacity:.55}
 .hc .hc-st .hc-bw i b{position:absolute;left:0;right:0;top:50%;transform:translateY(-50%);text-align:center;font-size:10px;font-weight:600;line-height:12px;color:#2b1d05}
 .hc .hc-st .hc-bw i.s2 b{color:#1b1630}
+/* beta427: udzial T2 w procentach pod dniem tygodnia (wariant B) */
+.hc .hc-bars.hc-tar{height:152px}
+.hc .hc-bc span.hc-pr{font-size:11px;font-weight:700;color:var(--t2);line-height:13px}
+.hc .hc-bc span.hc-pr.nd{color:var(--hc-mut);font-weight:500}
 .hc-tm{display:flex;flex-direction:column;gap:6px}
 .hc-tmh{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:2px 8px}
 .hc-mini .hc-tmh b{display:inline;overflow:visible}
 .hc-tmv{flex-wrap:wrap}
 .hc-tmv{display:flex;justify-content:space-between;gap:8px;font-size:12px;color:var(--hc-mut);font-variant-numeric:tabular-nums}
 .hc-ftt{display:flex;flex-wrap:wrap;gap:4px 16px;margin-top:-10px;font-size:12px;color:var(--hc-mut);font-variant-numeric:tabular-nums}
-@media(max-width:560px){.hc .hc-st .hc-bw i b{display:none}.hc-tmv{font-size:11px}.hc-tmh{flex-direction:column;align-items:flex-start}}
+@media(max-width:560px){.hc .hc-bars.hc-tar{height:128px}.hc .hc-bc span.hc-pr{font-size:10px}.hc .hc-st .hc-bw i b{display:none}.hc-tmv{font-size:11px}.hc-tmh{flex-direction:column;align-items:flex-start}}
 
 /* beta411: nowa wersja oficjalna */
 .nav-ic{position:relative}
@@ -3522,16 +3526,18 @@ window.histIsLive = function(){
       var sm = ok[i] ? suma(v1[i], v2[i]) : vz[i];
       if (!brak(sm) && sm > mx) mx = sm;
     }
-    var h = '<div><div class="hc-k hc-lgh"><span>Ostatnie 7 dni · kWh</span><span class="hc-lg"><span><i class="hc-dot"></i>T1</span><span><i class="hc-dot t2"></i>T2</span></span></div>'
-      + '<div class="hc-bars" role="img" aria-label="Zużycie w taryfach T1 i T2 w ostatnich 7 dniach">';
-    if (ok.indexOf(true) < 0) h = h.replace(/<span class="hc-lg">.*?T2<\/span><\/span>/, '');
+    var jest = ok.indexOf(true) >= 0;
+    var h = '<div><div class="hc-k hc-lgh"><span>Ostatnie 7 dni · kWh' + (jest ? ' · % w T2' : '') + '</span><span class="hc-lg"><span><i class="hc-dot"></i>T1</span><span><i class="hc-dot t2"></i>T2</span></span></div>'
+      + '<div class="hc-bars' + (jest ? ' hc-tar' : '') + '" role="img" aria-label="Zużycie w taryfach T1 i T2 w ostatnich 7 dniach">';
+    if (!jest) h = h.replace(/<span class="hc-lg">.*?T2<\/span><\/span>/, '');
     for (i = 0; i < 7; i++) {
       if (!ok[i]) {
         // brak pelnych danych taryf w tej dobie - slupek calego zuzycia, jak dotad
         var x = vz[i], pc = (!brak(x) && mx > 0) ? Math.max(x > 0 ? 3 : 0, Math.round(x / mx * 100)) : 0;
         var dz0 = polnoc(i - 6), cl0 = i === 6 ? ' d0' : (i === 5 ? ' d1' : '');
         h += '<div class="hc-bc' + cl0 + '"><div class="hc-bw"><span style="bottom:calc(' + pc + '% + 4px)">' + barLbl(x, 'kWh', {})
-          + '</span><i style="height:' + pc + '%"></i></div><span>' + (i === 6 ? 'dziś' : DNI[dz0.getDay()]) + '</span></div>';
+          + '</span><i style="height:' + pc + '%"></i></div><span>' + (i === 6 ? 'dziś' : DNI[dz0.getDay()]) + '</span>'
+          + (jest ? '<span class="hc-pr nd">–</span>' : '') + '</div>';
         continue;
       }
       var a = v1[i], b = v2[i], sm2 = suma(a, b);
@@ -3539,14 +3545,16 @@ window.histIsLive = function(){
       if (a > 0 && p1 < 2) p1 = 2;
       if (b > 0 && p2 < 2) p2 = 2;
       var dz = polnoc(i - 6), cls = i === 6 ? ' d0' : (i === 5 ? ' d1' : '');
-      /* beta421: przy jednej taryfie podpis w srodku powtarzal sume nad slupkiem */
-      var obie = a > 0 && b > 0;
-      var opis = (i === 6 ? 'dziś' : DNI[dz.getDay()]) + ': T1 ' + (brak(a) ? '–' : pl(a, 3)) + ' kWh, T2 ' + (brak(b) ? '–' : pl(b, 3)) + ' kWh';
+      /* beta427: zamiast kWh w slupku - udzial T2 w zuzyciu doby pod dniem tygodnia */
+      var q1 = sm2 > 0 ? proc(a, b) : null, q2 = q1 === null ? null : 100 - q1;
+      var opis = (i === 6 ? 'dziś' : DNI[dz.getDay()]) + ': T1 ' + (brak(a) ? '–' : pl(a, 3)) + ' kWh' + (q1 === null ? '' : ' (' + q1 + '%)')
+        + ', T2 ' + (brak(b) ? '–' : pl(b, 3)) + ' kWh' + (q2 === null ? '' : ' (' + q2 + '%)');
       h += '<div class="hc-bc hc-st' + cls + '" title="' + opis + '"><div class="hc-bw"><span style="bottom:calc(' + (p1 + p2) + '% + 6px)">'
         + (sm2 === null ? '–' : barLbl(sm2, 'kWh', {})) + '</span>'
-        + '<i class="s1" style="height:' + p1 + '%">' + (obie && p1 >= 20 ? '<b>' + pl(a, 1) + '</b>' : '') + '</i>'
-        + '<i class="s2" style="bottom:calc(' + p1 + '% + 2px);height:' + p2 + '%">' + (obie && p2 >= 20 ? '<b>' + pl(b, 1) + '</b>' : '') + '</i>'
-        + '</div><span>' + (i === 6 ? 'dziś' : DNI[dz.getDay()]) + '</span></div>';
+        + '<i class="s1" style="height:' + p1 + '%"></i>'
+        + '<i class="s2" style="bottom:calc(' + p1 + '% + 2px);height:' + p2 + '%"></i>'
+        + '</div><span>' + (i === 6 ? 'dziś' : DNI[dz.getDay()]) + '</span>'
+        + (q2 === null ? '<span class="hc-pr nd">–</span>' : '<span class="hc-pr">' + q2 + '%</span>') + '</div>';
     }
     return h + '</div></div>';
   }

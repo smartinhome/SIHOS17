@@ -273,6 +273,24 @@ static esp_err_t handle_history_tracked(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// GET  /api/history/opts -> {"stan":bool}
+// POST /api/history/opts body {"stan":true|false}
+// beta429: opcje widoku Historii zapisane w module (dzialaja w kazdej przegladarce).
+static esp_err_t handle_history_opts(httpd_req_t *req) {
+    if (req->method == HTTP_POST) {
+        char body[64];
+        read_body(req, body, sizeof(body));
+        if (!strstr(body, "\"stan\":")) { resp_err(req, "nieznane polecenie"); return ESP_OK; }
+        nvs_config_set_hist_stan(strstr(body, "\"stan\":true") != NULL);
+        resp_ok(req);
+        return ESP_OK;
+    }
+    char buf[32];
+    snprintf(buf, sizeof(buf), "{\"stan\":%s}", nvs_config_hist_stan() ? "true" : "false");
+    resp_json(req, buf);
+    return ESP_OK;
+}
+
 static esp_err_t handle_history_track(httpd_req_t *req) {
     char body[128];
     read_body(req, body, sizeof(body));
@@ -1811,6 +1829,8 @@ void api_register_handlers(httpd_handle_t server) {
         { .uri="/api/history/debug", .method=HTTP_GET, .handler=handle_history_debug, .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/history/track",.method=HTTP_POST, .handler=handle_history_track,.user_ctx=NULL, .is_websocket=false },
         { .uri="/api/history/tracked",.method=HTTP_GET, .handler=handle_history_tracked,.user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/history/opts", .method=HTTP_GET,  .handler=handle_history_opts, .user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/history/opts", .method=HTTP_POST, .handler=handle_history_opts, .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/meters",      .method=HTTP_GET,  .handler=handle_meters,      .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/meters/clear",.method=HTTP_POST, .handler=handle_meters_clear,.user_ctx=NULL, .is_websocket=false },
         { .uri="/api/frames",      .method=HTTP_GET,  .handler=handle_frames,      .user_ctx=NULL, .is_websocket=false },

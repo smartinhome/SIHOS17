@@ -1530,6 +1530,21 @@ html.nav-zw .nav-dot{top:-4px;right:-4px;width:12px;height:12px;box-shadow:0 0 0
         <div id="eink-msg" class="msg"></div>
       </div>
 
+      <div class="card">
+        <div class="card-h">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V11M10 20V5M16 20v-6M21 20H3"/></svg>
+          <div class="ch-t">Historia<small>dodatkowe informacje w widoku doby</small></div>
+        </div>
+        <div class="eink-row">
+          <div>
+            <b>Stan licznika o 0:00 i 24:00</b>
+            <small>Pod wykresem doby stan liczydła na początku i końcu dnia, z podziałem na T1 i T2. Przydaje się do porównania z odczytem rozliczeniowym operatora.</small>
+          </div>
+          <label class="check-mini"><input type="checkbox" id="hist-stan" onchange="saveHistStan()"></label>
+        </div>
+        <div id="histopt-msg" class="msg"></div>
+      </div>
+
       <div class="card" data-ic="z">
       <div class="card-h">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
@@ -4178,6 +4193,7 @@ window.toggleNavZw = function(){
 })();
 </script><script>
 /* beta428: stan licznika na poczatku (0:00) i koncu (24:00) wybranej doby -
+   beta429: pokazywany tylko po wlaczeniu opcji w System -> Urzadzenie.
    np. do porownania z odczytem rozliczeniowym operatora. Wartosci podaje
    /api/history/day (s0/s1 z kubelkow godzinowych, ktore i tak sa zapisane).
    Dla pola energii pobranej dokladamy stany T1 i T2, jesli sa sledzone. */
@@ -4199,9 +4215,41 @@ window.toggleNavZw = function(){
     function v(x){ return x && typeof x[ka] === 'number' ? plNum(x[ka], 3) : '–'; }
     return '<div class="tv"><span><i></i>T1 ' + v(a) + '</span><span><i class="t2"></i>T2 ' + v(b) + '</span></div>';
   }
+  /* beta429: opcja wlaczana w System -> Urzadzenie, domyslnie wylaczona */
+  window.HIST_STAN = false;
+  window.loadHistOpts = function(){
+    return fetch('/api/history/opts').then(function(r){ return r.json(); }).then(function(o){
+      var on = !!(o && o.stan), zm = on !== window.HIST_STAN;
+      window.HIST_STAN = on;
+      var cb = document.getElementById('hist-stan'); if (cb && document.activeElement !== cb) cb.checked = on;
+      var ph = document.getElementById('page-history');
+      if (zm && ph && ph.classList.contains('active') && histState.id) { window._histLast = null; loadHistory(true); }
+    }).catch(function(){});
+  };
+  window.saveHistStan = async function(){
+    var cb = document.getElementById('hist-stan'), msg = document.getElementById('histopt-msg');
+    if (!cb) return;
+    var on = cb.checked;
+    if (msg) { msg.className = 'msg'; msg.textContent = 'Zapisywanie...'; }
+    try {
+      var r = await fetch('/api/history/opts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ stan: on }) });
+      if (!r.ok) throw 0;
+      window.HIST_STAN = on; window._histLast = null;
+      if (msg) { msg.className = 'msg ok'; msg.textContent = on ? 'Włączone – stan licznika pojawi się w widoku doby w Historii.' : 'Wyłączone.'; if (window._msgFade) _msgFade(msg); }
+    } catch (e) {
+      cb.checked = !on;
+      if (msg) { msg.className = 'msg err'; msg.textContent = 'Nie udało się zapisać ustawienia.'; }
+    }
+  };
+  if (typeof window.showPage === 'function') {
+    var _sp3 = window.showPage;
+    window.showPage = function(n){ var r = _sp3.apply(this, arguments); if (n === 'system' || n === 'history') window.loadHistOpts(); return r; };
+  }
+  window.loadHistOpts();
   async function stan(d){
     var el = document.getElementById('hist-chart');
     if (!el || histState.res !== 'day1' || !d || d.cumulative === 0 || d.curve) return;
+    if (!window.HIST_STAN) return;
     if (typeof d.s0 !== 'number' && typeof d.s1 !== 'number') return;
     var my = ++SEQ;
     var a = histState.anchor ? new Date(histState.anchor * 1000) : new Date();

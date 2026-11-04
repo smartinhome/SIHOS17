@@ -115,6 +115,11 @@ int  nvs_config_hot_water_json(char *buf, int cap);
 bool nvs_config_eink_clock(void);
 void nvs_config_set_eink_clock(bool on);
 
+// --- beta429: stan licznika o 0:00 i 24:00 w widoku doby Historii ---
+// Osobny klucz NVS (u8), domyslnie wylaczone.
+bool nvs_config_hist_stan(void);
+void nvs_config_set_hist_stan(bool on);
+
 // --- beta411: sprawdzanie nowej wersji oficjalnej (domyslnie wlaczone) ---
 bool nvs_config_upd_check(void);
 void nvs_config_set_upd_check(bool on);

@@ -17,6 +17,7 @@ static void dash_fields_load(void);
 static bool g_eink_clock = false;
 static void eink_clock_load(void);
 static bool g_upd_check = true;        // beta411
+static bool g_hist_stan = false;       // beta429: stan licznika o 0:00/24:00 w Historii
 static char g_hot_water[MAX_HOT_WATER][12];   // beta407: ID wodomierzy cieplej wody
 static void hot_water_load(void);
 
@@ -145,6 +146,7 @@ void nvs_config_reset(void) {
     memset(g_hot_water, 0, sizeof(g_hot_water));   // beta407
     g_eink_clock = false;
     g_upd_check = true;
+    g_hist_stan = false;
     ESP_LOGW(TAG, "Konfiguracja zresetowana do domyślnej");
 }
 
@@ -353,6 +355,7 @@ int nvs_config_dash_fields_json(char *buf, int cap) {
 // ---------------------------------------------------------------------------
 #define EINK_CLOCK_KEY "einkclk"
 #define UPD_CHECK_KEY  "updchk"
+#define HIST_STAN_KEY  "histstan"
 
 static void eink_clock_load(void) {
     g_eink_clock = false;
@@ -363,7 +366,26 @@ static void eink_clock_load(void) {
     if (nvs_get_u8(h, EINK_CLOCK_KEY, &v) == ESP_OK) g_eink_clock = (v != 0);
     // beta411: brak klucza = wlaczone (tak samo po aktualizacji ze starszej wersji)
     if (nvs_get_u8(h, UPD_CHECK_KEY, &v) == ESP_OK) g_upd_check = (v != 0);
+    // beta429: brak klucza = wylaczone
+    g_hist_stan = false;
+    if (nvs_get_u8(h, HIST_STAN_KEY, &v) == ESP_OK) g_hist_stan = (v != 0);
     nvs_close(h);
+}
+
+bool nvs_config_hist_stan(void) {
+    return g_hist_stan;
+}
+
+void nvs_config_set_hist_stan(bool on) {
+    g_hist_stan = on;
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) {
+        ESP_LOGW(TAG, "Nie moge zapisac opcji stanu licznika");
+        return;
+    }
+    if (nvs_set_u8(h, HIST_STAN_KEY, on ? 1 : 0) == ESP_OK) nvs_commit(h);
+    nvs_close(h);
+    ESP_LOGI(TAG, "Stan licznika o 0:00/24:00 w Historii: %s", on ? "wlaczony" : "wylaczony");
 }
 
 bool nvs_config_eink_clock(void) {

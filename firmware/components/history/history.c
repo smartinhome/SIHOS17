@@ -2810,7 +2810,24 @@ static int day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf_cap,
             first = false;
         }
     }
-    n += snprintf(buf + n, buf_cap - n, "]}");
+    n += snprintf(buf + n, buf_cap - n, "]");
+    // beta428: stan licznika na poczatku i koncu doby (np. odczyt rozliczeniowy
+    // operatora o 24:00). Nic nowego nie zapisujemy - kubelek godzinowy trzyma
+    // stan licznika z konca swojej godziny. sNt to poczatek godziny kubelka
+    // (odczyt lezy w [sNt, sNt+3600)), dla biezacej doby s1t to czas ostatniej
+    // ramki. Klucze celowo bez "v": history_day_sum sumuje kazde "v".
+    if (cumulative && n < buf_cap - 100) {
+        if (has_prev)
+            n += snprintf(buf + n, buf_cap - n, ",\"s0\":%.3f,\"s0t\":%u",
+                          prev.total, (unsigned)prev.ts);
+        if (m && m->last_ts >= d0 && m->last_ts < d1)
+            n += snprintf(buf + n, buf_cap - n, ",\"s1\":%.3f,\"s1t\":%u,\"s1now\":1",
+                          m->last_total, (unsigned)m->last_ts);
+        else if (nb > 0)
+            n += snprintf(buf + n, buf_cap - n, ",\"s1\":%.3f,\"s1t\":%u",
+                          s_day_buf[nb - 1].total, (unsigned)s_day_buf[nb - 1].ts);
+    }
+    n += snprintf(buf + n, buf_cap - n, "}");
     if (s_mutex) xSemaphoreGive(s_mutex);
     return n;
 }

@@ -1094,6 +1094,20 @@ html.nav-zw .nav-dot{top:-4px;right:-4px;width:12px;height:12px;box-shadow:0 0 0
 #page-history .hv-f.on{background:#0485f7;color:#fff;font-weight:600}
 #page-history .hv-sep{height:1px;background:var(--hc-tile)}
 #page-history .hv-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+/* beta428: stan licznika na poczatku i koncu doby */
+#page-history .hv-stan{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px;margin:0 0 12px}
+#page-history .hv-sv{background:var(--hc-tile);border-radius:14px;padding:10px 14px;display:flex;flex-direction:column;gap:3px;min-width:0}
+#page-history .hv-sv.end{box-shadow:inset 0 0 0 1px var(--hc-track)}
+#page-history .hv-sv .k{font-size:12px;color:var(--hc-mut)}
+#page-history .hv-sv .k b{color:var(--hc-txt);font-weight:600}
+#page-history .hv-sv .v{font-size:20px;font-weight:600;color:var(--hc-txt);font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#page-history .hv-sv .v small{font-size:12px;color:var(--hc-mut);font-weight:500}
+#page-history .hv-sv .tv{display:flex;flex-wrap:wrap;justify-content:space-between;gap:2px 8px;font-size:12px;color:var(--hc-mut);font-variant-numeric:tabular-nums}
+#page-history .hv-sv .tv i{display:inline-block;width:6px;height:6px;border-radius:50%;background:#f5a524;margin-right:5px;vertical-align:1px}
+#page-history .hv-sv .tv i.t2{background:#9b87f5}
+#page-history .hv-sv .gap{font-size:11px;color:#f5a524}
+[data-theme='light'] #page-history .hv-sv .gap{color:#b45309}
+@media(max-width:560px){#page-history .hv-sv{padding:9px 11px}#page-history .hv-sv .v{font-size:16px}}
 #page-history .hv-tt{margin-right:8px;min-width:0;display:flex;flex-direction:column}
 #page-history .hv-tt b{font-size:16px;font-weight:600;color:var(--hc-txt);line-height:1.3}
 #page-history .hv-tt small{font-size:12px;color:var(--hc-mut)}
@@ -4161,6 +4175,67 @@ window.toggleNavZw = function(){
     };
   }
   window.dashArrUpd();
+})();
+</script><script>
+/* beta428: stan licznika na poczatku (0:00) i koncu (24:00) wybranej doby -
+   np. do porownania z odczytem rozliczeniowym operatora. Wartosci podaje
+   /api/history/day (s0/s1 z kubelkow godzinowych, ktore i tak sa zapisane).
+   Dla pola energii pobranej dokladamy stany T1 i T2, jesli sa sledzone. */
+(function(){
+  if (typeof renderChart !== 'function') return;
+  var _rc = renderChart, TC = {}, SEQ = 0;
+  function ymdOf(ts){ var d = new Date(ts * 1000); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
+  function hm(ts){ var d = new Date(ts * 1000); return d.getHours() + ':' + String(d.getMinutes()).padStart(2, '0'); }
+  function godz(ts){ var h = new Date(ts * 1000).getHours(); return h + ':00–' + ((h + 1) % 24) + ':00'; }
+  function dzien(ts){ var d = new Date(ts * 1000); return d.getDate() + '.' + String(d.getMonth() + 1).padStart(2, '0'); }
+  function tracked(k){ return (window._histList2 || []).some(function(m){ return (m.id || '').toLowerCase() === k.toLowerCase(); }); }
+  async function taryfa(k, date, dzis){
+    var ck = k + '|' + date, c = TC[ck];
+    if (c && (!dzis || Date.now() - c.at < 60000)) return c.d;
+    try { var d = await (await fetch('/api/history/day?id=' + k + '&date=' + date)).json(); TC[ck] = { at: Date.now(), d: d }; return d; } catch (e) { return c ? c.d : null; }
+  }
+  function tv(a, b, ka){
+    if (!a && !b) return '';
+    function v(x){ return x && typeof x[ka] === 'number' ? plNum(x[ka], 3) : '–'; }
+    return '<div class="tv"><span><i></i>T1 ' + v(a) + '</span><span><i class="t2"></i>T2 ' + v(b) + '</span></div>';
+  }
+  async function stan(d){
+    var el = document.getElementById('hist-chart');
+    if (!el || histState.res !== 'day1' || !d || d.cumulative === 0 || d.curve) return;
+    if (typeof d.s0 !== 'number' && typeof d.s1 !== 'number') return;
+    var my = ++SEQ;
+    var a = histState.anchor ? new Date(histState.anchor * 1000) : new Date();
+    var d0 = new Date(a.getFullYear(), a.getMonth(), a.getDate()), d1 = new Date(a.getFullYear(), a.getMonth(), a.getDate() + 1);
+    var ds = Math.floor(d0.getTime() / 1000), de = Math.floor(d1.getTime() / 1000);
+    var date = ymdOf(ds + 43200), dzis = Date.now() / 1000 < de;
+    var u = hvU(fieldUnit(d.id));
+    var t1 = null, t2 = null, dev = (d.id || '').split(':')[0], f = (d.id || '').split(':')[1] || '';
+    if (f === 'energia_kwh' && tracked(dev + ':energia_t1_kwh') && tracked(dev + ':energia_t2_kwh')) {
+      var r = await Promise.all([taryfa(dev + ':energia_t1_kwh', date, dzis), taryfa(dev + ':energia_t2_kwh', date, dzis)]);
+      t1 = r[0]; t2 = r[1];
+      if (my !== SEQ || histState.id !== d.id) return;   // w miedzyczasie nowy wykres
+    }
+    var h = '<div class="hv-stan" role="group" aria-label="Stan licznika">';
+    if (typeof d.s0 === 'number') {
+      var luka0 = d.s0t < ds - 3600;
+      h += '<div class="hv-sv"><span class="k">Stan licznika · początek doby, <b>0:00</b></span><span class="v">' + plNum(d.s0, 3) + ' <small>' + escHtml(u) + '</small></span>'
+        + tv(t1, t2, 's0')
+        + (luka0 ? '<span class="gap">ostatni zapis przed północą: ' + dzien(d.s0t) + ', ' + godz(d.s0t) + '</span>' : '') + '</div>';
+    } else {
+      h += '<div class="hv-sv"><span class="k">Stan licznika · początek doby, <b>0:00</b></span><span class="v">–</span><span class="gap">brak zapisu sprzed tej doby</span></div>';
+    }
+    if (typeof d.s1 === 'number') {
+      var teraz = !!d.s1now, luka1 = !teraz && d.s1t < de - 3600;
+      h += '<div class="hv-sv end"><span class="k">Stan licznika · ' + (teraz ? 'teraz, <b>' + hm(d.s1t) + '</b>' : 'koniec doby, <b>24:00</b>') + '</span><span class="v">' + plNum(d.s1, 3) + ' <small>' + escHtml(u) + '</small></span>'
+        + tv(t1, t2, 's1')
+        + (luka1 ? '<span class="gap">ostatni zapis tej doby: ' + godz(d.s1t) + '</span>' : '') + '</div>';
+    }
+    h += '</div>';
+    var old = el.querySelector('.hv-stan'); if (old) old.remove();
+    var hd = el.querySelector('.hv-head');
+    if (hd) hd.insertAdjacentHTML('afterend', h); else el.insertAdjacentHTML('afterbegin', h);
+  }
+  renderChart = function(d){ var r = _rc.apply(this, arguments); try { stan(d); } catch (e) {} return r; };
 })();
 </script></body></html>
 

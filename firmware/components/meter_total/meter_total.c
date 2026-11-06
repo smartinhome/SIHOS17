@@ -42,12 +42,6 @@ static int strip_block_crc(const uint8_t *d, int len, uint8_t *out, int out_cap)
 }
 
 static int remove_block_crc(const uint8_t *d, int len, uint8_t *out, int out_cap) {
-    // Jesli CI juz na [10] (ramka bez CRC z telegramow testowych) - kopiuj 1:1
-    if (len > 10 && (d[10] == 0x7A || d[10] == 0x72)) {
-        if (len > out_cap) len = out_cap;
-        memcpy(out, d, len);
-        return len;
-    }
     if (len < 12) {
         // len moze byc ujemne (wywolania z (int)len ramki) - -Os wychwycil
         // memcpy z ujemnym rozmiarem, ktory rzutowal sie na 4 GB.
@@ -60,6 +54,15 @@ static int remove_block_crc(const uint8_t *d, int len, uint8_t *out, int out_cap
     int n = 0;
     // blok 1: 10 bajtow + 2 CRC
     if (crc16(d, 0, 10) != ((d[10] << 8) | d[11])) {
+        // Jesli CI juz na [10] (ramka bez CRC z telegramow testowych) - kopiuj 1:1.
+        // beta431: dopiero po sprawdzeniu CRC. W ramce z eteru [10] to starszy bajt
+        // CRC bloku 1, wiec licznik, ktorego staly naglowek daje taki bajt, byl
+        // stale czytany blednie: CI z bajtu CRC, a w danych CRC blokow.
+        if (d[10] == 0x7A || d[10] == 0x72) {
+            if (len > out_cap) len = out_cap;
+            memcpy(out, d, len);
+            return len;
+        }
         // CRC naglowka niezgodne. Sprawdz czy to format mode-A z CRC (np. Amiplus CI=0xB1):
         // dlugosc = (L+1) + 2 + nblk*2, a po usunieciu CRC na [10] pojawia sie 0x7A/0x72.
         int L = d[0];

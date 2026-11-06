@@ -156,6 +156,10 @@ static bool find_tpl(const uint8_t *b, int len, tpl_info_t *t) {
     int ci = -1;
     if (b[10] == 0x7A || b[10] == 0x72) {
         ci = 10;
+    } else if (b[10] == 0x8D && b[2] == 0x2D && b[3] == 0x2C) {
+        // beta430: Kamstrup (KAM). Za ELL jest od razu tresc AES-CTR, bez jawnego
+        // naglowka TPL - przypadkowy bajt 0x7A/0x72 dawalby pola ze smieci.
+        return false;
     } else if (b[10] == 0x8C || b[10] == 0x8D || b[10] == 0x90 || b[10] == 0x91) {
         // Za warstwa ELL/AFL moze stac wlasciwy naglowek TPL. Szukamy go tylko
         // wtedy - wczesniej skanowalismy bajty 10..19 ZAWSZE, wiec przypadkowy

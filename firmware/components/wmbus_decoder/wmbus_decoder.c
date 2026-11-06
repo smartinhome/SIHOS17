@@ -226,6 +226,7 @@ static bool decode_frame(const uint8_t *data, size_t len, meter_data_t *out,
 // jednej ramce na minute z licznika to zapas na najdluzszy zastoj (save_meter
 // dla kilkunastu pol, ~1 s), a przy sasiadach w eterze - na ich naklad.
 #define FRAME_Q_LEN 6
+#define FRAME_Q_C1_MIN_FREE 3
 static QueueHandle_t s_frame_q = NULL;
 static volatile uint32_t s_frames_dropped = 0;
 static void process_frame(const wmbus_frame_t *frame);
@@ -355,6 +356,9 @@ void wmbus_decoder_on_frame(const wmbus_frame_t *frame) {
     // kolejnosc bootu w app_main: cc1101_start_receive jest po init, ale
     // gdyby ktos to kiedys przestawil, xQueueSend(NULL) wywali system.
     if (!s_mutex || !s_frame_q) return;
+    // beta430: liczniki C1 nadaja nawet co 16 s - nie moga zapchac kolejki
+    // ramkom T1. Gdy obrobka nie nadaza, ramki C1 odpadaja jako pierwsze.
+    if (frame->mode_c && uxQueueSpacesAvailable(s_frame_q) < FRAME_Q_C1_MIN_FREE) return;
     if (xQueueSend(s_frame_q, frame, 0) != pdTRUE) {
         // Kolejka pelna = obrobka nie nadaza od 6 ramek. Nie czekamy - lepiej
         // stracic te ramke niz zablokowac radio i stracic kilka nastepnych.
@@ -369,8 +373,48 @@ void wmbus_decoder_on_frame(const wmbus_frame_t *frame) {
     }
 }
 
+// beta430: ochrona licznikow T1 przed ruchem C1. Sloty s_meters[] zajmuje ten,
+// kto odezwie sie pierwszy, a bufor ramek ma 40 pozycji - sasiedzi C1 nadajacy
+// co 16 s wypchneliby z panelu wolniejsze liczniki T1. Dlatego:
+// - obcy licznik C1 dostaje slot tylko do limitu C1_MAX_SLOTS,
+// - ramki C1 sa przerzedzane: wlasne (klucz/dashboard) co minute, obce co 5 min.
+#define C1_MAX_SLOTS     8
+#define C1_OWN_EVERY_MS  60000u
+#define C1_OTHER_EVERY_MS 300000u
+static bool c1_is_own(const char *id) {
+    if (nvs_config_is_pinned(id)) return true;
+    const sih_config_t *cfg = nvs_config_ptr();
+    for (int i = 0; i < cfg->meter_count; i++)
+        if (strcasecmp(cfg->meters[i].id_hex, id) == 0) return true;
+    return false;
+}
+static bool c1_frame_wanted(const char *id) {
+    bool own = c1_is_own(id);
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    bool in_slot = false, want = true;
+    int c1_slots = 0;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    for (int i = 0; i < s_meter_count; i++) {
+        if (s_meters[i].mode_c) c1_slots++;
+        if (strcmp(s_meters[i].id_hex, id) == 0) {
+            in_slot = true;
+            want = (uint32_t)(now_ms - s_meters[i].last_seen) >=
+                   (own ? C1_OWN_EVERY_MS : C1_OTHER_EVERY_MS);
+        }
+    }
+    xSemaphoreGive(s_mutex);
+    if (!in_slot && !own && (c1_slots >= C1_MAX_SLOTS || s_meter_count >= MAX_ACTIVE_METERS)) want = false;
+    return want;
+}
+
 // Pelna obrobka jednej ramki - na worker_task, nigdy na tasku radia.
 static void process_frame(const wmbus_frame_t *frame) {
+    if (frame->mode_c) {
+        char c1_id[12];
+        parse_meter_id(frame->data, c1_id, sizeof(c1_id));
+        if (!c1_id[0]) return;
+        if (!c1_frame_wanted(c1_id)) { seen_add(c1_id); return; }
+    }
 
     // Blysk diody RX: domyslnie przy KAZDYM telegramie; w trybie
     // "tylko dashboard" wylacznie gdy ramka pochodzi od licznika
@@ -488,6 +532,7 @@ static void process_frame(const wmbus_frame_t *frame) {
         m->last_seen = tmp.last_seen;
         m->last_seen_unix = tmp.last_seen_unix;
         m->valid     = true;
+        m->mode_c    = frame->mode_c != 0;
         // beta363: typ rozpoznany z ramki. Dotad NIE byl przepisywany z tmp,
         // wiec trwaly slot mial typ wylacznie z konfiguracji - a licznik bez
         // zapisanego klucza AES (np. Techem) szedl do panelu z pustym typem

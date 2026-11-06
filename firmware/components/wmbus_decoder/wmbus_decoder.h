@@ -21,6 +21,7 @@ typedef struct {
     uint32_t     last_seen;        // monotoniczny czas uruchomienia (ms)
     uint32_t     last_seen_unix;   // czas rzeczywisty, 0 przed synchronizacja SNTP
     bool         valid;
+    bool         mode_c;           // beta430: licznik slyszany w trybie C1
     uint8_t      field_count;
     meter_field_t fields[MAX_METER_VALUES];
 } meter_data_t;

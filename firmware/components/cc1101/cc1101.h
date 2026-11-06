@@ -19,6 +19,7 @@ typedef struct {
     size_t   len;
     int8_t   rssi;
     uint8_t  lqi;
+    uint8_t  mode_c;   // beta430: 1 = ramka odebrana w trybie C1, 0 = T1
 } wmbus_frame_t;
 
 typedef void (*wmbus_frame_cb_t)(const wmbus_frame_t *frame);

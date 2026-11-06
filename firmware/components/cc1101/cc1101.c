@@ -94,7 +94,7 @@ static wmbus_frame_cb_t    s_callback = NULL;
 static TaskHandle_t        s_rx_task = NULL;
 static volatile bool       s_rx_stop = false;
 
-// ── Konfiguracja wMbus T1/C1 (z bodek85, sprawdzona) ───────
+// ── Konfiguracja wMbus T1/C1 (z bodek85, sprawdzona; C1 odbierane od beta430) ───────
 // SYNC word 0x543D — to klucz do wykrywania ramek zamiast szumu
 static const uint8_t WMBUS_CFG[][2] = {
     {R_IOCFG2,   0x06}, // GDO2: sync word sent/received
@@ -330,6 +330,75 @@ static size_t mode_t_packet_size(uint8_t l){
     return encoded_size_3of6(mode_a_decoded_size(l));
 }
 
+// ─────────── Tryb C1 (beta430) ───────────
+// Ten sam kanal, predkosc i slowo synchronizacji co T1, ale bez kodowania 3of6.
+// Za synchronizacja stoja dwa bajty znacznika: 54 CD = format A, 54 3D = format B.
+// T1 nigdy nie zaczyna sie od 0x54 (010101 to nie jest kod 3of6), wiec znacznik
+// jednoznacznie rozdziela tryby i sciezka T1 zostaje bez zmian.
+// C1 nie ma kontroli 3of6, wiec ramke bez poprawnego CRC odrzucamy tutaj.
+static uint16_t crc_en13757(const uint8_t *d, size_t n){
+    uint16_t crc = 0;
+    for (size_t i = 0; i < n; i++) {
+        crc ^= (uint16_t)d[i] << 8;
+        for (int b = 0; b < 8; b++)
+            crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x3D65) : (uint16_t)(crc << 1);
+    }
+    return crc ^ 0xFFFF;
+}
+// CRC n bajtow z d, zapisane zaraz za nimi (starszy bajt pierwszy)
+static bool crc_ok(const uint8_t *d, size_t n){
+    return crc_en13757(d, n) == (uint16_t)((d[n] << 8) | d[n + 1]);
+}
+// Dlugosc ramki w eterze, bez znacznika. Format B: L liczy juz bajty CRC.
+static size_t mode_c_frame_size(bool fmt_b, uint8_t l){
+    return fmt_b ? (size_t)l + 1 : mode_a_decoded_size(l);
+}
+// Sprawdza CRC i oddaje ramke w formacie A (L bez CRC, bloki 10 + 16 + ... z CRC),
+// bo taki format czyta cala reszta firmware i panel. Zwraca dlugosc lub 0.
+static int mode_c_to_format_a(const uint8_t *in, size_t len, bool fmt_b,
+                              uint8_t *out, size_t cap){
+    uint8_t l = in[0];
+    if (len != mode_c_frame_size(fmt_b, l)) return 0;
+    if (!fmt_b) {
+        size_t pos = 0, left = (size_t)l + 1;
+        for (int blk = 0; left > 0; blk++) {
+            size_t n = blk == 0 ? 10 : (left > 16 ? 16 : left);
+            if (!crc_ok(in + pos, n)) return 0;
+            pos += n + 2;
+            left -= n;
+        }
+        if (len > cap) return 0;
+        memcpy(out, in, len);
+        return (int)len;
+    }
+    // Format B: pierwsze CRC obejmuje do 126 bajtow od L, drugie reszte ramki
+    static uint8_t plain[256];
+    if (l < 12) return 0;
+    size_t n1 = (size_t)l - 1 > 126 ? 126 : (size_t)l - 1, n = n1;
+    if (!crc_ok(in, n1)) return 0;
+    memcpy(plain, in, n1);
+    if (l > 127) {
+        if (l < 130) return 0;
+        size_t n2 = (size_t)l - 129;
+        if (!crc_ok(in + 128, n2)) return 0;
+        memcpy(plain + n, in + 128, n2);
+        n += n2;
+    }
+    plain[0] = (uint8_t)(n - 1);
+    size_t pos = 0, o = 0;
+    for (int blk = 0; pos < n; blk++) {
+        size_t b = blk == 0 ? 10 : (n - pos > 16 ? 16 : n - pos);
+        if (o + b + 2 > cap) return 0;
+        memcpy(out + o, plain + pos, b);
+        uint16_t c = crc_en13757(plain + pos, b);
+        out[o + b] = (uint8_t)(c >> 8);
+        out[o + b + 1] = (uint8_t)c;
+        o += b + 2;
+        pos += b;
+    }
+    return (int)o;
+}
+
 // Odczyt N bajtow z RX FIFO (burst) do bufora
 static void rx_fifo_read(uint8_t *dst, size_t n){
     if(n) read_fifo_burst(dst, n);
@@ -372,15 +441,20 @@ static void rx_task(void *arg) {
         // ---- Naglowek: odczytaj 3 bajty, zdekoduj 3of6 by poznac L-field ----
         uint8_t header[4];
         rx_fifo_read(header, 4);
-        uint8_t hdec[4];
-        int hn = decode_3of6(header, 3, hdec, sizeof(hdec));
-        if (hn < 1) {
-            // moze tryb C (0x54 preamble) — nie obslugujemy tu, restart
-            continue;
+        bool mode_c = header[0] == 0x54 && (header[1] == 0xCD || header[1] == 0x3D);
+        bool fmt_b  = mode_c && header[1] == 0x3D;
+        if (mode_c) {
+            l_field = header[2];
+            if (l_field < 10 || l_field > 250) continue;  // nieprawidlowa dlugosc
+            expected = 2 + mode_c_frame_size(fmt_b, l_field);
+        } else {
+            uint8_t hdec[4];
+            int hn = decode_3of6(header, 3, hdec, sizeof(hdec));
+            if (hn < 1) continue;   // szum - restart
+            l_field = hdec[0];
+            if (l_field < 10 || l_field > 250) continue;  // nieprawidlowa dlugosc
+            expected = mode_t_packet_size(l_field);
         }
-        l_field = hdec[0];
-        if (l_field < 10 || l_field > 250) continue;  // nieprawidlowa dlugosc
-        expected = mode_t_packet_size(l_field);
         if (expected > MAX_FRAME_SIZE) expected = MAX_FRAME_SIZE;
 
         // Naglowek (4 zakodowane bajty) trafiaja do bufora
@@ -482,8 +556,28 @@ static void rx_task(void *arg) {
         strobe(S_SFRX);
 
         if (!complete || rxlen < expected) {
-            ESP_LOGW(TAG, "T1: ramka niepelna %d/%d (L=%d rssi=%d)",
+            ESP_LOGW(TAG, "%s: ramka niepelna %d/%d (L=%d rssi=%d)", mode_c ? "C1" : "T1",
                      (int)rxlen, (int)expected, l_field, rssi);
+            continue;
+        }
+
+        // ---- Tryb C1: bez 3of6, ramka idzie dalej jako format A ----
+        if (mode_c) {
+            static wmbus_frame_t cframe;   // tylko ten task; 520 B poza stosem
+            int clen = mode_c_to_format_a(rxbuf + 2, rxlen - 2, fmt_b,
+                                          cframe.data, sizeof(cframe.data));
+            if (clen <= 0) {
+                ESP_LOGD(TAG, "C1: zle CRC (format %c, L=%d rssi=%d)",
+                         fmt_b ? 'B' : 'A', l_field, rssi);
+                continue;
+            }
+            cframe.len = (size_t)clen;
+            cframe.rssi = rssi;
+            cframe.lqi = 0;
+            cframe.mode_c = 1;
+            ESP_LOGD(TAG, "C1 OK: format %c L=%d frame=%dB rssi=%d",
+                     fmt_b ? 'B' : 'A', l_field, clen, rssi);
+            if (s_callback) s_callback(&cframe);
             continue;
         }
 

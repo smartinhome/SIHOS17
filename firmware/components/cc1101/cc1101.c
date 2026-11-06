@@ -426,14 +426,22 @@ static void rx_task(void *arg) {
         strobe(S_SRX);
 
         // ---- WAIT_FOR_SYNC: czekaj na naglowek (>=4 bajty w FIFO) ----
+        // beta433: odpytywanie co 2 ms zamiast 5 ms. FIFO (64 B) pelnilo sie po
+        // 5,04 ms, wiec ramka zlapana pod koniec okna przepelniala je, zanim
+        // kod zdazyl je oproznic. Ramki do 64 B to nie dotyczy, dluzsze ginely
+        // okolo raz na 10.
         int waited = 0;
         bool got_header = false;
-        while (waited < 400) {
+        while (waited < 1000) {
             uint8_t st = read_status(ST_RXBYTES);
             if (st == 0xFF) break;
-            if (st & 0x80) { strobe(S_SFRX); break; } // overflow
+            if (st & 0x80) {                      // overflow
+                ESP_LOGW(TAG, "Przepelnienie FIFO przed odczytem naglowka - ramka stracona");
+                strobe(S_SFRX);
+                break;
+            }
             if ((st & 0x7F) >= 4) { got_header = true; break; }
-            vTaskDelay(pdMS_TO_TICKS(5));
+            vTaskDelay(pdMS_TO_TICKS(2));
             waited++;
         }
         if (!got_header) continue;

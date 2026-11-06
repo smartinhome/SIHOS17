@@ -184,9 +184,9 @@ static void eink_set_cursor(void) {
 }
 
 static void eink_full_refresh(void) {
-    // Wylaczny dostep do magistrali SPI na czas odswiezania (wspoldzielone z CC1101).
-    spi_device_acquire_bus(s_spi, portMAX_DELAY);
-
+    // beta433: bez spi_device_acquire_bus. Magistrale dzielimy z CC1101, a blokada
+    // trwala tez przez eink_wait_busy, czyli cale odswiezanie - radio nie moglo
+    // wtedy czytac FIFO i tracilo ramki. Porcje po 256 B zajmuja szyne na 0,5 ms.
     eink_wait_busy();
     eink_set_cursor();
 
@@ -210,15 +210,11 @@ static void eink_full_refresh(void) {
     eink_cmd(0x22); eink_data(0xC7);
     eink_cmd(0x20); // ACTIVATE
     eink_wait_busy();
-
-    spi_device_release_bus(s_spi);
 }
 
 // Czesciowe odswiezanie - szybkie, bez migania. Wymaga wczesniejszego full
 // (ktory ustawil base buffer 0x26 jako referencje).
 static void eink_partial_refresh(void) {
-    spi_device_acquire_bus(s_spi, portMAX_DELAY);
-
     // Krotki reset (jak send_reset_ w ESPHome partial_update_).
     gpio_set_level(s_cfg.pin_rst, 0);
     vTaskDelay(pdMS_TO_TICKS(2));
@@ -254,8 +250,6 @@ static void eink_partial_refresh(void) {
     eink_cmd(0x22); eink_data(0x0F);
     eink_cmd(0x20);
     eink_wait_busy();
-
-    spi_device_release_bus(s_spi);
 }
 
 // Dyspozytor: pelne odswiezenie (ustawia base, czysci artefakty) przy pierwszym
@@ -1167,8 +1161,8 @@ void display_eink_start_tasks(int pin_button) {
 void display_eink_pause(void) {
     s_eink_paused = true;
     // Poczekaj az trwajace odswiezanie sie skonczy i dopiero wtedy usun taski.
-    // vTaskDelete na tasku bedacym w srodku spi_device_acquire_bus zostawialby
-    // magistrale SPI2 przejeta na zawsze (deadlock CC1101 i kolejnych operacji).
+    // vTaskDelete w trakcie transakcji SPI moglby zostawic magistrale SPI2 zajeta
+    // (deadlock CC1101 i kolejnych operacji).
     // Task zablokowany na tym mutexie mozna bezpiecznie usunac.
     eink_lock();
     if (s_refresh_task_h) { vTaskDelete(s_refresh_task_h); s_refresh_task_h = NULL; }

@@ -152,6 +152,11 @@ typedef struct {
     bool    long_hdr;    // true = CI 0x72 (dlugi naglowek TPL)
 } tpl_info_t;
 
+// Kamstrup: Multical 21 (KAM) i flowIQ 2200 (KAM, KAW) z warstwa ELL 0x8D.
+static bool kam_ell(const uint8_t *b) {
+    return b[10] == 0x8D && b[3] == 0x2C && (b[2] == 0x2D || b[2] == 0x37);
+}
+
 // Znajdz naglowek TPL w ramce bez CRC blokow. CI powinno byc na [10];
 // okno wyszukiwania zostawione dla ramek z dodatkowymi warstwami (ELL).
 static bool find_tpl(const uint8_t *b, int len, tpl_info_t *t) {
@@ -159,9 +164,10 @@ static bool find_tpl(const uint8_t *b, int len, tpl_info_t *t) {
     int ci = -1;
     if (b[10] == 0x7A || b[10] == 0x72) {
         ci = 10;
-    } else if (b[10] == 0x8D && b[2] == 0x2D && b[3] == 0x2C) {
-        // beta430: Kamstrup (KAM). Za ELL jest od razu tresc AES-CTR, bez jawnego
+    } else if (kam_ell(b)) {
+        // beta430: Kamstrup. Za ELL jest od razu tresc AES-CTR, bez jawnego
         // naglowka TPL - przypadkowy bajt 0x7A/0x72 dawalby pola ze smieci.
+        // beta432: dotyczy tez producenta KAW (flowIQ 2200).
         return false;
     } else if (b[10] == 0x8C || b[10] == 0x8D || b[10] == 0x90 || b[10] == 0x91) {
         // Za warstwa ELL/AFL moze stac wlasciwy naglowek TPL. Szukamy go tylko
@@ -505,6 +511,103 @@ static bool difvif_meter(const uint8_t *b, int len, const uint8_t key[16],
     const uint8_t *p = payload;
     if (plen >= 2 && p[0] == 0x2F && p[1] == 0x2F) { p += 2; plen -= 2; }
     return difvif_total(p, plen, out_total, out_kind);
+}
+
+// ---------- Kamstrup: tresc za ELL 0x8D (Multical 21, flowIQ 2200) ----------
+// Ramki skrocone (CI 0x79) nie maja DIF/VIF, tylko sygnature = CRC listy DIF/VIF.
+// Formaty wg wmbusmeters (kamwater) plus wariant z VIF 0x14 (0,01 m3) z flowIQ
+// 2200 w terenie. Nieznana sygnatura to tylko brak odczytu z tej ramki: pelne
+// ramki (CI 0x78) niosa DIF/VIF i dekoduja sie niezaleznie od tej tabeli.
+typedef struct { uint8_t len; uint8_t f[29]; } kam_fmt_t;
+static const kam_fmt_t KAM_FMT[] = {
+    { 11, {0x02,0xFF,0x20,0x04,0x13,0x44,0x13,0x61,0x5B,0x61,0x67} },
+    { 16, {0x02,0xFF,0x20,0x04,0x13,0x92,0x01,0x3B,0xA1,0x01,0x5B,0x81,0x01,0xE7,0xFF,0x0F} },
+    { 25, {0x04,0xFF,0x23,0x44,0x13,0x52,0x3B,0x06,0xFF,0x1B,0x42,0x6C,0x61,0x67,0x51,0x67,
+           0x02,0x3B,0x04,0x13,0x81,0x01,0xE7,0xFF,0x0F} },
+    { 25, {0x04,0xFF,0x23,0x44,0x14,0x52,0x3B,0x06,0xFF,0x1B,0x42,0x6C,0x61,0x67,0x51,0x67,
+           0x02,0x3B,0x04,0x14,0x81,0x01,0xE7,0xFF,0x0F} },
+    { 25, {0x02,0xFF,0x20,0x04,0x13,0x44,0x13,0x42,0x6C,0x52,0x3B,0x61,0x5B,0x61,0x67,0x51,
+           0x67,0x81,0x01,0xE7,0xFF,0x0F,0x06,0xFF,0x1B} },
+    { 15, {0x02,0xFF,0x20,0x04,0x13,0x44,0x13,0xA1,0x01,0x5B,0x81,0x01,0xE7,0xFF,0x0F} },
+    { 11, {0x02,0xFF,0x20,0x04,0x13,0x44,0x13,0x61,0x5B,0x51,0x67} },
+    {  7, {0x02,0xFF,0x20,0x04,0x13,0x44,0x13} },
+    {  7, {0x02,0xFF,0x20,0x04,0x13,0x52,0x3B} },
+    { 29, {0x04,0xFF,0x23,0x04,0x13,0x44,0x13,0x42,0x6C,0x02,0x3B,0x92,0x01,0x3B,0xA2,0x01,
+           0x3B,0x06,0xFF,0x1B,0xA1,0x01,0x5B,0x91,0x01,0x5B,0xA1,0x01,0x67} },
+};
+
+// Rozwija ramke skrocona do zwyklego strumienia DIF/VIF + dane.
+static int kam_expand(const uint8_t *fmt, int flen, const uint8_t *d, int dlen,
+                      uint8_t *out, int cap) {
+    int i = 0, n = 0, pos = 0;
+    while (i < flen) {
+        int dn = dif_data_len(fmt[i]);
+        if (dn < 0) return -1;
+        for (int part = 0; part < 2; part++) {     // DIF + DIFE, potem VIF + VIFE
+            bool more = true;
+            while (more) {
+                if (i >= flen || n >= cap) return -1;
+                more = (fmt[i] & 0x80) != 0;
+                out[n++] = fmt[i++];
+            }
+        }
+        if (pos + dn > dlen || n + dn > cap) return -1;
+        memcpy(out + n, d + pos, dn);
+        n += dn;
+        pos += dn;
+    }
+    return n;
+}
+
+// Zwraca strumien DIF/VIF z ramki bez CRC blokow albo -1. Uklad za ELL:
+// CC ACC SN(4), potem CRC tresci (2, LSB pierwszy), CI i dane.
+static int kam_payload(const uint8_t *b, int len, const uint8_t key[16], bool have_key,
+                       uint8_t *out, int out_cap) {
+    uint8_t p[256];
+    int n = len - 17;
+    if (n < 4 || n > (int)sizeof(p)) return -1;
+    int sec = (b[16] >> 5) & 0x07;                 // tryb z najstarszych bitow SN
+    if (sec == 0) {
+        memcpy(p, b + 17, n);
+    } else if (sec == 1 && have_key) {             // AES-CTR
+        // IV: M(2) A(6) CC SN(4) FN(2)=0 BC. Bity 0x10 i 0x02 CC nie wchodza do IV.
+        uint8_t iv[16] = {0}, ks[16];
+        memcpy(iv, b + 2, 8);
+        iv[8] = b[11] & (uint8_t)~0x12;
+        memcpy(iv + 9, b + 13, 4);
+        mbedtls_aes_context ctx;
+        mbedtls_aes_init(&ctx);
+        bool ok = mbedtls_aes_setkey_enc(&ctx, key, 128) == 0;
+        for (int pos = 0; ok && pos < n; pos += 16) {
+            iv[15] = (uint8_t)(pos / 16);
+            ok = mbedtls_aes_crypt_ecb(&ctx, MBEDTLS_AES_ENCRYPT, iv, ks) == 0;
+            for (int i = 0; ok && i < 16 && pos + i < n; i++) p[pos + i] = b[17 + pos + i] ^ ks[i];
+        }
+        mbedtls_aes_free(&ctx);
+        if (!ok) return -1;
+    } else {
+        return -1;                                 // brak klucza albo inny tryb
+    }
+    // CRC tresci potwierdza klucz i chroni przed odczytem z uszkodzonej ramki
+    if (crc16(p, 2, n - 2) != (p[0] | (p[1] << 8))) {
+        ESP_LOGW(TAG, "Kamstrup: zly klucz albo uszkodzona ramka");
+        return -1;
+    }
+    if (p[2] == 0x78) {                            // pelna: DIF/VIF w ramce
+        int m = n - 3;
+        if (m > out_cap) return -1;
+        memcpy(out, p + 3, m);
+        return m;
+    }
+    if (p[2] == 0x79 && n >= 7) {                  // skrocona: sygnatura, CRC danych, dane
+        uint16_t sig = p[3] | (p[4] << 8);
+        for (size_t i = 0; i < sizeof(KAM_FMT) / sizeof(KAM_FMT[0]); i++) {
+            if (crc16(KAM_FMT[i].f, 0, KAM_FMT[i].len) == sig)
+                return kam_expand(KAM_FMT[i].f, KAM_FMT[i].len, p + 7, n - 7, out, out_cap);
+        }
+        ESP_LOGW(TAG, "Kamstrup: nieznany format ramki skroconej %04X", sig);
+    }
+    return -1;
 }
 
 // ---------- Glowna funkcja ----------
@@ -966,6 +1069,14 @@ bool meter_total_extract(const uint8_t *data, size_t len,
     // usun CRC blokow do bufora roboczego
     uint8_t clean[300];
     int clen = remove_block_crc(data, (int)len, clean, sizeof(clean));
+
+    // beta432: wodomierze Kamstrupa. Skale stanu daje VIF rekordu (0x13 albo 0x14).
+    if (clen > 20 && kam_ell(clean) &&
+        (medium == 0x06 || medium == 0x07 || medium == 0x16)) {
+        uint8_t kp[256];
+        int kn = kam_payload(clean, clen, key, have_key, kp, sizeof(kp));
+        return kn > 0 && difvif_total(kp, kn, out_total, out_kind);
+    }
 
     // Techem MK Radio 4 (TCH, CI 0xA2 = format producenta; wersje w
     // tch_mk4_version). Nie ma tu DIF/VIF - dane leza na stalych pozycjach

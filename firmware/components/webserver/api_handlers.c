@@ -419,7 +419,7 @@ static esp_err_t handle_system(httpd_req_t *req) {
         "\"heap_free\":%u,\"heap_min\":%u,\"heap_total\":%u,"
         "\"heap_largest\":%u,\"heap_used_pct\":%d,"
         "\"hist_used\":%u,\"hist_total\":%u,\"hist_pct\":%d,"
-        "\"fs_degraded\":%s,\"fs_worst_ms\":%u,"
+        "\"fs_degraded\":%s,\"fs_worst_ms\":%u,\"fs_stall_s\":%u,"
         "\"flash_size\":%u,\"app_part_size\":%u,"
         "\"app_used\":%u,\"app_pct\":%d,"
         "\"temp_c\":%.1f,\"temp_ok\":%s,"
@@ -436,7 +436,7 @@ static esp_err_t handle_system(httpd_req_t *req) {
         (unsigned)heap_free, (unsigned)heap_min, (unsigned)heap_total,
         (unsigned)heap_largest, heap_used_pct,
         (unsigned)hist_used, (unsigned)hist_total, hist_pct,
-        history_fs_degraded() ? "true" : "false", (unsigned)history_fs_worst_ms(),
+        history_fs_degraded() ? "true" : "false", (unsigned)history_fs_worst_ms(), (unsigned)history_write_stall_s(),
         (unsigned)flash_size, (unsigned)app_part_size,
         (unsigned)app_used, app_pct,
         temp_ok ? temp_c : 0.0f, temp_ok ? "true" : "false",
@@ -462,7 +462,7 @@ static esp_err_t handle_status(httpd_req_t *req) {
         "\"ssid\":\"%s\",\"wifi_ch\":%d,"
         "\"wifi_disc_reason\":%d,"
         "\"ip\":\"%s\",\"meter_count\":%d,\"partition\":\"%s\","
-        "\"fs_degraded\":%s}",
+        "\"fs_degraded\":%s,\"fs_stall_s\":%u}",
         ota_get_running_version(),
         esp_timer_get_time() / 1000,
         wifi_str[ws],
@@ -473,7 +473,8 @@ static esp_err_t handle_status(httpd_req_t *req) {
         ip,
         wmbus_decoder_get_seen_count(),
         ota_get_partition_label(),
-        history_fs_degraded() ? "true" : "false"
+        history_fs_degraded() ? "true" : "false",
+        (unsigned)history_write_stall_s()
     );
     // Doklej stan MQTT i czas modulu - pasek naglowka pokazuje je na kazdej
     // podstronie, wiec musza przyjsc razem ze statusem, bez osobnego zapytania.
@@ -1373,7 +1374,7 @@ static esp_err_t handle_factory_reset(httpd_req_t *req) {
 //     [1B len nazwy][nazwa][4B len danych][dane]
 //   [1B 0x00 = koniec listy plikow]
 #define BACKUP_MAGIC "SBAK"
-#define BACKUP_VER   3   // v3: doszly przypiecia do dashboardu i nazwy licznikow
+#define BACKUP_VER   4   // v3: przypiecia i nazwy licznikow; v4: pliki historii w ukladzie LittleFS (beta443)
 
 // helper: dopisz do bufora z kontrola pojemnosci
 static int buf_append(char *buf, int *pos, int cap, const void *data, int len) {
@@ -1541,6 +1542,48 @@ static esp_err_t handle_dash_usage(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// beta443: jeden plik historii do strumienia kopii.
+typedef struct { httpd_req_t *req; char *ch; int cap; long sent; } bk_ctx_t;
+
+static void bk_send_file(void *vctx, const char *rel, const char *path) {
+    bk_ctx_t *c = (bk_ctx_t *)vctx;
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+    fseek(f, 0, SEEK_END);
+    long fsz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (fsz <= 0) { fclose(f); return; }
+    sih_wd_http_enter(c->req->uri);   // kazdy plik to postep dla straznika WWW
+    uint8_t nlen = (uint8_t)strlen(rel);
+    uint32_t dlen = (uint32_t)fsz;
+    int pos = 0;
+    buf_append(c->ch, &pos, c->cap, &nlen, 1);
+    buf_append(c->ch, &pos, c->cap, rel, nlen);
+    buf_append(c->ch, &pos, c->cap, &dlen, 4);
+    httpd_resp_send_chunk(c->req, c->ch, pos); c->sent += pos;
+    long left = fsz;
+    while (left > 0) {
+        int want = (left > c->cap) ? c->cap : (int)left;
+        int rd = fread(c->ch, 1, want, f);
+        if (rd <= 0) break;
+        httpd_resp_send_chunk(c->req, c->ch, rd);
+        c->sent += rd;
+        left -= rd;
+    }
+    // Plik krotszy niz zapowiedziany rozmiar rozjechalby caly format kopii -
+    // dopelniamy zerami (przy odtwarzaniu plik i tak zostanie sprawdzony).
+    if (left > 0) {
+        ESP_LOGW(TAG, "Kopia: %s odczytany czesciowo (brakuje %ld B)", rel, left);
+        memset(c->ch, 0, c->cap);
+        while (left > 0) {
+            int z = (left > c->cap) ? c->cap : (int)left;
+            httpd_resp_send_chunk(c->req, c->ch, z);
+            c->sent += z; left -= z;
+        }
+    }
+    fclose(f);
+}
+
 static esp_err_t handle_backup_get(httpd_req_t *req) {
     // Kopia wysylana STRUMIENIOWO. Wczesniej budowala sie w buforze 60 kB w RAM,
     // przez co miescily sie w niej tylko biezace pliki historii (168 godzin =
@@ -1586,62 +1629,14 @@ static esp_err_t handle_backup_get(httpd_req_t *req) {
             sent += (long)sizeof(cfg->names[0]);
         }
 
-    // pliki: biezaca historia (h_), ARCHIWUM (ha_), lista sledzonych, a od
-    // beta442 takze krzywe 5-min (hc_) i ich maksima (hm_). Bez nich odbudowa
-    // systemu plikow kasowala 90 dni wykresow 5-minutowych. Dwa przebiegi:
-    // najpierw pliki niezbedne do slupkow godzinowych, krzywe na koncu - gdyby
-    // pobieranie sie urwalo, kopia ma przynajmniej to, co najwazniejsze.
+    // pliki historii: najpierw stan (h_), lista sledzonych i archiwum godzinowe,
+    // krzywe 5-min na koncu - gdyby pobieranie sie urwalo, kopia ma przynajmniej
+    // to, co potrzebne do slupkow godzinowych. beta443: uklad katalogow LittleFS.
     history_fs_hold();
-    for (int pass = 0; pass < 2; pass++) {
-        DIR *dir = opendir("/spiffs");
-        if (!dir) break;
-        struct dirent *de;
-        while ((de = readdir(dir)) != NULL) {
-            const char *nm = de->d_name;
-            bool core  = strncmp(nm, "h_", 2) == 0 || strncmp(nm, "ha_", 3) == 0 ||
-                         strcmp(nm, "tracked.txt") == 0;
-            bool curve = strncmp(nm, "hc_", 3) == 0 || strncmp(nm, "hm_", 3) == 0;
-            if (pass == 0 ? !core : !curve) continue;
-            char path[96];
-            snprintf(path, sizeof(path), "/spiffs/%.80s", nm);
-            FILE *f = fopen(path, "rb");
-            if (!f) continue;
-            fseek(f, 0, SEEK_END);
-            long fsz = ftell(f);
-            fseek(f, 0, SEEK_SET);
-            if (fsz <= 0) { fclose(f); continue; }
-            sih_wd_http_enter(req->uri);   // kopia ~2,5 MB idzie dlugo - kazdy plik to postep
-            uint8_t nlen = (uint8_t)strlen(nm);
-            uint32_t dlen = (uint32_t)fsz;
-            pos = 0;
-            buf_append(ch, &pos, CH, &nlen, 1);
-            buf_append(ch, &pos, CH, nm, nlen);
-            buf_append(ch, &pos, CH, &dlen, 4);
-            httpd_resp_send_chunk(req, ch, pos); sent += pos;
-            long left = fsz;
-            while (left > 0) {
-                int want = (left > CH) ? CH : (int)left;
-                int rd = fread(ch, 1, want, f);
-                if (rd <= 0) break;
-                httpd_resp_send_chunk(req, ch, rd);
-                sent += rd;
-                left -= rd;
-            }
-            // Plik krotszy niz zapowiedziany rozmiar rozjechalby caly format kopii -
-            // dopelniamy zerami (przy odtwarzaniu plik i tak zostanie sprawdzony).
-            if (left > 0) {
-                ESP_LOGW(TAG, "Kopia: %s odczytany czesciowo (brakuje %ld B)", nm, left);
-                memset(ch, 0, CH);
-                while (left > 0) {
-                    int z = (left > CH) ? CH : (int)left;
-                    httpd_resp_send_chunk(req, ch, z);
-                    sent += z; left -= z;
-                }
-            }
-            fclose(f);
-        }
-        closedir(dir);
-    }
+    bk_ctx_t bc = { .req = req, .ch = ch, .cap = CH, .sent = sent };
+    history_export_each(0, bk_send_file, &bc);
+    history_export_each(1, bk_send_file, &bc);
+    sent = bc.sent;
     history_fs_release();
     uint8_t endmark = 0;
     httpd_resp_send_chunk(req, (const char *)&endmark, 1); sent += 1;
@@ -1696,8 +1691,9 @@ static esp_err_t handle_backup_post(httpd_req_t *req) {
     if (!bk_read(req, hdr, 5, ring, CH, &rlen, &rpos)) goto bad;
     if (memcmp(hdr, BACKUP_MAGIC, 4) != 0) goto bad;
     uint8_t ver = (uint8_t)hdr[4];
-    // v2 (bez przypiec i nazw) nadal wczytujemy - starsze kopie maja dzialac.
-    if (ver != 2 && ver != BACKUP_VER) {
+    // v2 (bez przypiec i nazw) i v3 (pliki SPIFFS) nadal wczytujemy - starsze
+    // kopie maja dzialac; archiwa z nich sa przeliczane na nowy uklad.
+    if (ver < 2 || ver > BACKUP_VER) {
         free(ring); free(tmp);
         resp_err(req, "zla wersja kopii"); return ESP_OK;
     }
@@ -1748,7 +1744,7 @@ static esp_err_t handle_backup_post(httpd_req_t *req) {
         return ESP_OK;
     }
     formatted = true;
-    sih_wd_http_enter(req->uri);   // formatowanie trwa do minuty - liczymy od nowa
+    sih_wd_http_enter(req->uri);   // po formatowaniu liczymy od nowa
 
     while (1) {
         uint8_t nlen;
@@ -1760,59 +1756,40 @@ static esp_err_t handle_backup_post(httpd_req_t *req) {
         uint32_t dlen;
         if (!bk_read(req, &dlen, 4, ring, CH, &rlen, &rpos)) goto bad;
         // Walidacja nazwy: path traversal jest tu realny, bo nm pochodzi ze
-        // strumienia HTTP wgrywanego z panelu. Bez tego backup z nm="../boot/xxx"
-        // albo nm="config.bin" nadpisywalby dowolny plik na SPIFFS - brick albo
-        // podszycie konfiguracji. Dopuszczalne tylko pliki historii z whitelisty
-        // prefiksow (h_/ha_) lub tracked.txt; zadnych "/" ani "..".
-        bool nm_ok = true;
-        if (nlen == 0) nm_ok = false;
-        for (uint8_t i = 0; i < nlen && nm_ok; i++) {
-            unsigned char c = (unsigned char)nm[i];
-            // Alfanumeryczne + _ . - . Zero backslashy/ukosnikow/kropek na starcie.
-            if (!(c == '_' || c == '.' || c == '-' || (c >= '0' && c <= '9')
-                  || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')))
-                nm_ok = false;
-        }
-        if (nm_ok && nm[0] == '.') nm_ok = false;              // "." albo "..*"
-        if (nm_ok && strstr(nm, "..") != NULL) nm_ok = false;  // sekwencja ..
-        if (nm_ok) {
-            // Whitelist prefiksow zgodna z backup_get.
-            bool allowed = (strncmp(nm, "h_", 2) == 0)
-                        || (strncmp(nm, "ha_", 3) == 0)
-                        || (strncmp(nm, "hc_", 3) == 0)     // beta442: krzywe 5-min
-                        || (strncmp(nm, "hm_", 3) == 0)     // beta442: ich maksima
-                        || (strcmp(nm, "tracked.txt") == 0);
-            if (!allowed) nm_ok = false;
-        }
+        // strumienia HTTP wgrywanego z panelu. Dopuszczalne tylko pliki historii:
+        // nowy uklad (a|c|m/<klucz>/<data>.bin, h_*.bin, tracked.txt) albo stare
+        // archiwa ha_/hc_/hm_ z kopii do beta442 - bez "..", bez innych katalogow.
+        bool nm_ok = history_import_name_ok(nm);
         if (!nm_ok) {
             ESP_LOGW(TAG, "backup_post: odrzucona nazwa '%.63s' (walidacja)", nm);
             goto bad;
         }
-        char path[96];
-        snprintf(path, sizeof(path), "/spiffs/%.80s", nm);
         sih_wd_http_enter(req->uri);   // kazdy plik to postep dla straznika WWW
-        FILE *f = fopen(path, "wb");
+        FILE *f = history_import_open();
         bool wok = (f != NULL);
         uint32_t left = dlen;
         while (left > 0) {
             int want = (left > (uint32_t)CH) ? CH : (int)left;
             if (!bk_read(req, tmp, want, ring, CH, &rlen, &rpos)) {
                 if (f) fclose(f);
+                history_import_abort();
                 goto bad;
             }
             if (wok && fwrite(tmp, 1, want, f) != (size_t)want) wok = false;
             left -= (uint32_t)want; bytes += want;
         }
         // beta442: dotad plik liczyl sie jako przywrocony takze wtedy, gdy zapis
-        // na flash sie nie udal.
+        // na flash sie nie udal. beta443: commit przenosi plik na miejsce albo
+        // przelicza stare archiwum na nowy uklad.
         if (f && fflush(f) != 0) wok = false;
         if (f && fclose(f) != 0) wok = false;
+        if (wok) wok = history_import_commit(nm);
+        else history_import_abort();
         if (wok) {
             restored++;
         } else {
             failed++;
             ESP_LOGE(TAG, "Przywracanie: zapis %s nieudany (errno=%d)", nm, errno);
-            unlink(path);   // niepelny plik nie moze udawac historii
         }
     }
     nvs_config_save(&cfg);   // beta442: dopiero po wgraniu wszystkich plikow

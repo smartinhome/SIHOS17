@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdio.h>      // FILE - wgrywanie kopii (beta443)
 
 // Liczba kubelkow per rozdzielczosc (jak HA Energy, z zapasem)
 #define HIST_HOURS   168   // 7 dni godzinowo (w RAM)
@@ -167,6 +168,19 @@ bool history_fs_rebuild(void);
 // Na czas hold ponowne montowanie systemu plikow jest wstrzymane.
 void history_fs_hold(void);
 void history_fs_release(void);
+// beta443: od ilu sekund archiwum nie przyjmuje zapisow (0 = zapisy dzialaja).
+uint32_t history_write_stall_s(void);
+
+// beta443: kopia zapasowa. Pliki historii (wzgledne do /spiffs): h_*.bin,
+// tracked.txt, a/<klucz>/*.bin (pass 0), c/ i m/ - krzywe 5-min (pass 1).
+typedef void (*history_file_fn)(void *ctx, const char *rel, const char *path);
+void history_export_each(int pass, history_file_fn fn, void *ctx);
+// Wgrywanie pliku z kopii: nazwa z kopii (nowy uklad albo stare ha_/hc_/hm_),
+// dane do pliku tymczasowego, potem commit przenosi albo przelicza.
+bool history_import_name_ok(const char *name);
+FILE *history_import_open(void);
+bool history_import_commit(const char *name);   // po fclose pliku z open
+void history_import_abort(void);
 
 // Diagnostyka: surowy obraz zrodel danych dla klucza i doby (RAM vs archiwum) -
 // co widzi kod przy budowaniu wykresu i co odrzuca. Tylko do debugowania.

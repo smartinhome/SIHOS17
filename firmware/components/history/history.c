@@ -16,6 +16,8 @@
 #include "nvs.h"
 #include "esp_heap_caps.h"
 #include "esp_system.h"   // esp_restart (beta434)
+#include "esp_attr.h"     // RTC_NOINIT_ATTR (beta434)
+#include "freertos/task.h"
 
 // FAZA 3a: helper do atomic write. Przyjmuje docelowa sciezke z ".bin" na koncu,
 // zwraca sciezke z ".tmp" (ta sama dlugosc - SPIFFS ogranicza nazwy do 31 znakow,
@@ -59,8 +61,35 @@ static const char *TAG = "HISTORY";
 #define FS_EIO_REMOUNT     3            // ile EIO z rzedu przed ponownym montowaniem
 #define FS_REMOUNT_MIN_S   600          // nie czesciej niz co 10 min
 static int      s_fs_eio_streak = 0;
+// beta434: straznik zakleszczen. Modul zawieszal sie w calosci (WWW, MQTT,
+// e-ink) i wracal dopiero po odcieciu zasilania - watchdog zadan w tej
+// konfiguracji tylko ostrzega. Wszystko, co czyta lub pisze historie, czeka na
+// s_mutex, wiec zadanie, ktore utknelo z ta blokada (np. w operacji SPIFFS),
+// zatrzymuje caly modul. Blokade bierzemy z nazwa funkcji; osobny task co 30 s
+// sprawdza, czy da sie ja wziac w 2 min. Jesli nie - zapisuje w pamieci RTC,
+// kto ja trzymal, i restartuje modul. Po starcie ten wpis trafia do logu.
+#define HIST_WD_PERIOD_MS  30000
+#define HIST_WD_WAIT_MS    120000
+#define HIST_WD_MAGIC      0x48574431u   // "HWD1"
+static const char *volatile s_lock_owner = NULL;
+static volatile TickType_t  s_lock_since = 0;
+RTC_NOINIT_ATTR static uint32_t s_wd_magic;
+RTC_NOINIT_ATTR static uint32_t s_wd_held_s;
+RTC_NOINIT_ATTR static char     s_wd_owner[40];
 static uint32_t s_fs_remount_ts = 0;
 static void fs_remount(void);
+static SemaphoreHandle_t s_mutex;
+static void hist_lock(const char *who) {
+    if (!s_mutex) return;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    s_lock_owner = who;
+    s_lock_since = xTaskGetTickCount();
+}
+static void hist_unlock(void) {
+    if (!s_mutex) return;
+    s_lock_owner = NULL;
+    xSemaphoreGive(s_mutex);
+}
 static bool fs_close(FILE *f, const char *path) {
     if (!f) return false;
     errno = 0;
@@ -1619,7 +1648,7 @@ void history_erase_all(void) {
     // Reset fabryczny: kasuje CALA historie z flasha i liste sledzonych.
     // Konfiguracja siedzi w NVS (nvs_config_reset), ale historia to osobny
     // system plikow - bez tego po resecie zostawaly wykresy i zaznaczone pola.
-    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
+    hist_lock(__func__);
 
     // 1. zwolnij sloty w RAM, zeby nic sie nie zapisalo z powrotem
     for (int i = 0; i < MAX_HIST_METERS; i++) {
@@ -1667,7 +1696,7 @@ void history_erase_all(void) {
             }
         }
     }
-    if (s_mutex) xSemaphoreGive(s_mutex);
+    hist_unlock();
     ESP_LOGW(TAG, "Reset fabryczny: skasowano %d plikow historii", removed);
 }
 
@@ -1677,7 +1706,7 @@ size_t history_free_curves(void) {
     // zostaja. Zwalniamy je przed OTA, bo TLS do GitHuba
     // potrzebuje sporego, spojnego kawalka sterty.
     size_t freed = 0;
-    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
+    hist_lock(__func__);
     for (int i = 0; i < MAX_HIST_METERS; i++) {
         if (!s_meters[i]) continue;
         if (s_meters[i]->curve)     freed += HIST_CURVE * sizeof(hist_bucket_t);
@@ -1685,7 +1714,7 @@ size_t history_free_curves(void) {
         if (s_meters[i]->curve_max) freed += HIST_CURVE * sizeof(float);
         if (s_meters[i]->curve) free_curve(s_meters[i]);
     }
-    if (s_mutex) xSemaphoreGive(s_mutex);
+    hist_unlock();
     ESP_LOGI(TAG, "Zwolniono %u B buforow krzywych (OTA)", (unsigned)freed);
     return freed;
 }
@@ -1735,19 +1764,19 @@ bool history_is_tracked(const char *id_hex) {
 
 // Lista sledzonych kluczy jako JSON: ["id:pole","id2:pole2",...]
 int history_tracked_json(char *buf, int buf_cap) {
-    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
+    hist_lock(__func__);
     int n = snprintf(buf, buf_cap, "[");
     for (int i = 0; i < s_tracked_count; i++) {
         n += snprintf(buf + n, buf_cap - n, "%s\"%s\"", i ? "," : "", s_tracked[i]);
     }
     n += snprintf(buf + n, buf_cap - n, "]");
-    if (s_mutex) xSemaphoreGive(s_mutex);
+    hist_unlock();
     return n;
 }
 
 void history_set_tracked(const char *id_hex, bool tracked) {
     if (!id_hex) return;
-    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
+    hist_lock(__func__);
     bool exists = false;
     int idx = -1;
     for (int i = 0; i < s_tracked_count; i++)
@@ -1782,7 +1811,7 @@ void history_set_tracked(const char *id_hex, bool tracked) {
             }
         }
     }
-    if (s_mutex) xSemaphoreGive(s_mutex);
+    hist_unlock();
 }
 
 static meter_hist_t *get_or_load(const char *id, bool create_if_missing);
@@ -1841,6 +1870,27 @@ static void hist_recover_stale_tmp(void) {
     }
 }
 
+static void hist_wd_task(void *arg) {
+    (void)arg;
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(HIST_WD_PERIOD_MS));
+        if (!s_mutex) continue;
+        if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(HIST_WD_WAIT_MS)) == pdTRUE) {
+            xSemaphoreGive(s_mutex);
+            continue;
+        }
+        const char *who = s_lock_owner;
+        uint32_t held = (uint32_t)((xTaskGetTickCount() - s_lock_since) * portTICK_PERIOD_MS / 1000);
+        snprintf(s_wd_owner, sizeof(s_wd_owner), "%s", who ? who : "?");
+        s_wd_held_s = held;
+        s_wd_magic = HIST_WD_MAGIC;
+        ESP_LOGE(TAG, "Blokada historii trzymana przez %s od %u s - restart modulu",
+                 s_wd_owner, (unsigned)held);
+        vTaskDelay(pdMS_TO_TICKS(200));   // log zdazy wyjsc na UART
+        esp_restart();
+    }
+}
+
 // beta434: ponowne zamontowanie SPIFFS bez restartu - zwalnia uchwyty, ktore
 // system plikow zgubil przy nieudanych zamknieciach. Wolane z miejsc, ktore
 // trzymaja juz s_mutex (zapis historii), wiec zaden inny plik historii nie
@@ -1875,6 +1925,15 @@ static void fs_remount(void) {
 
 void history_init(void) {
     s_mutex = xSemaphoreCreateMutex();
+    if (s_wd_magic == HIST_WD_MAGIC) {
+        s_wd_owner[sizeof(s_wd_owner) - 1] = 0;
+        ESP_LOGE(TAG, "Poprzedni restart: straznik historii - blokada trzymana przez %s od %u s",
+                 s_wd_owner, (unsigned)s_wd_held_s);
+    }
+    s_wd_magic = 0;
+    // Priorytet 10: powyzej wmbus_work (6) i HTTP - straznik musi dostac CPU
+    // takze wtedy, gdy zadanie z blokada krazy w petli.
+    xTaskCreate(hist_wd_task, "hist_wd", 3072, NULL, 10, NULL);
     esp_vfs_spiffs_conf_t conf = {
         .base_path = "/spiffs",
         .partition_label = "littlefs",   // partycja z subtype spiffs
@@ -2042,10 +2101,10 @@ void history_on_reading(const char *id_hex, double total, int kind, uint32_t ts_
     // na flashu, mimo ze nikt ich nie ogladal. Podglad ramek ("Lap licznik") i
     // dekodowanie dzialaja niezaleznie - to rezygnacja wylacznie z historii.
     if (!history_is_tracked(id_hex)) return;
-    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
+    hist_lock(__func__);
 
     meter_hist_t *m = get_or_load(id_hex, true);
-    if (!m) { if (s_mutex) xSemaphoreGive(s_mutex); return; }
+    if (!m) { hist_unlock(); return; }
 
     float ft = (float)total;
     m->kind = kind;
@@ -2077,7 +2136,7 @@ void history_on_reading(const char *id_hex, double total, int kind, uint32_t ts_
     // dodatkowo robi pelny history_flush()).
     if (hour_closed || ts_unix - m->last_save_ts >= 900) save_meter(m);
 
-    if (s_mutex) xSemaphoreGive(s_mutex);
+    hist_unlock();
 }
 
 // Per-pole: klucz "id:pole". Zbiera TYLKO gdy pole sledzone (Etap A).
@@ -2090,9 +2149,9 @@ void history_on_field(const char *id_hex, const char *field, double value,
     // ETAP A: zbieramy tylko sledzone pola (sasiedzi i niewybrane ignorowane)
     if (!history_is_tracked(key)) return;
 
-    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
+    hist_lock(__func__);
     meter_hist_t *m = get_or_load(key, true);
-    if (!m) { if (s_mutex) xSemaphoreGive(s_mutex); return; }
+    if (!m) { hist_unlock(); return; }
 
     float ft = (float)value;
     m->kind = kind;
@@ -2155,7 +2214,7 @@ void history_on_field(const char *id_hex, const char *field, double value,
     }
 
     if (hour_closed || ts_unix - m->last_save_ts >= 900) save_meter(m);
-    if (s_mutex) xSemaphoreGive(s_mutex);
+    hist_unlock();
 }
 
 // ---------- JSON historii (zuzycie = roznice) ----------
@@ -2453,12 +2512,12 @@ static int range_cumulative_points(meter_hist_t *m, uint32_t from, uint32_t to, 
 
 int history_range_json(const char *id_hex, uint32_t from, uint32_t to,
                        char unit, char *buf, int buf_cap) {
-    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
+    hist_lock(__func__);
     meter_hist_t *m = get_or_load(id_hex, false);
     if (!m) {
         int n = snprintf(buf, buf_cap, "{\"id\":\"%s\",\"kind\":0,\"points\":[]}",
                          id_hex ? id_hex : "");
-        if (s_mutex) xSemaphoreGive(s_mutex);
+        hist_unlock();
         return n;
     }
     int n = snprintf(buf, buf_cap, "{\"id\":\"%s\",\"kind\":%d,\"cumulative\":%d,\"points\":[",
@@ -2470,17 +2529,17 @@ int history_range_json(const char *id_hex, uint32_t from, uint32_t to,
         n = range_cumulative_points(m, from, to, unit, now, buf, buf_cap, n);
     }
     n += snprintf(buf + n, buf_cap - n, "]}");
-    if (s_mutex) xSemaphoreGive(s_mutex);
+    hist_unlock();
     return n;
 }
 
 int history_get_json(const char *id_hex, const char *res, char *buf, int buf_cap) {
-    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
+    hist_lock(__func__);
     meter_hist_t *m = get_or_load(id_hex, false);
     int n = 0;
     if (!m) {
         n = snprintf(buf, buf_cap, "{\"id\":\"%s\",\"kind\":0,\"points\":[]}", id_hex ? id_hex : "");
-        if (s_mutex) xSemaphoreGive(s_mutex);
+        hist_unlock();
         return n;
     }
 
@@ -2530,7 +2589,7 @@ int history_get_json(const char *id_hex, const char *res, char *buf, int buf_cap
         }
     }
     n += snprintf(buf + n, buf_cap - n, "]}");
-    if (s_mutex) xSemaphoreGive(s_mutex);
+    hist_unlock();
     return n;
 }
 
@@ -2538,13 +2597,13 @@ int history_get_json(const char *id_hex, const char *res, char *buf, int buf_cap
 // Czyta plik archiwum, filtruje punkty z wybranej doby, liczy zuzycie jako roznice
 // kolejnych totali (dla kumulacyjnych) lub wartosc (dla chwilowych).
 int history_debug_day(const char *key, uint32_t day_ts, char *buf, int cap) {
-    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
+    hist_lock(__func__);
     meter_hist_t *m = get_or_load(key, false);
     uint32_t d0 = floor_day(day_ts), d1 = day_end(d0);
     int n = snprintf(buf, cap, "{\"key\":\"%s\",\"d0\":%u,\"d1\":%u", key ? key : "", (unsigned)d0, (unsigned)d1);
     if (!m) {
         n += snprintf(buf + n, cap - n, ",\"slot\":\"BRAK - licznik nie zaladowany\"}");
-        if (s_mutex) xSemaphoreGive(s_mutex);
+        hist_unlock();
         return n;
     }
     bool ram_covers = (m->n_hours > 0 && m->hours[0].ts <= d0);
@@ -2563,14 +2622,14 @@ int history_debug_day(const char *key, uint32_t day_ts, char *buf, int cap) {
     FILE *f = s_fs_ok ? fopen(path, "rb") : NULL;
     if (!f) {
         n += snprintf(buf + n, cap - n, ",\"arch\":\"BRAK PLIKU %s\"}", path);
-        if (s_mutex) xSemaphoreGive(s_mutex);
+        hist_unlock();
         return n;
     }
     arc_hdr_t h;
     if (!arc_read_header2(f, &h)) {
         n += snprintf(buf + n, cap - n, ",\"arch\":\"NAGLOWEK NIECZYTELNY\"}");
         fclose(f);
-        if (s_mutex) xSemaphoreGive(s_mutex);
+        hist_unlock();
         return n;
     }
     n += snprintf(buf + n, cap - n, ",\"arc_count\":%d,\"arc_head\":%d,\"arc_v2\":%s,\"arc_hdr\":%d",
@@ -2610,7 +2669,7 @@ int history_debug_day(const char *key, uint32_t day_ts, char *buf, int cap) {
     }
     fclose(f);
     n += snprintf(buf + n, cap - n, "}");
-    if (s_mutex) xSemaphoreGive(s_mutex);
+    hist_unlock();
     return n;
 }
 
@@ -2630,7 +2689,7 @@ int history_get_day_json_hours(const char *id_hex, uint32_t day_ts, char *buf, i
 
 static int day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf_cap,
                     bool try_curve_arc) {
-    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
+    hist_lock(__func__);
     // Pobierz metadane (kind, cumulative) z RAM jesli licznik zaladowany.
     meter_hist_t *m = get_or_load(id_hex, false);
     int kind = m ? m->kind : 0;
@@ -2718,7 +2777,7 @@ static int day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf_cap,
             first2 = false;
         }
         n2 += snprintf(buf + n2, buf_cap - n2, "]}");
-        if (s_mutex) xSemaphoreGive(s_mutex);
+        hist_unlock();
         return n2;
     }
 
@@ -2927,12 +2986,12 @@ static int day_json(const char *id_hex, uint32_t day_ts, char *buf, int buf_cap,
                           s_day_buf[nb - 1].total, (unsigned)s_day_buf[nb - 1].ts);
     }
     n += snprintf(buf + n, buf_cap - n, "}");
-    if (s_mutex) xSemaphoreGive(s_mutex);
+    hist_unlock();
     return n;
 }
 
 int history_list_json(char *buf, int buf_cap) {
-    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
+    hist_lock(__func__);
     int n = snprintf(buf, buf_cap, "[");
     bool first = true;
     for (int i = 0; i < MAX_HIST_METERS; i++) {
@@ -2962,7 +3021,7 @@ int history_list_json(char *buf, int buf_cap) {
         first = false;
     }
     n += snprintf(buf + n, buf_cap - n, "]");
-    if (s_mutex) xSemaphoreGive(s_mutex);
+    hist_unlock();
     return n;
 }
 
@@ -3017,10 +3076,10 @@ bool history_display_summary(const char *key, hist_display_t *out) {
     memset(out, 0, sizeof(*out));
     strncpy(out->key, key, sizeof(out->key) - 1);
 
-    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
+    hist_lock(__func__);
     meter_hist_t *m = get_or_load(key, false);
     if (!m) {
-        if (s_mutex) xSemaphoreGive(s_mutex);
+        hist_unlock();
         return false;
     }
 
@@ -3112,7 +3171,7 @@ bool history_display_summary(const char *key, hist_display_t *out) {
     }
 
     bool cumul = m->cumulative;
-    if (s_mutex) xSemaphoreGive(s_mutex);
+    hist_unlock();
 
     // JEDNO ZRODLO PRAWDY: dla licznikow kumulacyjnych zuzycie dzis/wczoraj
     // bierzemy z tej samej funkcji, ktora rysuje wykres w panelu. Wczesniej
@@ -3146,7 +3205,7 @@ bool history_display_summary(const char *key, hist_display_t *out) {
 }
 
 int history_tracked_meter_ids(char ids[][12], int max_ids) {
-    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
+    hist_lock(__func__);
     int count = 0;
     for (int i = 0; i < s_tracked_count && count < max_ids; i++) {
         // Klucz to "id" lub "id:pole" - wyciagnij sama czesc id.
@@ -3165,13 +3224,13 @@ int history_tracked_meter_ids(char ids[][12], int max_ids) {
             count++;
         }
     }
-    if (s_mutex) xSemaphoreGive(s_mutex);
+    hist_unlock();
     return count;
 }
 
 int history_keys_for_id(const char *id, char keys[][40], int max_keys) {
     if (!id) return 0;
-    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
+    hist_lock(__func__);
     int count = 0;
     int idlen = (int)strlen(id);
     for (int i = 0; i < s_tracked_count && count < max_keys; i++) {
@@ -3183,7 +3242,7 @@ int history_keys_for_id(const char *id, char keys[][40], int max_keys) {
             count++;
         }
     }
-    if (s_mutex) xSemaphoreGive(s_mutex);
+    hist_unlock();
     return count;
 }
 
@@ -3210,11 +3269,11 @@ bool history_fs_usage(size_t *used, size_t *total) {
 }
 
 void history_flush(void) {
-    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
+    hist_lock(__func__);
     for (int i = 0; i < MAX_HIST_METERS; i++) {
         if (s_meters[i] && s_meters[i]->used) save_meter(s_meters[i]);
     }
-    if (s_mutex) xSemaphoreGive(s_mutex);
+    hist_unlock();
     ESP_LOGI(TAG, "Historia zrzucona na flash (flush)");
 }
 
@@ -3222,7 +3281,7 @@ int history_curve_day(const char *key, uint32_t day_ts, hist_bucket_t *out,
                       float *out_max, int cap) {
     if (!key || !out || cap <= 0) return 0;
     int n = 0;
-    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
+    hist_lock(__func__);
     meter_hist_t *m = get_or_load(key, false);
     if (m && !m->cumulative) {
         uint32_t d0 = floor_day(day_ts), d1 = day_end(d0);
@@ -3279,6 +3338,6 @@ int history_curve_day(const char *key, uint32_t day_ts, hist_bucket_t *out,
             }
         }
     }
-    if (s_mutex) xSemaphoreGive(s_mutex);
+    hist_unlock();
     return n;
 }

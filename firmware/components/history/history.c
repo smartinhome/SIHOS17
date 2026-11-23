@@ -17,6 +17,7 @@
 #include "esp_heap_caps.h"
 #include "esp_system.h"   // esp_restart (beta434)
 #include "esp_attr.h"     // RTC_NOINIT_ATTR (beta434)
+#include "esp_timer.h"    // czas sprawdzania SPIFFS (beta438)
 #include "freertos/task.h"
 
 // FAZA 3a: helper do atomic write. Przyjmuje docelowa sciezke z ".bin" na koncu,
@@ -1340,6 +1341,12 @@ static void save_meter(meter_hist_t *m) {
     // srodku fwrite() zostawia .tmp jako smiec (zignorowany przy starcie),
     // ale oryginalny .bin jest nadal caly - historia sie nie traci.
     char tmp[64]; path_to_tmp(path, tmp, sizeof(tmp));
+    // beta438: pierwsze zapisy po starcie w logu - modul stawal tuz po
+    // pierwszej ramce, czyli przy pierwszym zapisie pliku stanu. Ostatnia linia
+    // przed zawieszeniem pokaze, ktory zapis go zatrzymal.
+    static int s_save_log_n = 0;
+    bool lg = s_save_log_n < 30;
+    if (lg) { s_save_log_n++; ESP_LOGI(TAG, "zapis stanu %s - start", m->id); }
     errno = 0;
     FILE *f = fopen(tmp, "wb");
     if (!f) {
@@ -1421,6 +1428,7 @@ static void save_meter(meter_hist_t *m) {
     }
     m->last_save_ts = m->last_ts;
     fs_write_ok();
+    if (lg) ESP_LOGI(TAG, "zapis stanu %s - OK", m->id);
 }
 
 static bool load_meter(meter_hist_t *m, const char *id) {
@@ -1976,6 +1984,33 @@ void history_init(void) {
         ESP_LOGW(TAG, "SPIFFS sformatowany - historia bedzie zapisywana");
     }
     s_fs_ok = true;
+    // beta438: jednorazowe sprawdzenie i naprawa SPIFFS. Zapis nowych plikow
+    // zatrzymywal modul tuz po starcie, a odczyt dzialal - typowy objaw
+    // niespojnej struktury systemu plikow. Znacznik w NVS ustawiamy PRZED
+    // proba: jesli naprawa sama sie zawiesi, po odcieciu zasilania nie
+    // powtorzy sie i start nie wpadnie w petle zawieszen.
+    {
+        bool run = false;
+        nvs_handle_t nh;
+        if (nvs_open("sih_fs", NVS_READWRITE, &nh) == ESP_OK) {
+            uint8_t done = 0;
+            if (nvs_get_u8(nh, "fsck438", &done) != ESP_OK || done == 0) {
+                if (nvs_set_u8(nh, "fsck438", 1) == ESP_OK && nvs_commit(nh) == ESP_OK) run = true;
+            }
+            nvs_close(nh);
+        }
+        if (run) {
+            size_t t0 = 0, u0 = 0, t1 = 0, u1 = 0;
+            esp_spiffs_info("littlefs", &t0, &u0);
+            ESP_LOGW(TAG, "Sprawdzanie i naprawa systemu plikow (jednorazowo, moze potrwac kilka minut)...");
+            int64_t st = esp_timer_get_time();
+            esp_err_t r = esp_spiffs_check("littlefs");
+            unsigned secs = (unsigned)((esp_timer_get_time() - st) / 1000000);
+            esp_spiffs_info("littlefs", &t1, &u1);
+            ESP_LOGW(TAG, "Sprawdzanie systemu plikow: %s, %u s, zajete %u -> %u B",
+                     esp_err_to_name(r), secs, (unsigned)u0, (unsigned)u1);
+        }
+    }
     // FAZA 3a hotfix: przed jakimkolwiek load_meter posprzataj sierotki .tmp
     // po ewentualnym reset zasilania w mikrooknie miedzy remove i rename.
     hist_recover_stale_tmp();

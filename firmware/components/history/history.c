@@ -15,6 +15,7 @@
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "esp_heap_caps.h"
+#include "esp_system.h"   // esp_restart (beta434)
 
 // FAZA 3a: helper do atomic write. Przyjmuje docelowa sciezke z ".bin" na koncu,
 // zwraca sciezke z ".tmp" (ta sama dlugosc - SPIFFS ogranicza nazwy do 31 znakow,
@@ -39,14 +40,41 @@ static void path_to_tmp(const char *path, char *tmp, size_t cap) {
 // Wymus flush z bufora C stdio i z bufora VFS/SPIFFS na flash. Wolane przed
 // atomic rename - bez tego dane wisza w bufirze VFS a rename podmienialby
 // "pusty" plik. SPIFFS wspiera fsync w ESP-IDF.
-static void flush_to_flash(FILE *f) {
-    if (!f) return;
-    fflush(f);
+static bool flush_to_flash(FILE *f) {
+    if (!f) return false;
+    bool ok = fflush(f) == 0;
     int fd = fileno(f);
-    if (fd >= 0) fsync(fd);
+    if (fd >= 0 && fsync(fd) != 0) ok = false;
+    return ok;
 }
 
 static const char *TAG = "HISTORY";
+
+// beta434: SPIFFS przy nieudanym zamknieciu pliku (blad zapisu bufora) NIE
+// zwalnia uchwytu. Po max_files takich zdarzeniach kazde otwarcie konczy sie
+// EIO az do restartu - tak modul stracil zapisy od 21.11 do restartu 23.11.
+// Teraz: bledy zamkniecia trafiaja do logu, a seria EIO przy otwieraniu
+// powoduje ponowne zamontowanie systemu plikow (zwalnia wszystkie uchwyty).
+#define HIST_MAX_FILES     10
+#define FS_EIO_REMOUNT     3            // ile EIO z rzedu przed ponownym montowaniem
+#define FS_REMOUNT_MIN_S   600          // nie czesciej niz co 10 min
+static int      s_fs_eio_streak = 0;
+static uint32_t s_fs_remount_ts = 0;
+static void fs_remount(void);
+static bool fs_close(FILE *f, const char *path) {
+    if (!f) return false;
+    errno = 0;
+    if (fclose(f) == 0) return true;
+    ESP_LOGE(TAG, "Zamkniecie %s nieudane (errno=%d)", path ? path : "?", errno);
+    s_fs_eio_streak++;
+    return false;
+}
+static void fs_open_failed(const char *path, int err) {
+    if (err == ENOENT) return;
+    if (err == EIO) s_fs_eio_streak++;
+    if (s_fs_eio_streak >= FS_EIO_REMOUNT) fs_remount();
+}
+static void fs_write_ok(void) { s_fs_eio_streak = 0; }
 // Tyle samo, ile MAX_TRACKED - inaczej czesc sledzonych pol nie dostawala
 // slotu i po cichu nie miala historii (Amiplus daje ~20 pol po becie 257).
 // Sloty sa alokowane NA ZADANIE, wiec zapas nie kosztuje RAM dopoki nieuzyty.
@@ -700,7 +728,9 @@ static void archive_append_hour(const char *id, uint32_t hour_ts, float total,
     FILE *f = fopen(path, "r+b");
     if (!f) {
         if (errno != ENOENT) {
-            ESP_LOGE(TAG, "Archiwum %s: otwarcie nieudane (errno=%d) - pomijam zapis", path, errno);
+            int e = errno;
+            ESP_LOGE(TAG, "Archiwum %s: otwarcie nieudane (errno=%d) - pomijam zapis", path, e);
+            fs_open_failed(path, e);
             return;
         }
         // nowy plik - utworz z naglowkiem v2
@@ -886,9 +916,10 @@ static void curve_archive_append(const char *id, uint32_t bucket_ts, float value
 
     carc_hdr_t h = { 0, 0 };
     errno = 0;
+    errno = 0;
     FILE *f = fopen(path, "r+b");
     if (!f) {
-        if (errno != ENOENT) return;
+        if (errno != ENOENT) { fs_open_failed(path, errno); return; }
         if (!carc_space_for_new_file(id)) return;
         f = fopen(path, "w+b");
         if (!f) { ESP_LOGW(TAG, "nie moge utworzyc %s", path); return; }
@@ -1175,24 +1206,44 @@ static void restore_from_archive(meter_hist_t *m) {
     arc_hdr_t h;
     bool hdr_ok = arc_read_header2(f, &h);
     if (hdr_ok && h.count > 0) {
-        hist_bucket_t rec;
-        int phys = (h.head + h.count - 1) % h.cap;   // najnowszy rekord
-        if (fseek(f, arc_rec_off2(h.hdr, phys), SEEK_SET) == 0 &&
-            fread(&rec, sizeof(rec), 1, f) == 1 &&
-            rec.ts >= 1700000000) {
-            uint32_t last_bh = (m->n_hours > 0) ? m->hours[m->n_hours - 1].ts : 0;
-            if (rec.ts >= last_bh) {
-                series_update(m->hours,  &m->n_hours,  HIST_HOURS,  rec.ts, rec.total);
-                series_update(m->days,   &m->n_days,   HIST_DAYS,   floor_day(rec.ts),   rec.total);
-                series_update(m->months, &m->n_months, HIST_MONTHS, floor_month(rec.ts), rec.total);
-                series_update(m->years,  &m->n_years,  HIST_YEARS,  floor_year(rec.ts),  rec.total);
-                // Rekord archiwum jest co najmniej tak swiezy jak stan z pliku h_
-                // (arc pisany co ramke, h_ raz na godzine) - przejmij total.
-                if (rec.ts >= floor_hour(m->last_ts)) {
-                    m->last_total = rec.total;
-                    if (rec.ts > m->last_ts) m->last_ts = rec.ts;
-                }
+        // beta434: dokladamy WSZYSTKIE godziny archiwum nowsze niz ostatnia
+        // godzina z pliku h_ (najwyzej 7 dni = pojemnosc RAM). Dotad tylko
+        // najnowszy rekord - gdy h_ byl starszy od archiwum (nieudane zapisy h_),
+        // RAM mial dziure, a widok dnia/tygodnia bral te dni z RAM i byly puste,
+        // choc archiwum je mialo.
+        uint32_t last_bh = (m->n_hours > 0) ? m->hours[m->n_hours - 1].ts : 0;
+        int first = h.count > HIST_HOURS ? h.count - HIST_HOURS : 0;
+        hist_bucket_t chunk[32], rec = { 0 };
+        bool any = false;
+        int added = 0;
+        for (int i = first; i < h.count; ) {
+            int phys = (h.head + i) % h.cap;
+            int run = h.cap - phys;
+            if (run > h.count - i) run = h.count - i;
+            if (run > 32) run = 32;
+            if (fseek(f, arc_rec_off2(h.hdr, phys), SEEK_SET) != 0) break;
+            int r = (int)fread(chunk, sizeof(hist_bucket_t), (size_t)run, f);
+            for (int j = 0; j < r; j++) {
+                const hist_bucket_t *b = &chunk[j];
+                if (b->ts < ARC_TS_MIN || b->ts < last_bh) continue;
+                if (any && b->ts < rec.ts) continue;   // ts nierosnacy - pomijamy
+                series_update(m->hours,  &m->n_hours,  HIST_HOURS,  b->ts, b->total);
+                series_update(m->days,   &m->n_days,   HIST_DAYS,   floor_day(b->ts),   b->total);
+                series_update(m->months, &m->n_months, HIST_MONTHS, floor_month(b->ts), b->total);
+                series_update(m->years,  &m->n_years,  HIST_YEARS,  floor_year(b->ts),  b->total);
+                if (b->ts > last_bh) added++;
+                rec = *b; any = true;
             }
+            if (r != run) break;
+            i += run;
+        }
+        if (added > 1)
+            ESP_LOGI(TAG, "%s: dolozono %d godz z archiwum (plik stanu byl starszy)", m->id, added);
+        // Rekord archiwum jest co najmniej tak swiezy jak stan z pliku h_
+        // (arc pisany co ramke, h_ raz na godzine) - przejmij total.
+        if (any && rec.ts >= floor_hour(m->last_ts)) {
+            m->last_total = rec.total;
+            if (rec.ts > m->last_ts) m->last_ts = rec.ts;
         }
     }
     // Naglowek v2 niesie DOKLADNY czas i wartosc ostatniego odczytu sprzed
@@ -1260,8 +1311,14 @@ static void save_meter(meter_hist_t *m) {
     // srodku fwrite() zostawia .tmp jako smiec (zignorowany przy starcie),
     // ale oryginalny .bin jest nadal caly - historia sie nie traci.
     char tmp[64]; path_to_tmp(path, tmp, sizeof(tmp));
+    errno = 0;
     FILE *f = fopen(tmp, "wb");
-    if (!f) { ESP_LOGW(TAG, "nie moge zapisac %s", tmp); return; }
+    if (!f) {
+        int e = errno;
+        ESP_LOGW(TAG, "nie moge zapisac %s (errno=%d)", tmp, e);
+        fs_open_failed(tmp, e);
+        return;
+    }
     // Naglowek v1: magic + version + CRC placeholder (0). Prawdziwe CRC
     // wpisujemy po zakonczeniu zapisu (fseek do 8-go bajta).
     uint32_t magic = METER_MAGIC, ver = METER_VER, crc_placeholder = 0;
@@ -1312,8 +1369,17 @@ static void save_meter(meter_hist_t *m) {
     // Wpisz obliczone CRC w miejscu placeholdera (offset 8 = po magic+ver).
     fseek(f, 8, SEEK_SET);
     fwrite(&crc, sizeof(uint32_t), 1, f);
-    flush_to_flash(f);   // wymuszona synchronizacja z flashem przed rename
-    fclose(f);
+    bool wr_ok = !ferror(f);
+    if (!flush_to_flash(f)) wr_ok = false;   // wymuszona synchronizacja przed rename
+    if (!fs_close(f, tmp)) wr_ok = false;
+    // beta434: niepelny .tmp NIE moze zastapic dobrego pliku. Dotad blad zapisu
+    // konczyl sie usunieciem .bin i podstawieniem ucietej kopii (CRC mismatch
+    // przy starcie). Teraz poprzedni stan zostaje na flashu.
+    if (!wr_ok) {
+        ESP_LOGW(TAG, "zapis %s niepelny - zostaje poprzedni %s", tmp, path);
+        unlink(tmp);
+        return;
+    }
     // SPIFFS ESP-IDF NIE potrafi zrename nad istniejacy plik (POSIX pozwala,
     // SPIFFS zwraca EIO=5). Musimy usunac dst przed rename. Mikrookno miedzy
     // remove i rename (reset zasilania -> tylko .tmp na dysku, brak .bin)
@@ -1325,6 +1391,7 @@ static void save_meter(meter_hist_t *m) {
         return;
     }
     m->last_save_ts = m->last_ts;
+    fs_write_ok();
 }
 
 static bool load_meter(meter_hist_t *m, const char *id) {
@@ -1774,12 +1841,44 @@ static void hist_recover_stale_tmp(void) {
     }
 }
 
+// beta434: ponowne zamontowanie SPIFFS bez restartu - zwalnia uchwyty, ktore
+// system plikow zgubil przy nieudanych zamknieciach. Wolane z miejsc, ktore
+// trzymaja juz s_mutex (zapis historii), wiec zaden inny plik historii nie
+// jest wtedy otwarty. Dane na flashu zostaja nietkniete.
+static void fs_remount(void) {
+    uint32_t now = (uint32_t)time(NULL);
+    if (s_fs_remount_ts && now - s_fs_remount_ts < FS_REMOUNT_MIN_S) return;
+    s_fs_remount_ts = now;
+    s_fs_eio_streak = 0;
+    size_t total = 0, used = 0;
+    esp_spiffs_info("littlefs", &total, &used);
+    ESP_LOGE(TAG, "System plikow nie przyjmuje zapisow (seria EIO, zajete %u/%u B)"
+                  " - ponowne montowanie", (unsigned)used, (unsigned)total);
+    esp_vfs_spiffs_unregister("littlefs");
+    esp_vfs_spiffs_conf_t conf = {
+        .base_path = "/spiffs",
+        .partition_label = "littlefs",
+        .max_files = HIST_MAX_FILES,
+        .format_if_mount_failed = false
+    };
+    esp_err_t ret = esp_vfs_spiffs_register(&conf);
+    if (ret != ESP_OK) {
+        // Bez systemu plikow historia i tak nic nie zapisze - restart to jedyna
+        // droga powrotu (dane z RAM od ostatniego zapisu i tak sa nie do uratowania).
+        ESP_LOGE(TAG, "Ponowne montowanie nieudane (%s) - restart", esp_err_to_name(ret));
+        s_fs_ok = false;
+        esp_restart();
+        return;
+    }
+    ESP_LOGW(TAG, "System plikow zamontowany ponownie - zapisy wznowione");
+}
+
 void history_init(void) {
     s_mutex = xSemaphoreCreateMutex();
     esp_vfs_spiffs_conf_t conf = {
         .base_path = "/spiffs",
         .partition_label = "littlefs",   // partycja z subtype spiffs
-        .max_files = 6,
+        .max_files = HIST_MAX_FILES,     // beta434: bylo 6
         // NIGDY nie formatuj automatycznie: nieudane montowanie (np. brudny
         // stan po twardym resecie) kasowaloby CALA historie wszystkich
         // licznikow. Wolimy prace bez historii i glosny blad w logu.

@@ -112,12 +112,23 @@ static void fs_write_ok(void) { s_fs_eio_streak = 0; }
 // czas zapisow; gdy kilka z rzedu jest wolnych albo nieudanych, przechodzimy w
 // tryb awaryjny: bez plikow stanu h_ (stan i tak odtwarza sie z archiwum) i z
 // rzadszym zapisem archiwow. Stan trwa po restarcie (NVS) az do odbudowy.
-#define FS_SLOW_MS        2000
-#define FS_SLOW_TRIP      3      // tyle wolnych/nieudanych zapisow ...
-#define FS_FAST_RESET     50     // ... zanim 50 szybkich z rzedu wyzeruje licznik
+// beta442: prog i okno. Dotad wystarczyly 3 zapisy dluzsze niz 2 s (licznik
+// zerowal sie dopiero po 50 szybkich), a SPIFFS zapelniony w polowie robi takie
+// przestoje przy porzadkowaniu miejsca regularnie - tryb wlaczal sie bez awarii
+// i trwal do odbudowy, ktora kasowala krzywe 5-min. Teraz: 5 zlych (dluzszych
+// niz 5 s albo nieudanych) w ostatnich 30 zapisach, a 200 dobrych z rzedu
+// wylacza tryb samo.
+#define FS_SLOW_MS        5000
+#define FS_WIN            30     // okno ostatnich zapisow (bity s_fs_win)
+#define FS_BAD_TRIP       5      // tyle zlych w oknie -> tryb awaryjny
+#define FS_GOOD_EXIT      200    // tyle dobrych z rzedu -> koniec trybu awaryjnego
 static bool     s_fs_degraded = false;
-static int      s_fs_slow_n = 0, s_fs_fast_n = 0;
+static uint32_t s_fs_win = 0;        // 1 = zly zapis, najmlodszy na bicie 0
+static int      s_fs_good_run = 0;
 static uint32_t s_fs_worst_ms = 0;
+// beta442: ile zadan czyta teraz pliki z /spiffs poza blokada historii (kopia
+// zapasowa). Ponowne montowanie systemu plikow w tym czasie wyrwaloby im pliki.
+static volatile int s_fs_readers = 0;
 
 static void fs_set_degraded(const char *why) {
     if (s_fs_degraded) return;
@@ -133,18 +144,38 @@ static void fs_set_degraded(const char *why) {
              why, (unsigned)s_fs_worst_ms);
 }
 
+static void fs_clear_degraded(void) {
+    if (!s_fs_degraded) return;
+    s_fs_degraded = false;
+    nvs_handle_t nh;
+    if (nvs_open("sih_fs", NVS_READWRITE, &nh) == ESP_OK) {
+        nvs_set_u8(nh, "degraded", 0);
+        nvs_commit(nh);
+        nvs_close(nh);
+    }
+    ESP_LOGW(TAG, "System plikow znow nadaza (%d sprawnych zapisow z rzedu) - koniec trybu awaryjnego",
+             FS_GOOD_EXIT);
+}
+
 static void fs_note_write(int64_t t0, bool ok, const char *what) {
     uint32_t ms = (uint32_t)((esp_timer_get_time() - t0) / 1000);
     if (ms > s_fs_worst_ms) s_fs_worst_ms = ms;
-    if (!ok || ms > FS_SLOW_MS) {
-        s_fs_fast_n = 0;
-        ESP_LOGW(TAG, "Zapis %s %s (%u ms)", what ? what : "?", ok ? "wolny" : "nieudany", (unsigned)ms);
-        if (++s_fs_slow_n >= FS_SLOW_TRIP) fs_set_degraded(ok ? "wolne zapisy" : "nieudane zapisy");
-    } else if (++s_fs_fast_n >= FS_FAST_RESET) {
-        s_fs_fast_n = 0;
-        s_fs_slow_n = 0;
+    bool bad = !ok || ms > FS_SLOW_MS;
+    s_fs_win = ((s_fs_win << 1) | (bad ? 1u : 0u)) & ((1u << FS_WIN) - 1u);
+    if (bad) {
+        s_fs_good_run = 0;
+        int n = __builtin_popcount(s_fs_win);
+        ESP_LOGW(TAG, "Zapis %s %s (%u ms) - zlych w ostatnich %d: %d",
+                 what ? what : "?", ok ? "wolny" : "nieudany", (unsigned)ms, FS_WIN, n);
+        if (n >= FS_BAD_TRIP) fs_set_degraded(ok ? "wolne zapisy" : "nieudane zapisy");
+    } else if (++s_fs_good_run >= FS_GOOD_EXIT) {
+        s_fs_good_run = 0;
+        if (s_fs_degraded) { s_fs_win = 0; fs_clear_degraded(); }
     }
 }
+
+void history_fs_hold(void)    { __atomic_add_fetch(&s_fs_readers, 1, __ATOMIC_SEQ_CST); }
+void history_fs_release(void) { __atomic_sub_fetch(&s_fs_readers, 1, __ATOMIC_SEQ_CST); }
 
 bool history_fs_degraded(void) { return s_fs_degraded; }
 uint32_t history_fs_worst_ms(void) { return s_fs_worst_ms; }
@@ -321,7 +352,7 @@ static void series_update(hist_bucket_t *arr, int *n, int cap, uint32_t bts, flo
 // (definicja przy pozostalych funkcjach archiwum - potrzebuje safe_key()).
 // beta370: maxfile=false -> hc_*.bin (srednie, jak dotad), true -> hm_*.bin
 // (maksima, plik zakladany dopiero po tej aktualizacji).
-static void curve_archive_append(const char *id, uint32_t bucket_ts, float value,
+static bool curve_archive_append(const char *id, uint32_t bucket_ts, float value,
                                  bool maxfile);
 
 // beta370: series_update dla krzywej - utrzymuje curve[] i curve_max[] w
@@ -791,9 +822,9 @@ static bool arc_validate_repair(const char *path, FILE *f, arc_hdr_t *h) {
 // Dopisz/zaktualizuj punkt godzinowy w archiwum (ring buffer, strumieniowo).
 // NIE wczytuje calego pliku do RAM - tylko naglowek + ostatni rekord.
 // ts_exact = dokladny unix ostatniego odczytu (do naglowka v2).
-static void archive_append_hour(const char *id, uint32_t hour_ts, float total,
+static bool archive_append_hour(const char *id, uint32_t hour_ts, float total,
                                 uint32_t ts_exact) {
-    if (!s_fs_ok) return;
+    if (!s_fs_ok) return false;
     char path[64]; archive_path(id, path, sizeof(path));
 
     arc_hdr_t h;
@@ -804,11 +835,11 @@ static void archive_append_hour(const char *id, uint32_t hour_ts, float total,
             int e = errno;
             ESP_LOGE(TAG, "Archiwum %s: otwarcie nieudane (errno=%d) - pomijam zapis", path, e);
             fs_open_failed(path, e);
-            return;
+            return false;
         }
         // nowy plik - utworz z naglowkiem v2
         f = fopen(path, "w+b");
-        if (!f) { ESP_LOGW(TAG, "nie moge utworzyc archiwum %s", path); return; }
+        if (!f) { ESP_LOGW(TAG, "nie moge utworzyc archiwum %s", path); return false; }
         memset(&h, 0, sizeof(h));
         h.v2 = true; h.v3 = true; h.hdr = ARC_HDR_V3; h.cap = HIST_ARCHIVE_HOURS;
         // beta351: naglowek NATYCHMIAST. Bez tego plik ma 0 B, a zapis pierwszego
@@ -828,7 +859,7 @@ static void archive_append_hour(const char *id, uint32_t hour_ts, float total,
             if (rename(path, "/spiffs/arc_bad.bin") == 0)
                 ESP_LOGE(TAG, "Archiwum %s nieczytelne - odlozone jako arc_bad.bin", path);
             f = fopen(path, "w+b");
-            if (!f) { ESP_LOGW(TAG, "nie moge odtworzyc archiwum %s", path); return; }
+            if (!f) { ESP_LOGW(TAG, "nie moge odtworzyc archiwum %s", path); return false; }
             memset(&h, 0, sizeof(h));
             h.v2 = true; h.v3 = true; h.hdr = ARC_HDR_V3; h.cap = HIST_ARCHIVE_HOURS;
             arc_write_header(f, &h);   // beta351: jak wyzej
@@ -837,7 +868,7 @@ static void archive_append_hour(const char *id, uint32_t hour_ts, float total,
             // Dopiero po niej plik dostaje wieksza pojemnosc ringu.
             fclose(f);
             f = arc_migrate_v3(path, &h);
-            if (!f) { ESP_LOGW(TAG, "migracja archiwum %s nieudana", path); return; }
+            if (!f) { ESP_LOGW(TAG, "migracja archiwum %s nieudana", path); return false; }
         }
     }
     h.last_ts = ts_exact;
@@ -852,14 +883,17 @@ static void archive_append_hour(const char *id, uint32_t hour_ts, float total,
             // ta sama godzina - nadpisz total + swiezy naglowek (dokladny last_ts)
             last.total = total;
             fseek(f, arc_rec_off2(h.hdr, last_phys), SEEK_SET);
-            fwrite(&last, sizeof(last), 1, f);
+            bool ok = fwrite(&last, sizeof(last), 1, f) == 1;
             arc_write_header(f, &h);
+            if (ferror(f)) ok = false;
             // FAZA 3a: wymus flush do flasha przed fclose. Bez tego SPIFFS trzyma
             // rekord w bufferze VFS - reset zasilania w oknie ~kilku sek moglby
             // stracic zapisane odczyty mimo tego ze fclose sam nie flushuje SPIFFS.
-            flush_to_flash(f);
-            fclose(f);
-            return;
+            // beta442: wynik zapisu wraca do wolajacego (tryb awaryjny go liczy).
+            if (!flush_to_flash(f)) ok = false;
+            if (!fs_close(f, path)) ok = false;
+            if (ok) fs_write_ok();
+            return ok;
         }
     }
 
@@ -879,7 +913,7 @@ static void archive_append_hour(const char *id, uint32_t hour_ts, float total,
     if (!arc_seek_rec(f, h.hdr, write_phys)) {
         ESP_LOGE(TAG, "Archiwum %s: rekord %d poza plikiem - pomijam zapis", path, write_phys);
         fclose(f);
-        return;
+        return false;
     }
     size_t wrote = fwrite(&rec, sizeof(rec), 1, f);
     if (wrote != 1 && h.v3 && h.count > 1) {
@@ -896,6 +930,9 @@ static void archive_append_hour(const char *id, uint32_t hour_ts, float total,
         h.head = (h.head + 1) % h.cap;
         if (arc_seek_rec(f, h.hdr, write_phys)) {
             wrote = fwrite(&rec, sizeof(rec), 1, f);
+            // beta442: pierwsza, nieudana proba zostawila flage bledu strumienia -
+            // bez wyczyszczenia udany zapis liczylby sie ponizej jako nieudany.
+            if (wrote == 1) clearerr(f);
             if (wrote == 1)
                 ESP_LOGW(TAG, "Archiwum %s: brak miejsca na flashu - pojemnosc zamrozona "
                               "na %d rekordach, nadpisuje najstarsze", path, h.cap);
@@ -904,11 +941,14 @@ static void archive_append_hour(const char *id, uint32_t hour_ts, float total,
     if (wrote != 1) {
         ESP_LOGE(TAG, "Archiwum %s: zapis rekordu nieudany (errno=%d)", path, errno);
         fclose(f);
-        return;
+        return false;
     }
     arc_write_header(f, &h);
-    flush_to_flash(f);
-    fclose(f);
+    bool ok = !ferror(f);
+    if (!flush_to_flash(f)) ok = false;
+    if (!fs_close(f, path)) ok = false;
+    if (ok) fs_write_ok();
+    return ok;
 }
 
 // ================= FAZA 9b: archiwum krzywej 5-min (hc_*.bin) =================
@@ -981,21 +1021,20 @@ static bool carc_space_for_new_file(const char *id) {
     return false;
 }
 
-static void curve_archive_append(const char *id, uint32_t bucket_ts, float value,
+static bool curve_archive_append(const char *id, uint32_t bucket_ts, float value,
                                  bool maxfile) {
-    if (!s_fs_ok || !id) return;
-    if (bucket_ts < ARC_TS_MIN || bucket_ts > ARC_TS_MAX) return;   // czas niezsynchronizowany
+    if (!s_fs_ok || !id) return false;
+    if (bucket_ts < ARC_TS_MIN || bucket_ts > ARC_TS_MAX) return true;   // czas niezsynchronizowany - nie zapisujemy, ale to nie blad
     char path[64]; curve_archive_path(id, path, sizeof(path), maxfile);
 
     carc_hdr_t h = { 0, 0 };
     errno = 0;
-    errno = 0;
     FILE *f = fopen(path, "r+b");
     if (!f) {
-        if (errno != ENOENT) { fs_open_failed(path, errno); return; }
-        if (!carc_space_for_new_file(id)) return;
+        if (errno != ENOENT) { fs_open_failed(path, errno); return false; }
+        if (!carc_space_for_new_file(id)) return false;
         f = fopen(path, "w+b");
-        if (!f) { ESP_LOGW(TAG, "nie moge utworzyc %s", path); return; }
+        if (!f) { ESP_LOGW(TAG, "nie moge utworzyc %s", path); return false; }
         carc_write_header(f, &h);
     } else if (!carc_read_header(f, &h)) {
         // Nieczytelny naglowek: zaloz ring od nowa. W odroznieniu od ha_ nie
@@ -1004,7 +1043,7 @@ static void curve_archive_append(const char *id, uint32_t bucket_ts, float value
         remove(path);
         ESP_LOGW(TAG, "%s: archiwum 5-min nieczytelne - zakladam od nowa", id);
         f = fopen(path, "w+b");
-        if (!f) return;
+        if (!f) return false;
         h.count = 0; h.head = 0;
         carc_write_header(f, &h);
     }
@@ -1018,16 +1057,16 @@ static void curve_archive_append(const char *id, uint32_t bucket_ts, float value
                 // Ten sam kubelek (domkniecie po wczesniejszym zapisie) - nadpisz.
                 last.total = value;
                 fseek(f, carc_rec_off(last_phys), SEEK_SET);
-                fwrite(&last, sizeof(last), 1, f);
-                flush_to_flash(f);
-                fclose(f);
-                return;
+                bool ok = fwrite(&last, sizeof(last), 1, f) == 1;
+                if (!flush_to_flash(f)) ok = false;
+                if (!fs_close(f, path)) ok = false;
+                return ok;
             }
             if (last.ts > bucket_ts) {
                 // Czas cofnal sie (korekta NTP) - nie psuj monotonicznosci ringu,
                 // bo na niej opiera sie wyszukiwanie binarne przy odczycie doby.
                 fclose(f);
-                return;
+                return true;
             }
         }
     }
@@ -1041,11 +1080,13 @@ static void curve_archive_append(const char *id, uint32_t bucket_ts, float value
         h.count++;
     }
     hist_bucket_t rec = { bucket_ts, value };
-    fseek(f, carc_rec_off(write_phys), SEEK_SET);
-    fwrite(&rec, sizeof(rec), 1, f);
-    carc_write_header(f, &h);
-    flush_to_flash(f);
-    fclose(f);
+    bool ok = fseek(f, carc_rec_off(write_phys), SEEK_SET) == 0 &&
+              fwrite(&rec, sizeof(rec), 1, f) == 1;
+    if (ok) carc_write_header(f, &h);        // naglowek tylko po udanym rekordzie
+    if (ferror(f)) ok = false;
+    if (!flush_to_flash(f)) ok = false;
+    if (!fs_close(f, path)) ok = false;
+    return ok;
 }
 
 // Punkty 5-min dla doby [d0, d1) z archiwum na flashu. Zwraca liczbe punktow.
@@ -1739,7 +1780,8 @@ bool history_fs_rebuild(void) {
 
     // Czysty system plikow - koniec trybu awaryjnego.
     s_fs_degraded = false;
-    s_fs_slow_n = 0;
+    s_fs_win = 0;
+    s_fs_good_run = 0;
     nvs_handle_t nh;
     if (nvs_open("sih_fs", NVS_READWRITE, &nh) == ESP_OK) {
         nvs_set_u8(nh, "degraded", 0);
@@ -1753,56 +1795,44 @@ void history_erase_all(void) {
     // Reset fabryczny: kasuje CALA historie z flasha i liste sledzonych.
     // Konfiguracja siedzi w NVS (nvs_config_reset), ale historia to osobny
     // system plikow - bez tego po resecie zostawaly wykresy i zaznaczone pola.
-    hist_lock(__func__);
-
-    // 1. zwolnij sloty w RAM, zeby nic sie nie zapisalo z powrotem
-    for (int i = 0; i < MAX_HIST_METERS; i++) {
-        if (s_meters[i]) {
-            free_curve(s_meters[i]);
-            free(s_meters[i]);
-            s_meters[i] = NULL;
-        }
+    // beta442: formatowanie partycji zamiast kasowania pliku po pliku. Kasowanie
+    // trzymalo blokade historii, a na zapchanym SPIFFS trwalo dluzej niz 2 min -
+    // straznik historii restartowal modul w polowie (przy przywracaniu kopii:
+    // konfiguracja juz z kopii, historia skasowana tylko czesciowo, kopia niewgrana).
+    if (history_fs_rebuild()) {
+        ESP_LOGW(TAG, "Reset: pamiec historii sformatowana");
+        return;
     }
-    s_tracked_count = 0;
-    memset(s_tracked, 0, sizeof(s_tracked));
-
-    // 2. skasuj pliki historii i liste sledzonych
+    // Formatowanie nieudane - kasujemy pojedynczo, bez blokady: RAM historii jest
+    // juz zwolniony, a s_fs_ok = false, wiec nikt inny tych plikow nie dotknie.
+    ESP_LOGW(TAG, "Reset: formatowanie nieudane - kasuje pliki historii pojedynczo");
     int removed = 0;
-    if (s_fs_ok) {
-        // FAZA 9b: doszedl trzeci plik na pole (hc_ obok h_ i ha_), wiec przy
-        // 24 sledzonych polach lista ofiar nie miesci sie w jednym przebiegu.
-        // Bufor zostaje maly (1.6 KB stosu) - zamiast tego skanujemy katalog
-        // kilka razy, az przestana pojawiac sie pasujace pliki.
-        for (int pass = 0; pass < 6; pass++) {
-            DIR *dir = opendir("/spiffs");
-            if (!dir) break;
-            struct dirent *de;
-            char victims[40][40];
-            int nv = 0;
-            while ((de = readdir(dir)) != NULL && nv < 40) {
-                const char *nm = de->d_name;
-                // "hc_" (archiwum krzywej 5-min) NIE lapie sie na "h_" -
-                // drugi znak rozni sie od '_'; trzeba je wymienic osobno.
-                if (strncmp(nm, "h_", 2) == 0 || strncmp(nm, "ha_", 3) == 0 ||
-                    strncmp(nm, "hc_", 3) == 0 || strncmp(nm, "hm_", 3) == 0 ||
-                    strcmp(nm, "tracked.txt") == 0 || strncmp(nm, "arc_", 4) == 0) {
-                    snprintf(victims[nv], sizeof(victims[0]), "%.39s", nm);
-                    nv++;
-                }
-            }
-            closedir(dir);
-            if (nv == 0) break;
-            // kasujemy PO zamknieciu katalogu - usuwanie w trakcie readdir
-            // potrafi pominac wpisy
-            for (int i = 0; i < nv; i++) {
-                char path[64];
-                snprintf(path, sizeof(path), "/spiffs/%.50s", victims[i]);
-                if (remove(path) == 0) removed++;
+    for (int pass = 0; pass < 6; pass++) {
+        DIR *dir = opendir("/spiffs");
+        if (!dir) break;
+        struct dirent *de;
+        char victims[40][40];
+        int nv = 0;
+        while ((de = readdir(dir)) != NULL && nv < 40) {
+            const char *nm = de->d_name;
+            if (strncmp(nm, "h_", 2) == 0 || strncmp(nm, "ha_", 3) == 0 ||
+                strncmp(nm, "hc_", 3) == 0 || strncmp(nm, "hm_", 3) == 0 ||
+                strcmp(nm, "tracked.txt") == 0 || strncmp(nm, "arc_", 4) == 0) {
+                snprintf(victims[nv], sizeof(victims[0]), "%.39s", nm);
+                nv++;
             }
         }
+        closedir(dir);
+        if (nv == 0) break;
+        // kasujemy PO zamknieciu katalogu - usuwanie w trakcie readdir
+        // potrafi pominac wpisy
+        for (int k = 0; k < nv; k++) {
+            char path[64];
+            snprintf(path, sizeof(path), "/spiffs/%.50s", victims[k]);
+            if (remove(path) == 0) removed++;
+        }
     }
-    hist_unlock();
-    ESP_LOGW(TAG, "Reset fabryczny: skasowano %d plikow historii", removed);
+    ESP_LOGW(TAG, "Reset: skasowano %d plikow historii", removed);
 }
 
 size_t history_free_curves(void) {
@@ -2001,6 +2031,12 @@ static void hist_wd_task(void *arg) {
 // trzymaja juz s_mutex (zapis historii), wiec zaden inny plik historii nie
 // jest wtedy otwarty. Dane na flashu zostaja nietkniete.
 static void fs_remount(void) {
+    // beta442: kopia zapasowa czyta pliki bez blokady historii - odlozone do
+    // nastepnej serii EIO, gdy pobieranie sie skonczy.
+    if (s_fs_readers > 0) {
+        ESP_LOGW(TAG, "Ponowne montowanie odlozone - trwa pobieranie kopii");
+        return;
+    }
     uint32_t now = (uint32_t)time(NULL);
     if (s_fs_remount_ts && now - s_fs_remount_ts < FS_REMOUNT_MIN_S) return;
     s_fs_remount_ts = now;
@@ -2244,14 +2280,15 @@ static void arc_maybe_write(meter_hist_t *m, uint32_t bh, float ft, uint32_t ts_
     uint32_t every = s_fs_degraded ? ARC_WRITE_SLOW_S : ARC_WRITE_S;
     if (!new_hour && ts_unix - m->last_arc_ts < every) return;
     int64_t t0 = esp_timer_get_time();
+    bool ok = true;   // beta442: dotad zawsze true - nieudany zapis liczyl sie jak udany
     if (new_hour && m->last_arc_ts && m->n_hours >= 2) {
         const hist_bucket_t *pv = &m->hours[m->n_hours - 2];
-        if (pv->ts == floor_hour(m->last_arc_ts))
-            archive_append_hour(m->id, pv->ts, pv->total, ts_unix);
+        if (pv->ts == floor_hour(m->last_arc_ts) &&
+            !archive_append_hour(m->id, pv->ts, pv->total, ts_unix)) ok = false;
     }
-    archive_append_hour(m->id, bh, ft, ts_unix);
+    if (!archive_append_hour(m->id, bh, ft, ts_unix)) ok = false;
     m->last_arc_ts = ts_unix;
-    fs_note_write(t0, true, m->id);
+    fs_note_write(t0, ok, m->id);
 }
 
 void history_on_reading(const char *id_hex, double total, int kind, uint32_t ts_unix) {

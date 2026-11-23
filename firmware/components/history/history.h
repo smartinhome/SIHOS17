@@ -163,6 +163,10 @@ bool history_fs_degraded(void);
 uint32_t history_fs_worst_ms(void);   // najdluzszy zapis od startu, ms
 // beta441: formatuje partycje historii przed wgraniem kopii (odbudowa)
 bool history_fs_rebuild(void);
+// beta442: czytanie plikow historii poza modulem historii (kopia zapasowa).
+// Na czas hold ponowne montowanie systemu plikow jest wstrzymane.
+void history_fs_hold(void);
+void history_fs_release(void);
 
 // Diagnostyka: surowy obraz zrodel danych dla klucza i doby (RAM vs archiwum) -
 // co widzi kod przy budowaniu wykresu i co odrzuca. Tylko do debugowania.

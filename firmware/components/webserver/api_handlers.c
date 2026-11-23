@@ -1,8 +1,11 @@
 #include "api_handlers.h"
 #include "auth.h"
+#include "sih_wd.h"
 #include "display_eink.h"
 #include <time.h>
 #include <sys/time.h>
+#include <errno.h>    // beta442: kontrola zapisu przy przywracaniu kopii
+#include <unistd.h>
 #include "wmbus_decoder.h"
 #include "nvs_config.h"
 #include "wifi_manager.h"
@@ -1583,14 +1586,22 @@ static esp_err_t handle_backup_get(httpd_req_t *req) {
             sent += (long)sizeof(cfg->names[0]);
         }
 
-    // pliki: biezaca historia (h_), ARCHIWUM (ha_) i lista sledzonych
-    DIR *dir = opendir("/spiffs");
-    if (dir) {
+    // pliki: biezaca historia (h_), ARCHIWUM (ha_), lista sledzonych, a od
+    // beta442 takze krzywe 5-min (hc_) i ich maksima (hm_). Bez nich odbudowa
+    // systemu plikow kasowala 90 dni wykresow 5-minutowych. Dwa przebiegi:
+    // najpierw pliki niezbedne do slupkow godzinowych, krzywe na koncu - gdyby
+    // pobieranie sie urwalo, kopia ma przynajmniej to, co najwazniejsze.
+    history_fs_hold();
+    for (int pass = 0; pass < 2; pass++) {
+        DIR *dir = opendir("/spiffs");
+        if (!dir) break;
         struct dirent *de;
         while ((de = readdir(dir)) != NULL) {
             const char *nm = de->d_name;
-            if (strncmp(nm, "h_", 2) != 0 && strncmp(nm, "ha_", 3) != 0 &&
-                strcmp(nm, "tracked.txt") != 0) continue;
+            bool core  = strncmp(nm, "h_", 2) == 0 || strncmp(nm, "ha_", 3) == 0 ||
+                         strcmp(nm, "tracked.txt") == 0;
+            bool curve = strncmp(nm, "hc_", 3) == 0 || strncmp(nm, "hm_", 3) == 0;
+            if (pass == 0 ? !core : !curve) continue;
             char path[96];
             snprintf(path, sizeof(path), "/spiffs/%.80s", nm);
             FILE *f = fopen(path, "rb");
@@ -1599,6 +1610,7 @@ static esp_err_t handle_backup_get(httpd_req_t *req) {
             long fsz = ftell(f);
             fseek(f, 0, SEEK_SET);
             if (fsz <= 0) { fclose(f); continue; }
+            sih_wd_http_enter(req->uri);   // kopia ~2,5 MB idzie dlugo - kazdy plik to postep
             uint8_t nlen = (uint8_t)strlen(nm);
             uint32_t dlen = (uint32_t)fsz;
             pos = 0;
@@ -1615,14 +1627,26 @@ static esp_err_t handle_backup_get(httpd_req_t *req) {
                 sent += rd;
                 left -= rd;
             }
+            // Plik krotszy niz zapowiedziany rozmiar rozjechalby caly format kopii -
+            // dopelniamy zerami (przy odtwarzaniu plik i tak zostanie sprawdzony).
+            if (left > 0) {
+                ESP_LOGW(TAG, "Kopia: %s odczytany czesciowo (brakuje %ld B)", nm, left);
+                memset(ch, 0, CH);
+                while (left > 0) {
+                    int z = (left > CH) ? CH : (int)left;
+                    httpd_resp_send_chunk(req, ch, z);
+                    sent += z; left -= z;
+                }
+            }
             fclose(f);
         }
         closedir(dir);
     }
+    history_fs_release();
     uint8_t endmark = 0;
     httpd_resp_send_chunk(req, (const char *)&endmark, 1); sent += 1;
     httpd_resp_send_chunk(req, NULL, 0);   // zamknij strumien
-    ESP_LOGI(TAG, "Backup wyeksportowany: %ld B (z archiwum)", sent);
+    ESP_LOGI(TAG, "Backup wyeksportowany: %ld B (cala historia)", sent);
     free(ch);
     return ESP_OK;
 }
@@ -1662,14 +1686,11 @@ static esp_err_t handle_backup_post(httpd_req_t *req) {
     int restored = 0;
     long bytes = 0;
     uint8_t mc = 0;
-    // beta441: ?rebuild=1 - odbudowa: format partycji historii zamiast kasowania plikow
-    bool rebuild = false;
-    {
-        char q[32] = {0}, v[4] = {0};
-        if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK &&
-            httpd_query_key_value(q, "rebuild", v, sizeof(v)) == ESP_OK && v[0] == '1')
-            rebuild = true;
-    }
+    // beta442: zawsze formatowanie partycji (parametr ?rebuild=1 z bety 441 jest
+    // ignorowany, oba przyciski robia to samo). Liczniki zapisu - zeby nieudany
+    // zapis pliku nie konczyl sie komunikatem "przywrocono".
+    bool formatted = false;
+    int failed = 0;
 
     char hdr[5];
     if (!bk_read(req, hdr, 5, ring, CH, &rlen, &rpos)) goto bad;
@@ -1712,20 +1733,22 @@ static esp_err_t handle_backup_post(httpd_req_t *req) {
         }
         cfg.pins_migrated = true;
     }
-    nvs_config_save(&cfg);
+    // beta442: konfiguracje zapisujemy DOPIERO po wgraniu historii. Dotad szla
+    // na poczatku - przerwane wgrywanie zostawialo konfiguracje z kopii i
+    // historie bez kopii.
 
     // Wyczysc dotychczasowa historie PRZED wgraniem kopii - inaczej stare pliki
     // zostaja i przy budowaniu wykresu mieszaja sie z przywroconymi (stany
     // licznika z dwoch roznych momentow dawaly absurdalne slupki).
-    if (rebuild) {
-        if (!history_fs_rebuild()) {
-            free(ring); free(tmp);
-            resp_err(req, "formatowanie pamieci historii nieudane");
-            return ESP_OK;
-        }
-    } else {
-        history_erase_all();
+    // beta442: zawsze formatowanie - kasowanie pliku po pliku trzymalo blokade
+    // historii dluzej, niz pozwala jej straznik (restart w polowie przywracania).
+    if (!history_fs_rebuild()) {
+        free(ring); free(tmp);
+        resp_err(req, "formatowanie pamieci historii nieudane");
+        return ESP_OK;
     }
+    formatted = true;
+    sih_wd_http_enter(req->uri);   // formatowanie trwa do minuty - liczymy od nowa
 
     while (1) {
         uint8_t nlen;
@@ -1756,6 +1779,8 @@ static esp_err_t handle_backup_post(httpd_req_t *req) {
             // Whitelist prefiksow zgodna z backup_get.
             bool allowed = (strncmp(nm, "h_", 2) == 0)
                         || (strncmp(nm, "ha_", 3) == 0)
+                        || (strncmp(nm, "hc_", 3) == 0)     // beta442: krzywe 5-min
+                        || (strncmp(nm, "hm_", 3) == 0)     // beta442: ich maksima
                         || (strcmp(nm, "tracked.txt") == 0);
             if (!allowed) nm_ok = false;
         }
@@ -1765,7 +1790,9 @@ static esp_err_t handle_backup_post(httpd_req_t *req) {
         }
         char path[96];
         snprintf(path, sizeof(path), "/spiffs/%.80s", nm);
+        sih_wd_http_enter(req->uri);   // kazdy plik to postep dla straznika WWW
         FILE *f = fopen(path, "wb");
+        bool wok = (f != NULL);
         uint32_t left = dlen;
         while (left > 0) {
             int want = (left > (uint32_t)CH) ? CH : (int)left;
@@ -1773,24 +1800,50 @@ static esp_err_t handle_backup_post(httpd_req_t *req) {
                 if (f) fclose(f);
                 goto bad;
             }
-            if (f) fwrite(tmp, 1, want, f);
+            if (wok && fwrite(tmp, 1, want, f) != (size_t)want) wok = false;
             left -= (uint32_t)want; bytes += want;
         }
-        if (f) { fclose(f); restored++; }
+        // beta442: dotad plik liczyl sie jako przywrocony takze wtedy, gdy zapis
+        // na flash sie nie udal.
+        if (f && fflush(f) != 0) wok = false;
+        if (f && fclose(f) != 0) wok = false;
+        if (wok) {
+            restored++;
+        } else {
+            failed++;
+            ESP_LOGE(TAG, "Przywracanie: zapis %s nieudany (errno=%d)", nm, errno);
+            unlink(path);   // niepelny plik nie moze udawac historii
+        }
     }
+    nvs_config_save(&cfg);   // beta442: dopiero po wgraniu wszystkich plikow
 
     // Znacznik: po restarcie pierwsza ramka ma zaczac biezaca dobe od nowa.
     history_mark_rebase();
-    ESP_LOGI(TAG, "Backup przywrocony: %d licznikow, %d plikow, %ld B",
-             mc, restored, bytes);
+    ESP_LOGI(TAG, "Backup przywrocony: %d licznikow, %d plikow, %ld B, nieudanych %d",
+             mc, restored, bytes, failed);
     free(ring); free(tmp);
-    resp_ok(req);
+    if (failed) {
+        char em[96];
+        snprintf(em, sizeof(em), "nie zapisano %d z %d plikow - po restarcie powtorz z tym samym plikiem",
+                 failed, failed + restored);
+        resp_err(req, em);
+    } else {
+        resp_ok(req);
+    }
     vTaskDelay(pdMS_TO_TICKS(500));
     esp_restart();   // restart wczyta przywrocona konfiguracje i historie
     return ESP_OK;
 
 bad:
     free(ring); free(tmp);
+    if (formatted) {
+        // beta442: pamiec juz sformatowana, a kopia urwana. Bez restartu historia
+        // zostalaby wylaczona do nastepnego uruchomienia.
+        resp_err(req, "wgrywanie przerwane - po restarcie powtorz z tym samym plikiem");
+        vTaskDelay(pdMS_TO_TICKS(500));
+        esp_restart();
+        return ESP_OK;
+    }
     resp_err(req, "zly plik kopii");
     return ESP_OK;
 }

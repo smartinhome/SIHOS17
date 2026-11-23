@@ -1334,8 +1334,25 @@ static uint32_t hist_crc32_update(uint32_t crc, const void *data, size_t len) {
     return ~crc;
 }
 
+// beta439: tryb awaryjny - bez zapisu plikow stanu h_. Na module z
+// uszkodzonym SPIFFS zalozenie nowego pliku (.tmp) zatrzymywalo caly modul
+// tuz po starcie (log bety 438: "zapis stanu ... - start" bez "OK"). Dopisywanie
+// do istniejacych archiwow dziala, a od bety 434 stan po starcie odtwarza sie
+// z archiwum godzinowego (do 7 dni), wiec historia zapisuje sie dalej.
+// Wlaczymy z powrotem po odbudowie systemu plikow.
+#define HIST_SAVE_STATE 0
+
 static void save_meter(meter_hist_t *m) {
     if (!s_fs_ok) return;
+#if !HIST_SAVE_STATE
+    static bool s_nosave_logged = false;
+    if (!s_nosave_logged) {
+        s_nosave_logged = true;
+        ESP_LOGW(TAG, "Zapis plikow stanu wylaczony (tryb awaryjny) - historia zapisuje sie w archiwach godzinowych");
+    }
+    m->last_save_ts = m->last_ts;   // nie probuj ponownie przy kazdej ramce
+    return;
+#endif
     char path[64]; meter_path(m->id, path, sizeof(path));
     // Atomic write: zapis do .tmp, potem fsync + rename. Reset zasilania w
     // srodku fwrite() zostawia .tmp jako smiec (zignorowany przy starcie),

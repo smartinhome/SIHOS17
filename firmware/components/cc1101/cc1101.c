@@ -404,6 +404,9 @@ static void rx_fifo_read(uint8_t *dst, size_t n){
     if(n) read_fifo_burst(dst, n);
 }
 
+static int      s_no_resp = 0;   // beta437: kolejne odczyty 0xFF
+static uint32_t s_reinit = 0;
+
 static void rx_task(void *arg) {
     uint8_t  rxbuf[MAX_FRAME_SIZE];
     uint8_t  decoded[MAX_FRAME_SIZE];
@@ -431,10 +434,10 @@ static void rx_task(void *arg) {
         // kod zdazyl je oproznic. Ramki do 64 B to nie dotyczy, dluzsze ginely
         // okolo raz na 10.
         int waited = 0;
-        bool got_header = false;
+        bool got_header = false, no_resp = false;
         while (waited < 1000) {
             uint8_t st = read_status(ST_RXBYTES);
-            if (st == 0xFF) break;
+            if (st == 0xFF) { no_resp = true; break; }
             if (st & 0x80) {                      // overflow
                 ESP_LOGW(TAG, "Przepelnienie FIFO przed odczytem naglowka - ramka stracona");
                 strobe(S_SFRX);
@@ -444,7 +447,23 @@ static void rx_task(void *arg) {
             vTaskDelay(pdMS_TO_TICKS(2));
             waited++;
         }
-        if (!got_header) continue;
+        if (!got_header) {
+            // beta437: radio nie odpowiada (status 0xFF). Dotad petla wracala na
+            // poczatek BEZ pauzy i krecila sie bez konca z priorytetem 7 - radio
+            // milklo, a reszta modulu byla zaglodzona. Teraz pauza, a po ~1 s
+            // ciszy ponowna konfiguracja ukladu.
+            if (no_resp) {
+                if (++s_no_resp >= 50) {
+                    s_no_resp = 0;
+                    ESP_LOGE(TAG, "CC1101 nie odpowiada - ponowna konfiguracja (razem %u)",
+                             (unsigned)++s_reinit);
+                    configure_wmbus();
+                }
+                vTaskDelay(pdMS_TO_TICKS(20));
+            }
+            continue;
+        }
+        s_no_resp = 0;
 
         // ---- Naglowek: odczytaj 3 bajty, zdekoduj 3of6 by poznac L-field ----
         uint8_t header[4];

@@ -458,7 +458,8 @@ static esp_err_t handle_status(httpd_req_t *req) {
         "\"wifi_state\":\"%s\",\"wifi_rssi\":%d,"
         "\"ssid\":\"%s\",\"wifi_ch\":%d,"
         "\"wifi_disc_reason\":%d,"
-        "\"ip\":\"%s\",\"meter_count\":%d,\"partition\":\"%s\"}",
+        "\"ip\":\"%s\",\"meter_count\":%d,\"partition\":\"%s\","
+        "\"fs_degraded\":%s}",
         ota_get_running_version(),
         esp_timer_get_time() / 1000,
         wifi_str[ws],
@@ -468,7 +469,8 @@ static esp_err_t handle_status(httpd_req_t *req) {
         wifi_manager_last_disc_reason(),
         ip,
         wmbus_decoder_get_seen_count(),
-        ota_get_partition_label()
+        ota_get_partition_label(),
+        history_fs_degraded() ? "true" : "false"
     );
     // Doklej stan MQTT i czas modulu - pasek naglowka pokazuje je na kazdej
     // podstronie, wiec musza przyjsc razem ze statusem, bez osobnego zapytania.
@@ -1660,6 +1662,14 @@ static esp_err_t handle_backup_post(httpd_req_t *req) {
     int restored = 0;
     long bytes = 0;
     uint8_t mc = 0;
+    // beta441: ?rebuild=1 - odbudowa: format partycji historii zamiast kasowania plikow
+    bool rebuild = false;
+    {
+        char q[32] = {0}, v[4] = {0};
+        if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK &&
+            httpd_query_key_value(q, "rebuild", v, sizeof(v)) == ESP_OK && v[0] == '1')
+            rebuild = true;
+    }
 
     char hdr[5];
     if (!bk_read(req, hdr, 5, ring, CH, &rlen, &rpos)) goto bad;
@@ -1707,7 +1717,15 @@ static esp_err_t handle_backup_post(httpd_req_t *req) {
     // Wyczysc dotychczasowa historie PRZED wgraniem kopii - inaczej stare pliki
     // zostaja i przy budowaniu wykresu mieszaja sie z przywroconymi (stany
     // licznika z dwoch roznych momentow dawaly absurdalne slupki).
-    history_erase_all();
+    if (rebuild) {
+        if (!history_fs_rebuild()) {
+            free(ring); free(tmp);
+            resp_err(req, "formatowanie pamieci historii nieudane");
+            return ESP_OK;
+        }
+    } else {
+        history_erase_all();
+    }
 
     while (1) {
         uint8_t nlen;

@@ -1710,6 +1710,45 @@ static void tracked_load(void) {
     fclose(f);
 }
 
+// beta441: odbudowa systemu plikow z kopii. Zamiast kasowac pliki jeden po
+// drugim (na zapchanym SPIFFS to tez trwa i sie nie udaje) formatujemy cala
+// partycje; potem handle_backup_post wgrywa pliki z kopii na czysty system
+// plikow i restartuje modul. RAM historii zwalniamy pod blokada, a samo
+// formatowanie (do minuty) idzie juz bez niej - inaczej straznik historii
+// uznalby to za zawieszenie. Do restartu historia nie dotyka plikow.
+bool history_fs_rebuild(void) {
+    hist_lock(__func__);
+    for (int i = 0; i < MAX_HIST_METERS; i++) {
+        if (s_meters[i]) {
+            free_curve(s_meters[i]);
+            free(s_meters[i]);
+            s_meters[i] = NULL;
+        }
+    }
+    s_tracked_count = 0;
+    memset(s_tracked, 0, sizeof(s_tracked));
+    s_fs_ok = false;
+    hist_unlock();
+
+    ESP_LOGW(TAG, "Odbudowa: formatowanie pamieci historii (do minuty)...");
+    int64_t t0 = esp_timer_get_time();
+    esp_err_t r = esp_spiffs_format("littlefs");
+    ESP_LOGW(TAG, "Odbudowa: formatowanie %s po %u s", esp_err_to_name(r),
+             (unsigned)((esp_timer_get_time() - t0) / 1000000));
+    if (r != ESP_OK) return false;
+
+    // Czysty system plikow - koniec trybu awaryjnego.
+    s_fs_degraded = false;
+    s_fs_slow_n = 0;
+    nvs_handle_t nh;
+    if (nvs_open("sih_fs", NVS_READWRITE, &nh) == ESP_OK) {
+        nvs_set_u8(nh, "degraded", 0);
+        nvs_commit(nh);
+        nvs_close(nh);
+    }
+    return true;
+}
+
 void history_erase_all(void) {
     // Reset fabryczny: kasuje CALA historie z flasha i liste sledzonych.
     // Konfiguracja siedzi w NVS (nvs_config_reset), ale historia to osobny

@@ -1,3 +1,4 @@
+#include "sih_wd.h"
 #include "auth.h"
 #include <string.h>
 #include <stdio.h>
@@ -374,13 +375,20 @@ static void status_json(int si, char *out, size_t cap) {
 
 esp_err_t auth_gate(httpd_req_t *req) {
     esp_err_t (*h)(httpd_req_t *) = (esp_err_t (*)(httpd_req_t *))req->user_ctx;
+    sih_wd_http_enter(req->uri);   // beta436: straznik widzi, co obsluguje WWW
     LOCK();
     bool ok = !s_cfg.enabled || ses_find(req) >= 0;
     UNLOCK();
-    if (ok) return h(req);
-    send_json(req, "401 Unauthorized", "{\"error\":\"auth\"}");
-    // Duza tresc (np. plik firmware) - zamknij polaczenie zamiast ja wczytywac.
-    return (req->content_len > 2048) ? ESP_FAIL : ESP_OK;
+    esp_err_t r;
+    if (ok) {
+        r = h(req);
+    } else {
+        send_json(req, "401 Unauthorized", "{\"error\":\"auth\"}");
+        // Duza tresc (np. plik firmware) - zamknij polaczenie zamiast ja wczytywac.
+        r = (req->content_len > 2048) ? ESP_FAIL : ESP_OK;
+    }
+    sih_wd_http_leave();
+    return r;
 }
 
 // Tekst pola JSON albo NULL (bez zaleznosci od wersji cJSON).

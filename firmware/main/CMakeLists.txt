@@ -14,6 +14,7 @@ idf_component_register(
         ota_manager
         nvs_config
         log_buffer
+        sih_wd
         nvs_flash
         esp_wifi
         esp_netif

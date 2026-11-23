@@ -5,6 +5,7 @@
 #include "esphome_api.h"
 #include "history.h"
 #include "led_rx.h"
+#include "sih_wd.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include <time.h>
@@ -236,7 +237,10 @@ static void worker_task(void *arg) {
     static wmbus_frame_t frame;       // 520 B - statyczny, nie na stosie
     int cnt = 0;
     while (1) {
-        if (xQueueReceive(s_frame_q, &frame, portMAX_DELAY) != pdTRUE) continue;
+        // beta436: czekamy najwyzej 5 s, zeby straznik widzial, ze zadanie zyje
+        sih_wd_worker_stage(NULL);
+        sih_wd_worker_alive();
+        if (xQueueReceive(s_frame_q, &frame, pdMS_TO_TICKS(5000)) != pdTRUE) continue;
         process_frame(&frame);
         // Ta sama diagnostyka co w rx_task: minimalny wolny stos co 50 ramek.
         // Stos 8 KB jest dobrany z zapasem; te liczby pozwola go przyciac.
@@ -413,6 +417,7 @@ static void process_frame(const wmbus_frame_t *frame) {
         char c1_id[12];
         parse_meter_id(frame->data, c1_id, sizeof(c1_id));
         if (!c1_id[0]) return;
+        sih_wd_worker_stage("filtr C1");
         if (!c1_frame_wanted(c1_id)) { seen_add(c1_id); return; }
     }
 
@@ -477,6 +482,7 @@ static void process_frame(const wmbus_frame_t *frame) {
 
     // Zachowaj surową ramkę do bufora (nawet jeśli dekoder jej nie rozpozna)
     xSemaphoreTake(s_mutex, portMAX_DELAY);
+    sih_wd_worker_stage("bufor ramek");
     store_raw_frame(frame);
     xSemaphoreGive(s_mutex);
 
@@ -490,6 +496,7 @@ static void process_frame(const wmbus_frame_t *frame) {
     // a blok historii ponizej korzysta z nich wprost.
     mtf_field_t fields[MTF_MAX_FIELDS];
     int nf = 0, kind = 0;
+    sih_wd_worker_stage("dekodowanie");
     if (!decode_frame(frame->data, frame->len, &tmp, fields, &nf, &kind)) {
         ESP_LOGW(TAG, "Nie można zdekodować ramki");
         return;
@@ -498,6 +505,7 @@ static void process_frame(const wmbus_frame_t *frame) {
     seen_add(tmp.id_hex);   // licz KAZDY uslyszany licznik, nie tylko 8 aktywnych
 
     // Sygnalizuj w logach jesli licznik zaszyfrowany a brak klucza
+    sih_wd_worker_stage("konfiguracja");
     check_encryption_key(frame->data, frame->len, tmp.id_hex);
 
     // --- HISTORIA 24/7: wyciagnij wszystkie pola i zapisz sledzone ---
@@ -510,22 +518,27 @@ static void process_frame(const wmbus_frame_t *frame) {
             bool mq_any = false;
             for (int i = 0; i < nf; i++) {
                 // zapis tylko sledzonych pol (filtr w history_on_field)
+                sih_wd_worker_stage("historia");
                 history_on_field(tmp.id_hex, fields[i].field, fields[i].value,
                                  kind, fields[i].cumulative, ts_unix);
                 // Publikacja przez MQTT - kolejkuje i wraca, nie blokuje odbioru.
+                sih_wd_worker_stage("MQTT");
                 if (mqtt_pub_field(tmp.id_hex, fields[i].field, fields[i].value,
                                    fields[i].unit, frame->rssi, kind))
                     mq_any = true;
                 // beta390: to samo pole dla Home Assistanta przez API ESPHome.
+                sih_wd_worker_stage("ESPHome");
                 esphome_api_field(tmp.id_hex, fields[i].field, fields[i].value,
                                   fields[i].unit, kind);
             }
             // beta389: RSSI tylko dla licznikow, z ktorych cos publikujemy.
+            sih_wd_worker_stage("MQTT RSSI");
             if (mq_any) mqtt_pub_rssi(tmp.id_hex, frame->rssi);
         }
     }
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
+    sih_wd_worker_stage("lista licznikow");
     meter_data_t *m = find_or_create(tmp.id_hex);
     if (m) {
         m->rssi      = tmp.rssi;

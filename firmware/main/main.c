@@ -20,11 +20,13 @@
 #include "esp_netif.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "sih_wd.h"
 
 static const char *TAG = "MAIN";
 
 void app_main(void) {
     log_buffer_init();
+    sih_wd_init();   // beta436: raport z poprzedniego restartu + straznik zawieszen
     // Strefa czasowa RAZ, na samym starcie. Wczesniej ustawialy ja tylko dwie
     // sciezki warunkowe (polaczenie z siecia domowa oraz pierwsze ustawienie
     // czasu z przegladarki), wiec w trybie AP - albo po restarcie z zachowanym

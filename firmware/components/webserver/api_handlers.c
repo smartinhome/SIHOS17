@@ -1254,7 +1254,8 @@ static esp_err_t handle_ota_upload(httpd_req_t *req) {
     if (esp_ota_begin(part, OTA_WITH_SEQUENTIAL_WRITES, &h) != ESP_OK) {
         free(buf); resp_err(req, "esp_ota_begin nieudane"); return ESP_OK;
     }
-    history_flush();   // nie trac krzywej dnia przy aktualizacji
+    // beta436: bez history_flush() - zawieszony zapis systemu plikow blokowal
+    // aktualizacje. Stan i tak zapisuje sie co 15 min i przy kazdej pelnej godzinie.
 
     size_t got = 0;
     bool ok = true;
@@ -1300,7 +1301,8 @@ static esp_err_t handle_ota_github(httpd_req_t *req) {
         if (httpd_query_key_value(query, "tag", tag, sizeof(tag)) != ESP_OK) tag[0] = 0;
     }
     resp_ok(req);
-    history_flush();   // nie trac krzywej dnia przy aktualizacji
+    // beta436: bez history_flush() - zawieszony zapis systemu plikow blokowal
+    // aktualizacje. Stan i tak zapisuje sie co 15 min i przy kazdej pelnej godzinie.
     ota_start_from_github(beta, tag);
     return ESP_OK;
 }

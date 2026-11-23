@@ -15,9 +15,9 @@
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"    // pomiar zapisow (beta438/440)
 #include "esp_system.h"   // esp_restart (beta434)
 #include "esp_attr.h"     // RTC_NOINIT_ATTR (beta434)
-#include "esp_timer.h"    // czas sprawdzania SPIFFS (beta438)
 #include "freertos/task.h"
 
 // FAZA 3a: helper do atomic write. Przyjmuje docelowa sciezke z ".bin" na koncu,
@@ -105,6 +105,49 @@ static void fs_open_failed(const char *path, int err) {
     if (s_fs_eio_streak >= FS_EIO_REMOUNT) fs_remount();
 }
 static void fs_write_ok(void) { s_fs_eio_streak = 0; }
+
+// beta440: SPIFFS przy ciaglym przepisywaniu plikow z czasem przestaje nadazac
+// ze sprzataniem - zapis trwa sekundy, a zalozenie nowego pliku potrafi zajac
+// kilkanascie sekund i sie nie udac (modul wygladal na zawieszony). Mierzymy
+// czas zapisow; gdy kilka z rzedu jest wolnych albo nieudanych, przechodzimy w
+// tryb awaryjny: bez plikow stanu h_ (stan i tak odtwarza sie z archiwum) i z
+// rzadszym zapisem archiwow. Stan trwa po restarcie (NVS) az do odbudowy.
+#define FS_SLOW_MS        2000
+#define FS_SLOW_TRIP      3      // tyle wolnych/nieudanych zapisow ...
+#define FS_FAST_RESET     50     // ... zanim 50 szybkich z rzedu wyzeruje licznik
+static bool     s_fs_degraded = false;
+static int      s_fs_slow_n = 0, s_fs_fast_n = 0;
+static uint32_t s_fs_worst_ms = 0;
+
+static void fs_set_degraded(const char *why) {
+    if (s_fs_degraded) return;
+    s_fs_degraded = true;
+    nvs_handle_t nh;
+    if (nvs_open("sih_fs", NVS_READWRITE, &nh) == ESP_OK) {
+        nvs_set_u8(nh, "degraded", 1);
+        nvs_commit(nh);
+        nvs_close(nh);
+    }
+    ESP_LOGE(TAG, "System plikow nie nadaza (%s, najdluzszy zapis %u ms) - tryb awaryjny: "
+                  "bez plikow stanu, archiwa rzadziej. Potrzebna odbudowa systemu plikow.",
+             why, (unsigned)s_fs_worst_ms);
+}
+
+static void fs_note_write(int64_t t0, bool ok, const char *what) {
+    uint32_t ms = (uint32_t)((esp_timer_get_time() - t0) / 1000);
+    if (ms > s_fs_worst_ms) s_fs_worst_ms = ms;
+    if (!ok || ms > FS_SLOW_MS) {
+        s_fs_fast_n = 0;
+        ESP_LOGW(TAG, "Zapis %s %s (%u ms)", what ? what : "?", ok ? "wolny" : "nieudany", (unsigned)ms);
+        if (++s_fs_slow_n >= FS_SLOW_TRIP) fs_set_degraded(ok ? "wolne zapisy" : "nieudane zapisy");
+    } else if (++s_fs_fast_n >= FS_FAST_RESET) {
+        s_fs_fast_n = 0;
+        s_fs_slow_n = 0;
+    }
+}
+
+bool history_fs_degraded(void) { return s_fs_degraded; }
+uint32_t history_fs_worst_ms(void) { return s_fs_worst_ms; }
 // Tyle samo, ile MAX_TRACKED - inaczej czesc sledzonych pol nie dostawala
 // slotu i po cichu nie miala historii (Amiplus daje ~20 pol po becie 257).
 // Sloty sa alokowane NA ZADANIE, wiec zapas nie kosztuje RAM dopoki nieuzyty.
@@ -1334,25 +1377,8 @@ static uint32_t hist_crc32_update(uint32_t crc, const void *data, size_t len) {
     return ~crc;
 }
 
-// beta439: tryb awaryjny - bez zapisu plikow stanu h_. Na module z
-// uszkodzonym SPIFFS zalozenie nowego pliku (.tmp) zatrzymywalo caly modul
-// tuz po starcie (log bety 438: "zapis stanu ... - start" bez "OK"). Dopisywanie
-// do istniejacych archiwow dziala, a od bety 434 stan po starcie odtwarza sie
-// z archiwum godzinowego (do 7 dni), wiec historia zapisuje sie dalej.
-// Wlaczymy z powrotem po odbudowie systemu plikow.
-#define HIST_SAVE_STATE 0
-
-static void save_meter(meter_hist_t *m) {
-    if (!s_fs_ok) return;
-#if !HIST_SAVE_STATE
-    static bool s_nosave_logged = false;
-    if (!s_nosave_logged) {
-        s_nosave_logged = true;
-        ESP_LOGW(TAG, "Zapis plikow stanu wylaczony (tryb awaryjny) - historia zapisuje sie w archiwach godzinowych");
-    }
-    m->last_save_ts = m->last_ts;   // nie probuj ponownie przy kazdej ramce
-    return;
-#endif
+static bool save_meter_raw(meter_hist_t *m) {
+    if (!s_fs_ok) return false;
     char path[64]; meter_path(m->id, path, sizeof(path));
     // Atomic write: zapis do .tmp, potem fsync + rename. Reset zasilania w
     // srodku fwrite() zostawia .tmp jako smiec (zignorowany przy starcie),
@@ -1370,7 +1396,7 @@ static void save_meter(meter_hist_t *m) {
         int e = errno;
         ESP_LOGW(TAG, "nie moge zapisac %s (errno=%d)", tmp, e);
         fs_open_failed(tmp, e);
-        return;
+        return false;
     }
     // Naglowek v1: magic + version + CRC placeholder (0). Prawdziwe CRC
     // wpisujemy po zakonczeniu zapisu (fseek do 8-go bajta).
@@ -1431,7 +1457,7 @@ static void save_meter(meter_hist_t *m) {
     if (!wr_ok) {
         ESP_LOGW(TAG, "zapis %s niepelny - zostaje poprzedni %s", tmp, path);
         unlink(tmp);
-        return;
+        return false;
     }
     // SPIFFS ESP-IDF NIE potrafi zrename nad istniejacy plik (POSIX pozwala,
     // SPIFFS zwraca EIO=5). Musimy usunac dst przed rename. Mikrookno miedzy
@@ -1441,11 +1467,26 @@ static void save_meter(meter_hist_t *m) {
     if (rename(tmp, path) != 0) {
         ESP_LOGW(TAG, "atomic rename %s -> %s nieudany (errno=%d)", tmp, path, errno);
         unlink(tmp);   // sprzatnij smiec, historia zostaje w starym .bin (juz usuniety!)
-        return;
+        return false;
     }
     m->last_save_ts = m->last_ts;
     fs_write_ok();
     if (lg) ESP_LOGI(TAG, "zapis stanu %s - OK", m->id);
+    return true;
+}
+
+static void save_meter(meter_hist_t *m) {
+    if (s_fs_degraded) {
+        static bool s_logged = false;
+        if (!s_logged) {
+            s_logged = true;
+            ESP_LOGW(TAG, "Tryb awaryjny: pliki stanu nie sa zapisywane - historia idzie do archiwow");
+        }
+        return;
+    }
+    int64_t t0 = esp_timer_get_time();
+    bool ok = save_meter_raw(m);
+    fs_note_write(t0, ok, m->id);
 }
 
 static bool load_meter(meter_hist_t *m, const char *id) {
@@ -2016,6 +2057,13 @@ void history_init(void) {
             }
             nvs_close(nh);
         }
+        if (nvs_open("sih_fs", NVS_READONLY, &nh) == ESP_OK) {
+            uint8_t dg = 0;
+            if (nvs_get_u8(nh, "degraded", &dg) == ESP_OK && dg) s_fs_degraded = true;
+            nvs_close(nh);
+        }
+        if (s_fs_degraded)
+            ESP_LOGW(TAG, "Tryb awaryjny systemu plikow (z poprzedniej pracy) - potrzebna odbudowa");
         if (run) {
             size_t t0 = 0, u0 = 0, t1 = 0, u1 = 0;
             esp_spiffs_info("littlefs", &t0, &u0);
@@ -2146,6 +2194,27 @@ static meter_hist_t *get_or_load(const char *id, bool create_if_missing) {
 }
 
 // ---------- Glowne wejscie: nowy odczyt ----------
+// beta440: archiwum godzinowe co 5 min (w trybie awaryjnym co 15 min) zamiast
+// co minute. Przy zmianie godziny najpierw domykamy poprzednia godzine jej
+// ostatnim stanem z RAM, zeby rekord godziny nie byl o te minuty nieaktualny.
+#define HIST_SAVE_S      3600
+#define ARC_WRITE_S      300
+#define ARC_WRITE_SLOW_S 900
+static void arc_maybe_write(meter_hist_t *m, uint32_t bh, float ft, uint32_t ts_unix) {
+    bool new_hour = floor_hour(ts_unix) != floor_hour(m->last_arc_ts);
+    uint32_t every = s_fs_degraded ? ARC_WRITE_SLOW_S : ARC_WRITE_S;
+    if (!new_hour && ts_unix - m->last_arc_ts < every) return;
+    int64_t t0 = esp_timer_get_time();
+    if (new_hour && m->last_arc_ts && m->n_hours >= 2) {
+        const hist_bucket_t *pv = &m->hours[m->n_hours - 2];
+        if (pv->ts == floor_hour(m->last_arc_ts))
+            archive_append_hour(m->id, pv->ts, pv->total, ts_unix);
+    }
+    archive_append_hour(m->id, bh, ft, ts_unix);
+    m->last_arc_ts = ts_unix;
+    fs_note_write(t0, true, m->id);
+}
+
 void history_on_reading(const char *id_hex, double total, int kind, uint32_t ts_unix) {
     if (!id_hex || ts_unix < 1700000000) return;  // wymaga zsynchronizowanego czasu
     // Historie zbieramy WYLACZNIE dla sledzonych licznikow. Zaslyszani sasiedzi
@@ -2178,15 +2247,22 @@ void history_on_reading(const char *id_hex, double total, int kind, uint32_t ts_
     // Archiwum godzinowe co ramke - ale tylko dla SLEDZONYCH licznikow (nie pisz
     // na flash dla kazdego zaslyszanego sasiada). To zrodlo odtwarzania stanu
     // biezacej godziny po restarcie (restore_from_archive).
-    if (ts_unix - m->last_arc_ts >= 60 || floor_hour(ts_unix) != floor_hour(m->last_arc_ts)) {
-        archive_append_hour(m->id, bh, ft, ts_unix);
-        m->last_arc_ts = ts_unix;
-    }
+    arc_maybe_write(m, bh, ft, ts_unix);
 
     // Zapis: przy zamknieciu godziny LUB co >=15 min (krzywa dnia + biezaca
     // godzina nie przepadaja przy utracie zasilania; kontrolowany restart
     // dodatkowo robi pelny history_flush()).
-    if (hour_closed || ts_unix - m->last_save_ts >= 900) save_meter(m);
+    // beta440: plik stanu raz na godzine, nie co 15 min i nie przy kazdej pelnej
+    // godzinie. Stan po restarcie odtwarza sie z archiwum (beta434), a kazdy
+    // zapis h_ to nowy plik na SPIFFS - najwiekszy powod jego zapychania sie.
+    // Po starcie pierwszy zapis dopiero po godzinie. Czas ustawiamy PRZED
+    // zapisem, zeby nieudany zapis nie byl powtarzany przy kazdej ramce.
+    (void)hour_closed;
+    if (!m->last_save_ts) m->last_save_ts = ts_unix;
+    if (ts_unix - m->last_save_ts >= HIST_SAVE_S) {
+        m->last_save_ts = ts_unix;
+        save_meter(m);
+    }
 
     hist_unlock();
 }
@@ -2260,12 +2336,19 @@ void history_on_field(const char *id_hex, const char *field, double value,
     // Archiwum godzinowe na flash dla sledzonego pola - z throttlingiem 60 s:
     // ramki co ~10 s daja 6x mniej goracych zapisow (mniejsze ryzyko przerwania
     // zapisu w chwili resetu), a kubelek i tak trzyma ostatnia wartosc godziny.
-    if (ts_unix - m->last_arc_ts >= 60 || floor_hour(ts_unix) != floor_hour(m->last_arc_ts)) {
-        archive_append_hour(m->id, bh, ft, ts_unix);
-        m->last_arc_ts = ts_unix;
-    }
+    arc_maybe_write(m, bh, ft, ts_unix);
 
-    if (hour_closed || ts_unix - m->last_save_ts >= 900) save_meter(m);
+    // beta440: plik stanu raz na godzine, nie co 15 min i nie przy kazdej pelnej
+    // godzinie. Stan po restarcie odtwarza sie z archiwum (beta434), a kazdy
+    // zapis h_ to nowy plik na SPIFFS - najwiekszy powod jego zapychania sie.
+    // Po starcie pierwszy zapis dopiero po godzinie. Czas ustawiamy PRZED
+    // zapisem, zeby nieudany zapis nie byl powtarzany przy kazdej ramce.
+    (void)hour_closed;
+    if (!m->last_save_ts) m->last_save_ts = ts_unix;
+    if (ts_unix - m->last_save_ts >= HIST_SAVE_S) {
+        m->last_save_ts = ts_unix;
+        save_meter(m);
+    }
     hist_unlock();
 }
 

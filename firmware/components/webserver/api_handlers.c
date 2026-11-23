@@ -416,6 +416,7 @@ static esp_err_t handle_system(httpd_req_t *req) {
         "\"heap_free\":%u,\"heap_min\":%u,\"heap_total\":%u,"
         "\"heap_largest\":%u,\"heap_used_pct\":%d,"
         "\"hist_used\":%u,\"hist_total\":%u,\"hist_pct\":%d,"
+        "\"fs_degraded\":%s,\"fs_worst_ms\":%u,"
         "\"flash_size\":%u,\"app_part_size\":%u,"
         "\"app_used\":%u,\"app_pct\":%d,"
         "\"temp_c\":%.1f,\"temp_ok\":%s,"
@@ -432,6 +433,7 @@ static esp_err_t handle_system(httpd_req_t *req) {
         (unsigned)heap_free, (unsigned)heap_min, (unsigned)heap_total,
         (unsigned)heap_largest, heap_used_pct,
         (unsigned)hist_used, (unsigned)hist_total, hist_pct,
+        history_fs_degraded() ? "true" : "false", (unsigned)history_fs_worst_ms(),
         (unsigned)flash_size, (unsigned)app_part_size,
         (unsigned)app_used, app_pct,
         temp_ok ? temp_c : 0.0f, temp_ok ? "true" : "false",

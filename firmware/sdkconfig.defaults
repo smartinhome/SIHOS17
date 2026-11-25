@@ -54,6 +54,11 @@ CONFIG_LWIP_TCP_SND_BUF_DEFAULT=32768
 # --- FreeRTOS tick 1ms (dla odbioru dlugich ramek wMbus bez FIFO overflow) ---
 CONFIG_FREERTOS_HZ=1000
 
+# beta445: liczniki czasu pracy zadan - z nich obciazenie procesora w System.
+# Licznik w mikrosekundach z esp_timer, narzut pomijalny.
+CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
+CONFIG_FREERTOS_RUN_TIME_COUNTER_CLK_ESP_TIMER=y
+
 # --- Wiecej gniazd LWIP (webserver + OTA jednoczesnie) ---
 # Domyslnie 10 gniazd; webserver przy auto-odswiezaniu zajmowal wszystkie,
 # przez co OTA nie moglo otworzyc gniazda TLS (Failed to create socket).

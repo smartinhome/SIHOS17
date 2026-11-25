@@ -335,6 +335,38 @@ static void system_temp_init(void) {
     }
 }
 
+// beta445: obciazenie procesora = 100% minus udzial zadania bezczynnosci (IDLE)
+// w ostatnich 5 s. Probka z timera, wiec wynik nie zalezy od tego, ile
+// przegladarek odpytuje modul. -1 = liczniki czasu wylaczone w konfiguracji.
+static volatile int s_cpu_pct = -1;
+#if configGENERATE_RUN_TIME_STATS
+static configRUN_TIME_COUNTER_TYPE s_cpu_idle_prev = 0;
+static int64_t s_cpu_t_prev = 0;
+static void cpu_sample(void *arg) {
+    (void)arg;
+    configRUN_TIME_COUNTER_TYPE idle = ulTaskGetIdleRunTimeCounter();
+    int64_t t = esp_timer_get_time();
+    if (s_cpu_t_prev) {
+        int64_t dt = t - s_cpu_t_prev;
+        int64_t di = (int64_t)(configRUN_TIME_COUNTER_TYPE)(idle - s_cpu_idle_prev);
+        if (dt > 0) {
+            int64_t busy = 100 - di * 100 / dt;
+            s_cpu_pct = busy < 0 ? 0 : (busy > 100 ? 100 : (int)busy);
+        }
+    }
+    s_cpu_idle_prev = idle;
+    s_cpu_t_prev = t;
+}
+#endif
+
+static void cpu_load_init(void) {
+#if configGENERATE_RUN_TIME_STATS
+    static esp_timer_handle_t tm = NULL;
+    const esp_timer_create_args_t ta = { .callback = cpu_sample, .name = "cpu_load" };
+    if (!tm && esp_timer_create(&ta, &tm) == ESP_OK) esp_timer_start_periodic(tm, 5000000);
+#endif
+}
+
 static const char *reset_reason_str(void) {
     switch (esp_reset_reason()) {
         case ESP_RST_POWERON:   return "wlaczenie zasilania";
@@ -419,6 +451,7 @@ static esp_err_t handle_system(httpd_req_t *req) {
         "\"heap_free\":%u,\"heap_min\":%u,\"heap_total\":%u,"
         "\"heap_largest\":%u,\"heap_used_pct\":%d,"
         "\"hist_used\":%u,\"hist_total\":%u,\"hist_pct\":%d,"
+        "\"cpu_pct\":%d,"
         "\"fs_degraded\":%s,\"fs_worst_ms\":%u,\"fs_stall_s\":%u,"
         "\"flash_size\":%u,\"app_part_size\":%u,"
         "\"app_used\":%u,\"app_pct\":%d,"
@@ -436,6 +469,7 @@ static esp_err_t handle_system(httpd_req_t *req) {
         (unsigned)heap_free, (unsigned)heap_min, (unsigned)heap_total,
         (unsigned)heap_largest, heap_used_pct,
         (unsigned)hist_used, (unsigned)hist_total, hist_pct,
+        s_cpu_pct,
         history_fs_degraded() ? "true" : "false", (unsigned)history_fs_worst_ms(), (unsigned)history_write_stall_s(),
         (unsigned)flash_size, (unsigned)app_part_size,
         (unsigned)app_used, app_pct,
@@ -1861,6 +1895,7 @@ static esp_err_t handle_wifi_scan(httpd_req_t *req) {
 
 void api_register_handlers(httpd_handle_t server) {
     system_temp_init();   // czujnik temperatury ESP32-C6
+    cpu_load_init();      // beta445: obciazenie procesora
     const httpd_uri_t handlers[] = {
         { .uri="/api/status",      .method=HTTP_GET,  .handler=handle_status,      .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/led",         .method=HTTP_GET,  .handler=handle_led,         .user_ctx=NULL, .is_websocket=false },

@@ -22,7 +22,6 @@
 #include "esp_heap_caps.h"
 #include "esp_timer.h"    // pomiar zapisow (beta438/440)
 #include "esp_system.h"   // esp_restart (beta434)
-#include "esp_attr.h"     // RTC_NOINIT_ATTR (beta434)
 #include "freertos/task.h"
 
 // FAZA 3a: helper do atomic write. Przyjmuje docelowa sciezke z ".bin" na koncu,
@@ -58,50 +57,23 @@ static bool flush_to_flash(FILE *f) {
 
 static const char *TAG = "HISTORY";
 
-// beta434: SPIFFS przy nieudanym zamknieciu pliku (blad zapisu bufora) NIE
-// zwalnia uchwytu. Po max_files takich zdarzeniach kazde otwarcie konczy sie
-// EIO az do restartu - tak modul stracil zapisy od 21.11 do restartu 23.11.
-// Teraz: bledy zamkniecia trafiaja do logu, a seria EIO przy otwieraniu
-// powoduje ponowne zamontowanie systemu plikow (zwalnia wszystkie uchwyty).
-// beta443: LittleFS nie gubi uchwytow, wiec ponowne montowanie zniknelo.
-// Licznik zostaje tylko do logu.
-static int      s_fs_eio_streak = 0;
-// beta434: straznik zakleszczen. Modul zawieszal sie w calosci (WWW, MQTT,
-// e-ink) i wracal dopiero po odcieciu zasilania - watchdog zadan w tej
-// konfiguracji tylko ostrzega. Wszystko, co czyta lub pisze historie, czeka na
-// s_mutex, wiec zadanie, ktore utknelo z ta blokada (np. w operacji SPIFFS),
-// zatrzymuje caly modul. Blokade bierzemy z nazwa funkcji; osobny task co 30 s
-// sprawdza, czy da sie ja wziac w 2 min. Jesli nie - zapisuje w pamieci RTC,
-// kto ja trzymal, i restartuje modul. Po starcie ten wpis trafia do logu.
-#define HIST_WD_PERIOD_MS  30000
-#define HIST_WD_WAIT_MS    120000
-#define HIST_WD_MAGIC      0x48574431u   // "HWD1"
-static const char *volatile s_lock_owner = NULL;
-static volatile TickType_t  s_lock_since = 0;
-RTC_NOINIT_ATTR static uint32_t s_wd_magic;
-RTC_NOINIT_ATTR static uint32_t s_wd_held_s;
-RTC_NOINIT_ATTR static char     s_wd_owner[40];
 static SemaphoreHandle_t s_mutex;
+// Blokada historii. Nazwa funkcji zostaje w wywolaniach jako opis miejsca;
+// zawieszenie z trzymana blokada lapie ogolny straznik (sih_wd, etap "historia").
 static void hist_lock(const char *who) {
-    if (!s_mutex) return;
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
-    s_lock_owner = who;
-    s_lock_since = xTaskGetTickCount();
+    (void)who;
+    if (s_mutex) xSemaphoreTake(s_mutex, portMAX_DELAY);
 }
 static void hist_unlock(void) {
-    if (!s_mutex) return;
-    s_lock_owner = NULL;
-    xSemaphoreGive(s_mutex);
+    if (s_mutex) xSemaphoreGive(s_mutex);
 }
 static bool fs_close(FILE *f, const char *path) {
     if (!f) return false;
     errno = 0;
     if (fclose(f) == 0) return true;
     ESP_LOGE(TAG, "Zamkniecie %s nieudane (errno=%d)", path ? path : "?", errno);
-    s_fs_eio_streak++;
     return false;
 }
-static void fs_write_ok(void) { s_fs_eio_streak = 0; }
 // beta443: przestoj zapisu - od kiedy archiwum godzinowe nie przyjmuje danych.
 // Panel pokazuje ostrzezenie, zanim w historii zrobi sie dziura (21.11 zapisy
 // staly 44 godziny i nikt tego nie widzial).
@@ -565,10 +537,8 @@ static void arc_note(bool ok, const char *id) {
                      (unsigned)(now - s_arc_fail_since));
         s_arc_fail_since = 0;
         s_arc_last_ok = now;
-        fs_write_ok();
         return;
     }
-    s_fs_eio_streak++;
     if (!s_arc_fail_since) {
         s_arc_fail_since = now;
         ESP_LOGE(TAG, "Zapis archiwum %s nieudany - historia nie jest zapisywana", id ? id : "?");
@@ -759,18 +729,11 @@ static bool save_meter_raw(meter_hist_t *m) {
     // srodku fwrite() zostawia .tmp jako smiec (zignorowany przy starcie),
     // ale oryginalny .bin jest nadal caly - historia sie nie traci.
     char tmp[64]; path_to_tmp(path, tmp, sizeof(tmp));
-    // beta438: pierwsze zapisy po starcie w logu - modul stawal tuz po
-    // pierwszej ramce, czyli przy pierwszym zapisie pliku stanu. Ostatnia linia
-    // przed zawieszeniem pokaze, ktory zapis go zatrzymal.
-    static int s_save_log_n = 0;
-    bool lg = s_save_log_n < 30;
-    if (lg) { s_save_log_n++; ESP_LOGI(TAG, "zapis stanu %s - start", m->id); }
     errno = 0;
     FILE *f = fopen(tmp, "wb");
     if (!f) {
         int e = errno;
         ESP_LOGW(TAG, "nie moge zapisac %s (errno=%d)", tmp, e);
-        s_fs_eio_streak++;
         return false;
     }
     // Naglowek v1: magic + version + CRC placeholder (0). Prawdziwe CRC
@@ -842,8 +805,6 @@ static bool save_meter_raw(meter_hist_t *m) {
         return false;
     }
     m->last_save_ts = m->last_ts;
-    fs_write_ok();
-    if (lg) ESP_LOGI(TAG, "zapis stanu %s - OK", m->id);
     return true;
 }
 
@@ -1342,38 +1303,8 @@ static void hist_recover_stale_tmp(void) {
     }
 }
 
-static void hist_wd_task(void *arg) {
-    (void)arg;
-    while (1) {
-        vTaskDelay(pdMS_TO_TICKS(HIST_WD_PERIOD_MS));
-        if (!s_mutex) continue;
-        if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(HIST_WD_WAIT_MS)) == pdTRUE) {
-            xSemaphoreGive(s_mutex);
-            continue;
-        }
-        const char *who = s_lock_owner;
-        uint32_t held = (uint32_t)((xTaskGetTickCount() - s_lock_since) * portTICK_PERIOD_MS / 1000);
-        snprintf(s_wd_owner, sizeof(s_wd_owner), "%s", who ? who : "?");
-        s_wd_held_s = held;
-        s_wd_magic = HIST_WD_MAGIC;
-        ESP_LOGE(TAG, "Blokada historii trzymana przez %s od %u s - restart modulu",
-                 s_wd_owner, (unsigned)held);
-        vTaskDelay(pdMS_TO_TICKS(200));   // log zdazy wyjsc na UART
-        esp_restart();
-    }
-}
-
 void history_init(void) {
     s_mutex = xSemaphoreCreateMutex();
-    if (s_wd_magic == HIST_WD_MAGIC) {
-        s_wd_owner[sizeof(s_wd_owner) - 1] = 0;
-        ESP_LOGE(TAG, "Poprzedni restart: straznik historii - blokada trzymana przez %s od %u s",
-                 s_wd_owner, (unsigned)s_wd_held_s);
-    }
-    s_wd_magic = 0;
-    // Priorytet 10: powyzej wmbus_work (6) i HTTP - straznik musi dostac CPU
-    // takze wtedy, gdy zadanie z blokada krazy w petli.
-    xTaskCreate(hist_wd_task, "hist_wd", 3072, NULL, 10, NULL);
     // beta443: LittleFS zamiast SPIFFS. Pierwszy start po aktualizacji przenosi
     // historie (hist_migrate.c) - kilkanascie sekund do minuty.
     if (!hist_fs_mount()) {

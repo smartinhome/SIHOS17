@@ -1,5 +1,6 @@
 #include "api_handlers.h"
 #include "auth.h"
+#include "weather.h"
 #include "sih_wd.h"
 #include "display_eink.h"
 #include <time.h>
@@ -37,6 +38,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <dirent.h>
+#include <math.h>     // beta446: fabs (pogoda)
 
 static const char *TAG = "API";
 
@@ -1862,6 +1864,43 @@ bad:
 }
 
 
+// GET  /api/weather -> stan i ustawienia pogody
+// POST /api/weather {"enabled":bool,"city":"...","lat":..,"lon":..,"interval":30}
+//                   albo {"action":"refresh"}
+// beta446: pogoda tylko na e-inku; miejscowosc wyszukuje przegladarka.
+static esp_err_t handle_weather(httpd_req_t *req) {
+    char buf[384];
+    if (req->method == HTTP_POST) {
+        int n = read_body(req, buf, sizeof(buf));
+        cJSON *j = n > 0 ? cJSON_Parse(buf) : NULL;
+        if (!j) { resp_err(req, "zly JSON"); return ESP_OK; }
+        const cJSON *act = cJSON_GetObjectItemCaseSensitive(j, "action");
+        if (cJSON_IsString(act) && strcmp(act->valuestring, "refresh") == 0) {
+            weather_refresh_now();
+        } else {
+            const cJSON *en = cJSON_GetObjectItemCaseSensitive(j, "enabled");
+            const cJSON *ci = cJSON_GetObjectItemCaseSensitive(j, "city");
+            const cJSON *la = cJSON_GetObjectItemCaseSensitive(j, "lat");
+            const cJSON *lo = cJSON_GetObjectItemCaseSensitive(j, "lon");
+            const cJSON *iv = cJSON_GetObjectItemCaseSensitive(j, "interval");
+            bool have_place = cJSON_IsString(ci) && cJSON_IsNumber(la) && cJSON_IsNumber(lo) &&
+                              fabs(la->valuedouble) <= 90 && fabs(lo->valuedouble) <= 180;
+            weather_configure(cJSON_IsTrue(en),
+                              have_place ? ci->valuestring : NULL,
+                              have_place ? (float)la->valuedouble : 0,
+                              have_place ? (float)lo->valuedouble : 0,
+                              cJSON_IsNumber(iv) ? iv->valueint : 0);
+            display_eink_wake();   // strona pogody pojawia sie / znika od razu
+        }
+        cJSON_Delete(j);
+        resp_ok(req);
+        return ESP_OK;
+    }
+    weather_status_json(buf, sizeof(buf));
+    resp_json(req, buf);
+    return ESP_OK;
+}
+
 static esp_err_t handle_logs(httpd_req_t *req) {
     // Bufor alokowany dynamicznie tylko na czas zadania (zamiast 16KB na stale w RAM).
     char *logbuf = malloc(16384);
@@ -1950,6 +1989,8 @@ void api_register_handlers(httpd_handle_t server) {
         { .uri="/api/backup",      .method=HTTP_GET,  .handler=handle_backup_get,  .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/backup",      .method=HTTP_POST, .handler=handle_backup_post, .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/logs",        .method=HTTP_GET,  .handler=handle_logs,        .user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/weather",     .method=HTTP_GET,  .handler=handle_weather,     .user_ctx=NULL, .is_websocket=false },
+        { .uri="/api/weather",     .method=HTTP_POST, .handler=handle_weather,     .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/time",        .method=HTTP_GET,  .handler=handle_time,        .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/time",        .method=HTTP_POST, .handler=handle_time,        .user_ctx=NULL, .is_websocket=false },
         { .uri="/api/logs/cfg",    .method=HTTP_GET,  .handler=handle_logs_cfg,    .user_ctx=NULL, .is_websocket=false },

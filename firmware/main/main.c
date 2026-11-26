@@ -21,6 +21,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "sih_wd.h"
+#include "weather.h"
 
 static const char *TAG = "MAIN";
 
@@ -58,6 +59,9 @@ void app_main(void) {
 
     // WiFi (STA + fallback AP)
     wifi_manager_init();
+
+    // beta446: pogoda na e-inku (domyslnie wylaczona) - przed e-inkiem, zeby znal strone
+    weather_init();
 
     // Radio CC1101
     cc1101_config_t radio_cfg = {

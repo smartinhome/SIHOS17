@@ -6,6 +6,9 @@
 #include "wmbus_decoder.h"
 #include "wifi_manager.h"
 #include "nvs_config.h"
+#include "weather.h"         // beta446: strona pogody
+#include "weather_icons.h"   // beta446: ikony MDI 32/24 px
+#include <math.h>
 #include <stdio.h>
 #include <time.h>
 #include <string.h>
@@ -951,6 +954,114 @@ static void draw_clock_page(int page_no, int total_pages) {
     fb_draw_text_center(&F16, LCD_W / 2, CLOCK_DATE_Y, date);
 }
 
+
+// ---------- beta446: strona pogody (Open-Meteo, ikony Material Design) ----------
+// Uklad jak w zaakceptowanej makiecie: jasny naglowek, teraz po lewej, trzy
+// wartosci po prawej, na dole trzy kolejne dni. Tylko e-ink - bez MQTT/ESPHome.
+static const char *PL_WD3[7] = { "nd", "pon", "wt", "śr", "czw", "pt", "sob" };
+
+static weather_icon_t wmo_icon(int c, const char **desc) {
+    const char *d = ""; weather_icon_t i = WI_CLOUDY;
+    if (c == 0)                         { d = "bezchmurnie"; i = WI_SUNNY; }
+    else if (c == 1 || c == 2)          { d = "małe zachm."; i = WI_PARTLY; }
+    else if (c == 3)                    { d = "pochmurno";   i = WI_CLOUDY; }
+    else if (c == 45 || c == 48)        { d = "mgła";        i = WI_FOG; }
+    else if (c >= 51 && c <= 57)        { d = "mżawka";      i = WI_RAINY; }
+    else if (c == 65 || c == 67 || c == 82) { d = "ulewa";   i = WI_POURING; }
+    else if ((c >= 61 && c <= 67) || (c >= 80 && c <= 82)) { d = "deszcz"; i = WI_RAINY; }
+    else if (c == 75 || c == 86)        { d = "śnieżyca";    i = WI_SNOWY_HEAVY; }
+    else if ((c >= 71 && c <= 77) || c == 85) { d = "śnieg"; i = WI_SNOWY; }
+    else if (c >= 95)                   { d = "burza";       i = WI_LIGHTNING; }
+    if (desc) *desc = d;
+    return i;
+}
+
+static void fmt_deg(char *b, int cap, float v) {
+    if (isnan(v)) { snprintf(b, cap, "--°"); return; }
+    long r = lroundf(v);
+    snprintf(b, cap, "%ld°", r == 0 ? 0L : r);
+}
+
+static void dots_h(int x, int y, int w) { for (int i = x; i < x + w; i += 2) fb_set_pixel(i, y, 1); }
+static void dots_v(int x, int y, int h) { for (int j = y; j < y + h; j += 2) fb_set_pixel(x, j, 1); }
+
+static void draw_weather_page(int page_no, int total_pages) {
+    (void)page_no; (void)total_pages;
+    fb_clear_white();
+    fb_draw_text(&F16, 3, 0, "Pogoda");
+    fb_draw_text(&F14, 3 + fb_text_width(&F16, "Pogoda") + 8, 1, weather_city());
+    for (int i = 0; i < LCD_W; i++) fb_set_pixel(i, 17, 1);
+
+    weather_data_t d;
+    if (!weather_get(&d)) {
+        fb_draw_text(&F16, 6, 40, "Czekam na dane pogody");
+        fb_draw_text(&F14, 6, 62, "Moduł pobiera je z Open-Meteo,");
+        fb_draw_text(&F14, 6, 76, "gdy ma internet i ustawioną");
+        fb_draw_text(&F14, 6, 90, "miejscowość (System).");
+        return;
+    }
+    // czas pomiaru w naglowku
+    time_t tt = d.ts; struct tm tm; localtime_r(&tt, &tm);
+    char hdr[16];
+    snprintf(hdr, sizeof(hdr), "%s %02d:%02d", PL_WD3[(tm.tm_wday >= 0 && tm.tm_wday < 7) ? tm.tm_wday : 0], tm.tm_hour, tm.tm_min);
+    fb_draw_text(&F14, LCD_W - 4 - fb_text_width(&F14, hdr), 1, hdr);
+
+    // teraz
+    const char *desc;
+    weather_icon_t ic = wmo_icon(d.code, &desc);
+    fb_draw_bitmap(4, 21, WI32[ic], 32, 4, 1);
+    char b[24];
+    fmt_deg(b, sizeof(b), d.temp);
+    fb_draw_text(&F24, 44, 22, b);
+    fb_draw_text(&F14, 44, 46, desc);
+    char od[32]; fmt_deg(b, sizeof(b), d.apparent);
+    snprintf(od, sizeof(od), "odczuwalna %s", b);
+    fb_draw_text(&F14, 4, 62, od);
+
+    // prawa kolumna
+    dots_v(124, 20, 60);
+    char v1[8], v2[8], v3[12];
+    snprintf(v1, sizeof(v1), "%u", (unsigned)d.humidity);
+    snprintf(v2, sizeof(v2), "%ld", lroundf(d.wind));
+    const char *l3, *u3;
+    if (d.precip > 0.05f) {
+        snprintf(v3, sizeof(v3), "%.1f", d.precip);
+        for (char *p = v3; *p; p++) if (*p == '.') *p = ',';
+        l3 = "opady"; u3 = "mm";
+    } else {
+        snprintf(v3, sizeof(v3), "%ld", lroundf(d.pressure));
+        l3 = "ciśn."; u3 = "hPa";
+    }
+    const char *lbl[3] = { "wilgotność", "wiatr", l3 };
+    const char *val[3] = { v1, v2, v3 };
+    const char *unit[3] = { "%", "km/h", u3 };
+    for (int i = 0, y = 21; i < 3; i++, y += 19) {
+        fb_draw_text(&F14, 130, y, lbl[i]);
+        int r = 246 - fb_text_width(&F14, unit[i]) - 2;
+        fb_draw_text(&F14, r + 2, y + 1, unit[i]);
+        fb_draw_text(&F16, r - fb_text_width(&F16, val[i]), y - 1, val[i]);
+        dots_h(130, y + 16, 117);
+    }
+    for (int i = 0; i < LCD_W; i++) fb_set_pixel(i, 80, 1);
+
+    // trzy kolejne dni
+    int cw = LCD_W / 3;
+    for (int i = 0; i < 3 && i + 1 < d.ndays; i++) {
+        const weather_day_t *w = &d.day[i + 1];
+        int x = i * cw;
+        if (i) dots_v(x, 83, 38);
+        fb_draw_text(&F14, x + 6, 83, PL_WD3[w->wday % 7]);
+        fb_draw_bitmap(x + cw - 30, 82, WI24[wmo_icon(w->code, NULL)], 24, 3, 1);
+        char mx[8], mn[8];
+        fmt_deg(mx, sizeof(mx), w->tmax);
+        fmt_deg(mn, sizeof(mn), w->tmin);
+        fb_draw_text(&F16, x + 6, 103, mx);
+        fb_draw_text(&F14, x + 6 + fb_text_width(&F16, mx) + 6, 105, mn);
+    }
+}
+
+static int total_pages_count(void);
+
 static void rebuild_pages(void) {
     // beta393: strona = licznik PRZYPIETY do dashboardu, ktory ma pola w
     // historii. Dotad liczyla sie sama historia, a przypiecie dokladalo
@@ -971,17 +1082,22 @@ static void rebuild_pages(void) {
             break;
         }
     }
-    if (s_cur_page >= s_page_count + (nvs_config_eink_clock() ? 1 : 0)) s_cur_page = 0;
+    if (s_cur_page >= total_pages_count()) s_cur_page = 0;
 }
 
 // Zegar jest doklejany jako strona o indeksie s_page_count, czyli zawsze
 // ostatnia. Gdy nie ma zadnego sledzonego pola, zostaje jedyna - i wtedy
 // zastepuje ekran diagnostyczny.
+// beta446: strona pogody (gdy wlaczona) stoi miedzy licznikami a zegarem.
+static int weather_pages(void) { return weather_enabled() ? 1 : 0; }
+static bool is_weather_page(int idx) {
+    return weather_enabled() && idx == s_page_count;
+}
 static bool is_clock_page(int idx) {
-    return nvs_config_eink_clock() && idx == s_page_count;
+    return nvs_config_eink_clock() && idx == s_page_count + weather_pages();
 }
 static int total_pages_count(void) {
-    return s_page_count + (nvs_config_eink_clock() ? 1 : 0);
+    return s_page_count + weather_pages() + (nvs_config_eink_clock() ? 1 : 0);
 }
 
 // Wspolny rysunek biezacej strony. Wolac pod eink_lock().
@@ -991,8 +1107,9 @@ static void draw_current_locked(void) {
     int total = total_pages_count();
     if (total == 0) { draw_diag(); return; }
     if (s_cur_page < 0 || s_cur_page >= total) s_cur_page = 0;
-    if (is_clock_page(s_cur_page)) draw_clock_page(s_cur_page + 1, total);
-    else                           draw_meter_page(s_page_ids[s_cur_page], s_cur_page + 1, total);
+    if (is_clock_page(s_cur_page))        draw_clock_page(s_cur_page + 1, total);
+    else if (is_weather_page(s_cur_page)) draw_weather_page(s_cur_page + 1, total);
+    else                                  draw_meter_page(s_page_ids[s_cur_page], s_cur_page + 1, total);
     eink_refresh();
 }
 

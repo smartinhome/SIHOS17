@@ -133,7 +133,7 @@ static void set_err(const char *e) {
 }
 
 static bool fetch(void) {
-    char url[384];
+    char url[512];
     snprintf(url, sizeof(url),
              "https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f"
              "&current=temperature_2m,apparent_temperature,relative_humidity_2m,precipitation,"

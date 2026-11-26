@@ -1002,7 +1002,7 @@ static void draw_weather_page(int page_no, int total_pages) {
     }
     // czas pomiaru w naglowku
     time_t tt = d.ts; struct tm tm; localtime_r(&tt, &tm);
-    char hdr[16];
+    char hdr[40];   // beta447: zapas pod -Werror=format-truncation (GCC)
     snprintf(hdr, sizeof(hdr), "%s %02d:%02d", PL_WD3[(tm.tm_wday >= 0 && tm.tm_wday < 7) ? tm.tm_wday : 0], tm.tm_hour, tm.tm_min);
     fb_draw_text(&F14, LCD_W - 4 - fb_text_width(&F14, hdr), 1, hdr);
 
@@ -1014,13 +1014,13 @@ static void draw_weather_page(int page_no, int total_pages) {
     fmt_deg(b, sizeof(b), d.temp);
     fb_draw_text(&F24, 44, 22, b);
     fb_draw_text(&F14, 44, 46, desc);
-    char od[32]; fmt_deg(b, sizeof(b), d.apparent);
+    char od[48]; fmt_deg(b, sizeof(b), d.apparent);   // beta447: 11 + 23 + 1 bajtow
     snprintf(od, sizeof(od), "odczuwalna %s", b);
     fb_draw_text(&F14, 4, 62, od);
 
     // prawa kolumna
     dots_v(124, 20, 60);
-    char v1[8], v2[8], v3[12];
+    char v1[16], v2[24], v3[48];
     snprintf(v1, sizeof(v1), "%u", (unsigned)d.humidity);
     snprintf(v2, sizeof(v2), "%ld", lroundf(d.wind));
     const char *l3, *u3;
@@ -1052,7 +1052,7 @@ static void draw_weather_page(int page_no, int total_pages) {
         if (i) dots_v(x, 83, 38);
         fb_draw_text(&F14, x + 6, 83, PL_WD3[w->wday % 7]);
         fb_draw_bitmap(x + cw - 30, 82, WI24[wmo_icon(w->code, NULL)], 24, 3, 1);
-        char mx[8], mn[8];
+        char mx[24], mn[24];
         fmt_deg(mx, sizeof(mx), w->tmax);
         fmt_deg(mn, sizeof(mn), w->tmin);
         fb_draw_text(&F16, x + 6, 103, mx);

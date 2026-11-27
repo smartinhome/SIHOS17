@@ -989,7 +989,8 @@ static void draw_weather_page(int page_no, int total_pages) {
     (void)page_no; (void)total_pages;
     fb_clear_white();
     fb_draw_text(&F16, 3, 0, "Pogoda");
-    fb_draw_text(&F14, 3 + fb_text_width(&F16, "Pogoda") + 8, 1, weather_city());
+    // beta448: F14 i F16 maja te sama linie bazowa (ascent 12) - to samo y = rowno
+    fb_draw_text(&F14, 3 + fb_text_width(&F16, "Pogoda") + 8, 0, weather_city());
     for (int i = 0; i < LCD_W; i++) fb_set_pixel(i, 17, 1);
 
     weather_data_t d;
@@ -1004,7 +1005,7 @@ static void draw_weather_page(int page_no, int total_pages) {
     time_t tt = d.ts; struct tm tm; localtime_r(&tt, &tm);
     char hdr[40];   // beta447: zapas pod -Werror=format-truncation (GCC)
     snprintf(hdr, sizeof(hdr), "%s %02d:%02d", PL_WD3[(tm.tm_wday >= 0 && tm.tm_wday < 7) ? tm.tm_wday : 0], tm.tm_hour, tm.tm_min);
-    fb_draw_text(&F14, LCD_W - 4 - fb_text_width(&F14, hdr), 1, hdr);
+    fb_draw_text(&F14, LCD_W - 4 - fb_text_width(&F14, hdr), 0, hdr);
 
     // teraz
     const char *desc;
@@ -1038,8 +1039,8 @@ static void draw_weather_page(int page_no, int total_pages) {
     for (int i = 0, y = 21; i < 3; i++, y += 19) {
         fb_draw_text(&F14, 130, y, lbl[i]);
         int r = 246 - fb_text_width(&F14, unit[i]) - 2;
-        fb_draw_text(&F14, r + 2, y + 1, unit[i]);
-        fb_draw_text(&F16, r - fb_text_width(&F16, val[i]), y - 1, val[i]);
+        fb_draw_text(&F14, r + 2, y, unit[i]);
+        fb_draw_text(&F16, r - fb_text_width(&F16, val[i]), y, val[i]);
         dots_h(130, y + 16, 117);
     }
     for (int i = 0; i < LCD_W; i++) fb_set_pixel(i, 80, 1);
@@ -1056,7 +1057,7 @@ static void draw_weather_page(int page_no, int total_pages) {
         fmt_deg(mx, sizeof(mx), w->tmax);
         fmt_deg(mn, sizeof(mn), w->tmin);
         fb_draw_text(&F16, x + 6, 103, mx);
-        fb_draw_text(&F14, x + 6 + fb_text_width(&F16, mx) + 6, 105, mn);
+        fb_draw_text(&F14, x + 6 + fb_text_width(&F16, mx) + 6, 103, mn);
     }
 }
 
